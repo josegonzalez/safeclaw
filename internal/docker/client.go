@@ -36,8 +36,11 @@ type PortBinding struct {
 
 // Container is the subset of `docker inspect` output safeclaw uses.
 type Container struct {
-	Name  string `json:"Name"`
-	Image string `json:"Image"`
+	Name   string `json:"Name"`
+	Image  string `json:"Image"`
+	Config struct {
+		Labels map[string]string `json:"Labels"`
+	} `json:"Config"`
 	State struct {
 		Status  string `json:"Status"`
 		Running bool   `json:"Running"`
@@ -51,6 +54,11 @@ type Container struct {
 // ShortName returns the container name without docker's leading slash.
 func (c Container) ShortName() string {
 	return strings.TrimPrefix(c.Name, "/")
+}
+
+// Label returns the value of a container label, or "".
+func (c Container) Label(key string) string {
+	return c.Config.Labels[key]
 }
 
 // HostPort returns the host port bound to the given container port, or 0.
@@ -174,9 +182,10 @@ func (c *Client) Stop(ctx context.Context, name string, timeout int) error {
 	return err
 }
 
-// Remove removes a container.
+// Remove removes a container along with its anonymous volumes. Bind mounts
+// and named volumes are left alone.
 func (c *Client) Remove(ctx context.Context, name string, force bool) error {
-	args := []string{"rm"}
+	args := []string{"rm", "-v"}
 	if force {
 		args = append(args, "-f")
 	}

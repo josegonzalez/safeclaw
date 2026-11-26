@@ -223,6 +223,13 @@ iframe {
     color: #c9c5c0;
     text-decoration: none;
 }
+.badge {
+    border: 1px solid #4a4540;
+    color: #b0b8c0;
+    font-size: 11px;
+    padding: 0 5px;
+    border-radius: 4px;
+}
 .session-name:hover {
     color: #d4a55a;
 }

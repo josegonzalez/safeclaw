@@ -58,6 +58,25 @@ Opens at http://localhost:7680 with:
 - All sessions listed with start/stop/delete controls
 - Live iframe views of active sessions, updated as containers change
 
+## Sandboxes for untrusted files
+
+A sandbox is a headless container for opening untrusted files, such as PDFs, archives, or emails that haven't been checked. It gets no secrets, git config, web terminal, or Claude Code, has no network, and runs as an unprivileged user that can't read `/home/sclaw`. See [architecture](docs/architecture.md#sandboxes) for the full list of defaults.
+
+```bash
+# Create a sandbox, mounting a host directory read-only
+safeclaw sandbox run -s triage -v ~/inbox:/in
+
+# Run commands as the sandbox user
+safeclaw sandbox exec triage -- unzip -l /in/report.zip
+safeclaw sandbox exec -i triage -- python3 - < extract.py
+
+# Copy files into the writable /sandbox directory
+docker cp report.zip safeclaw-triage:/sandbox/
+
+# Remove it along with its /sandbox volume
+safeclaw sandbox rm -f triage
+```
+
 ## What's included
 
 - Ubuntu 26.04
@@ -111,10 +130,15 @@ You can add any additional secrets with `safeclaw env` or by creating files in t
 | `safeclaw new` | Same as `run` but never prompts (used by the dashboard) |
 | `safeclaw dashboard` | Web dashboard for managing sessions |
 | `safeclaw env` | Manage environment variables (list, add, delete) |
-| `safeclaw ls` | List sessions |
+| `safeclaw ls` | List sessions and sandboxes |
 | `safeclaw stop NAME` | Stop a session |
 | `safeclaw rm NAME` | Delete a session container (history is kept) |
 | `safeclaw attach NAME` | Attach to a session's tmux session in this terminal |
+| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory read-only, `--memory`, `--pids-limit`, and `--cpus` set limits. |
+| `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY) |
+| `safeclaw sandbox ls` | List sandboxes |
+| `safeclaw sandbox stop NAME` | Stop a sandbox |
+| `safeclaw sandbox rm NAME` | Delete a sandbox and its `/sandbox` volume |
 | `safeclaw completion SHELL` | Shell completions |
 | `safeclaw version` | Version information |
 

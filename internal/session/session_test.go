@@ -19,8 +19,9 @@ import (
 type fakeContainer struct {
 	Running bool
 	Port    int
-	Mounts  []string // source:destination bind mounts
+	Mounts  []string // source:destination bind mounts, or a bare anonymous volume path
 	Image   string
+	Labels  map[string]string
 }
 
 // world is a tiny fake docker daemon.
@@ -40,21 +41,29 @@ func (w *world) inspectJSON(names []string) []byte {
 		}
 		var mounts []map[string]string
 		for _, m := range c.Mounts {
-			src, dst, _ := strings.Cut(m, ":")
+			src, dst, ok := strings.Cut(m, ":")
+			if !ok {
+				mounts = append(mounts, map[string]string{"Type": "volume", "Source": "/var/lib/docker/volumes/anon", "Destination": m})
+				continue
+			}
+			dst, _, _ = strings.Cut(dst, ":")
 			mounts = append(mounts, map[string]string{"Type": "bind", "Source": src, "Destination": dst})
+		}
+		bindings := map[string]any{}
+		if c.Port > 0 {
+			bindings["7681/tcp"] = []map[string]string{{"HostIp": "127.0.0.1", "HostPort": fmt.Sprint(c.Port)}}
 		}
 		status := "exited"
 		if c.Running {
 			status = "running"
 		}
 		out = append(out, map[string]any{
-			"Name":  "/" + n,
-			"Image": c.Image,
-			"State": map[string]any{"Status": status, "Running": c.Running},
-			"HostConfig": map[string]any{"PortBindings": map[string]any{
-				"7681/tcp": []map[string]string{{"HostIp": "127.0.0.1", "HostPort": fmt.Sprint(c.Port)}},
-			}},
-			"Mounts": mounts,
+			"Name":       "/" + n,
+			"Image":      c.Image,
+			"Config":     map[string]any{"Labels": c.Labels},
+			"State":      map[string]any{"Status": status, "Running": c.Running},
+			"HostConfig": map[string]any{"PortBindings": bindings},
+			"Mounts":     mounts,
 		})
 	}
 	b, _ := json.Marshal(out)
@@ -85,17 +94,21 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		var name string
 		var port int
 		var mounts []string
+		labels := map[string]string{}
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
 			case "--name":
 				name = args[i+1]
+			case "--label":
+				k, v, _ := strings.Cut(args[i+1], "=")
+				labels[k] = v
 			case "-p":
 				_, _ = fmt.Sscanf(args[i+1], "127.0.0.1:%d:7681", &port)
 			case "-v":
 				mounts = append(mounts, args[i+1])
 			}
 		}
-		w.containers[name] = &fakeContainer{Running: true, Port: port, Mounts: mounts, Image: w.image}
+		w.containers[name] = &fakeContainer{Running: true, Port: port, Mounts: mounts, Image: w.image, Labels: labels}
 		return []byte("id\n"), nil
 	case args[0] == "rm":
 		delete(w.containers, args[len(args)-1])
@@ -239,7 +252,7 @@ func TestEnsureVolumeRecreates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !hasCall(r, "rm -f safeclaw-p") {
+	if !hasCall(r, "rm -v -f safeclaw-p") {
 		t.Error("container not removed")
 	}
 	if res.Port != 7705 {
@@ -313,6 +326,7 @@ func TestList(t *testing.T) {
 		"safeclaw-zeta":  {Running: true, Port: 7682, Mounts: []string{"/s:/home/sclaw/.claude/projects", "/p:/home/sclaw/p"}},
 		"safeclaw-alpha": {Port: 7681, Mounts: []string{"/s:/home/sclaw/.claude/projects"}},
 		"safeclaw-beta":  {Running: true, Port: 7683},
+		"safeclaw-box":   {Running: true, Mounts: []string{"/sandbox", "/in:/in:ro"}, Labels: sandboxLabels},
 	}}
 	m, _ := newTestManager(t, w)
 	list, err := m.List(context.Background())
@@ -323,14 +337,21 @@ func TestList(t *testing.T) {
 	for _, s := range list {
 		names = append(names, s.Name)
 	}
-	if !slices.Equal(names, []string{"beta", "zeta", "alpha"}) {
+	if !slices.Equal(names, []string{"beta", "box", "zeta", "alpha"}) {
 		t.Errorf("order = %v, want active first then by name", names)
 	}
-	if list[1].Volume != "/p:/home/sclaw/p" || list[2].Volume != "-" {
-		t.Errorf("volumes = %q, %q", list[1].Volume, list[2].Volume)
+	if list[2].Volume != "/p:/home/sclaw/p" || list[3].Volume != "-" {
+		t.Errorf("volumes = %q, %q", list[2].Volume, list[3].Volume)
 	}
-	if list[2].URL != "" || list[0].URL != "http://localhost:7683" {
-		t.Errorf("urls = %q, %q", list[0].URL, list[2].URL)
+	if list[3].URL != "" || list[0].URL != "http://localhost:7683" {
+		t.Errorf("urls = %q, %q", list[0].URL, list[3].URL)
+	}
+	box := list[1]
+	if !box.IsSandbox() || box.Type != "sandbox" || box.URL != "" || box.Port != 0 || box.Volume != "/in:/in" {
+		t.Errorf("sandbox = %+v", box)
+	}
+	if list[0].Type != "session" || list[0].IsSandbox() {
+		t.Errorf("unlabelled container type = %q, want session", list[0].Type)
 	}
 }
 

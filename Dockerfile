@@ -50,8 +50,13 @@ RUN apt-get update && \
     npm install -g yarn && \
     # clean apt cache
     rm -rf /var/lib/apt/lists/* && \
-    # Create the sclaw user
-    useradd --create-home --shell /bin/bash sclaw
+    # Create the sclaw user, with a home only it can read
+    useradd --create-home --shell /bin/bash sclaw && \
+    chmod 700 /home/sclaw && \
+    # Create the unprivileged, non-login user sandboxes run as
+    useradd --uid 2000 --user-group --no-create-home --home-dir /sandbox --shell /usr/sbin/nologin sandbox && \
+    mkdir -m 700 /sandbox && \
+    chown sandbox:sandbox /sandbox
 
 # === INSTALL Playwright MCP + browsers ===
 

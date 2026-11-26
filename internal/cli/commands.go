@@ -152,13 +152,13 @@ func newListCommand() *cobra.Command {
 				return err
 			}
 			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 3, ' ', 0)
-			fmt.Fprintln(w, "SESSION\tSTATUS\tURL\tVOLUME")
+			fmt.Fprintln(w, "SESSION\tTYPE\tSTATUS\tURL\tVOLUME")
 			for _, s := range list {
 				url := s.URL
 				if url == "" {
 					url = "-"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.Name, s.Status, url, s.Volume)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.Name, s.Type, s.Status, url, s.Volume)
 			}
 			return w.Flush()
 		},
@@ -172,7 +172,11 @@ func newStopCommand() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessions,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return session.NewManager(nil).Stop(cmd.Context(), args[0])
+			m := session.NewManager(nil)
+			if err := m.RequireType(cmd.Context(), args[0], config.TypeSession); err != nil {
+				return err
+			}
+			return m.Stop(cmd.Context(), args[0])
 		},
 	}
 }
@@ -186,7 +190,11 @@ func newRemoveCommand() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessions,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return session.NewManager(nil).Delete(cmd.Context(), args[0], force)
+			m := session.NewManager(nil)
+			if err := m.RequireType(cmd.Context(), args[0], config.TypeSession); err != nil {
+				return err
+			}
+			return m.Delete(cmd.Context(), args[0], force)
 		},
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "remove a running session too")
@@ -199,7 +207,10 @@ func newAttachCommand() *cobra.Command {
 		Short:             "Attach to a session's tmux session in this terminal",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessions,
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := session.NewManager(nil).RequireType(cmd.Context(), args[0], config.TypeSession); err != nil {
+				return err
+			}
 			bin, err := exec.LookPath("docker")
 			if err != nil {
 				return err

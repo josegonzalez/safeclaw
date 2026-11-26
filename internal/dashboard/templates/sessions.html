@@ -7,8 +7,13 @@
         <tbody>
         {{- range .Sessions}}
             <tr id="row-{{.Container}}" class="{{if not .Active}}inactive-row{{end}}" data-name="{{.Container}}">
+                {{- if .IsSandbox}}
+                <td><span class="session-name">{{.Name}}</span> <span class="badge" title="headless sandbox: manage with safeclaw sandbox">sandbox</span></td>
+                <td id="url-{{.Container}}" class="inactive">-</td>
+                {{- else}}
                 <td><a href="#" class="session-name" hx-get="/sessions/{{.Name}}/info" hx-target="#session-info">{{.Name}}</a></td>
                 <td id="url-{{.Container}}">{{if .Active}}<a href="{{.URL}}" target="_blank">{{display .URL}}</a>{{else}}{{template "action" (action .Name "start" "")}}{{end}}</td>
+                {{- end}}
                 <td class="volume">{{.Volume}}</td>
                 <td id="actions-{{.Container}}">{{if .Active}}{{template "action" (action .Name "stop" "")}}{{else}}{{template "action" (action .Name "delete" "")}}{{end}}</td>
             </tr>
