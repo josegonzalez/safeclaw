@@ -1,0 +1,62 @@
+{{define "page"}}<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>SafeClaw</title>
+    <meta name="htmx-config" content='{"defaultTimeout": 300000}'>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/htmx.min.js"></script>
+    <script src="/static/ext/hx-sse.min.js"></script>
+    <script src="/static/app.js" defer></script>
+</head>
+<body>
+    <div id="events" hx-sse:connect="/events" hidden></div>
+    <header>
+        <h1><span>safeclaw</span> <em>sessions</em></h1>
+        <button class="new-btn" type="button" data-open-dialog="new-session-modal">+ new</button>
+    </header>
+
+    <div id="sessions" hx-get="/fragments/sessions" hx-trigger="sessions from:body" hx-swap="innerMorph">
+        {{template "sessions" .}}
+    </div>
+
+    {{template "frames" .}}
+
+    <dialog id="new-session-modal" class="modal">
+        <form hx-post="/sessions" hx-target="#create-error" hx-disable="find input, find button" autocomplete="off">
+            <h2>new session</h2>
+            <p class="modal-subtitle">each session runs in its own isolated container</p>
+            <div class="modal-field">
+                <label for="session-name">session name</label>
+                <input type="text" id="session-name" name="name" placeholder="default" autofocus
+                       hx-get="/sessions/validate" hx-include="this" hx-trigger="input changed delay:150ms, focus"
+                       hx-target="#session-name-hint" hx-swap="outerHTML">
+                {{template "name-hint"}}
+            </div>
+            <div class="modal-field">
+                <label for="session-volume">volume mount</label>
+                <input type="text" id="session-volume" name="volume" placeholder="~/myproject:/home/sclaw/myproject">
+            </div>
+            <div class="modal-field">
+                <label for="session-query">initial query</label>
+                <input type="text" id="session-query" name="query" placeholder="Research topic X...">
+            </div>
+            <div class="modal-field-checkbox">
+                <input type="checkbox" id="session-open-tab" name="open_tab" value="1">
+                <label for="session-open-tab">open in new tab</label>
+            </div>
+            <div id="create-error" class="modal-error"></div>
+            <div class="modal-actions">
+                <button class="modal-cancel" type="button" data-close-dialog>cancel</button>
+                <button class="modal-submit" type="submit"><span class="idle">create</span><span class="busy">creating...</span></button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="session-info-modal" class="modal">
+        <div id="session-info"></div>
+    </dialog>
+</body>
+</html>
+{{end}}

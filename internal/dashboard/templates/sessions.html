@@ -1,0 +1,50 @@
+{{define "sessions"}}
+{{- if .Err}}<p class="load-error">could not list sessions: {{.Err}}</p>{{end}}
+{{- if .Sessions}}
+<div class="table-wrapper">
+    <table class="sessions">
+        <thead><tr><th>Session</th><th>URL</th><th>Volume <span class="info-icon">i<span class="tooltip">Conversation history is persisted via a volume mount not shown here</span></span></th><th></th></tr></thead>
+        <tbody>
+        {{- range .Sessions}}
+            <tr id="row-{{.Container}}" class="{{if not .Active}}inactive-row{{end}}" data-name="{{.Container}}">
+                <td><a href="#" class="session-name" hx-get="/sessions/{{.Name}}/info" hx-target="#session-info">{{.Name}}</a></td>
+                <td id="url-{{.Container}}">{{if .Active}}<a href="{{.URL}}" target="_blank">{{display .URL}}</a>{{else}}{{template "action" (action .Name "start" "")}}{{end}}</td>
+                <td class="volume">{{.Volume}}</td>
+                <td id="actions-{{.Container}}">{{if .Active}}{{template "action" (action .Name "stop" "")}}{{else}}{{template "action" (action .Name "delete" "")}}{{end}}</td>
+            </tr>
+        {{- end}}
+        </tbody>
+    </table>
+</div>
+{{- else}}
+<div class="empty">
+    <p>no sessions</p>
+    <table class="help">
+        <tr><td><code>safeclaw run</code></td><td>default session</td></tr>
+        <tr><td><code>safeclaw run -s name</code></td><td>named session</td></tr>
+        <tr><td><code>safeclaw run -n</code></td><td>skip opening browser</td></tr>
+        <tr><td><code>safeclaw run -v ~/myproject:/home/sclaw/myproject</code></td><td>mount volume</td></tr>
+        <tr><td><code>safeclaw run -q "question"</code></td><td>start with query</td></tr>
+    </table>
+    <p class="tip">tip: {{tip}}</p>
+</div>
+{{- end}}
+{{end}}
+
+{{define "frames"}}
+<div id="frames" class="frames{{if eq (len .Active) 1}} single{{end}}" hx-get="/fragments/frames" hx-trigger="sessions from:body" hx-swap="outerMorph">
+{{- range .Active}}
+    <div class="frame" id="frame-{{.Container}}">
+        <div class="frame-bar">
+            <span>{{.Name}}</span>
+            <div class="frame-actions">
+                {{template "action" (action .Name "stop" "link")}}
+                <button type="button" class="link-btn" data-refresh="iframe-{{.Container}}">refresh</button>
+                <a href="{{.URL}}" target="_blank">open</a>
+            </div>
+        </div>
+        <iframe id="iframe-{{.Container}}" src="{{.URL}}"></iframe>
+    </div>
+{{- end}}
+</div>
+{{end}}

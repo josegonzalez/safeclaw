@@ -1,0 +1,435 @@
+// Package dashboard serves the web dashboard for managing sessions.
+package dashboard
+
+import (
+	"bytes"
+	"context"
+	"embed"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"html/template"
+	"io"
+	"io/fs"
+	"log"
+	"math/rand/v2"
+	"net"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/josegonzalez/safeclaw/internal/config"
+	"github.com/josegonzalez/safeclaw/internal/session"
+)
+
+//go:embed templates static
+var assets embed.FS
+
+// Sessions is the session API the dashboard needs.
+type Sessions interface {
+	List(ctx context.Context) ([]session.Session, error)
+	Ensure(ctx context.Context, opts session.Options) (*session.Result, error)
+	Stop(ctx context.Context, name string) error
+	Delete(ctx context.Context, name string, force bool) error
+}
+
+// Options configures the dashboard.
+type Options struct {
+	// Manager provides sessions. If Sessions is nil it is used for both
+	// sessions and docker events.
+	Manager *session.Manager
+	// Sessions overrides Manager for session operations (used in tests).
+	Sessions Sessions
+	// Events overrides the docker event stream (used in tests).
+	Events EventSource
+	// Port is the port to listen on.
+	Port int
+	// Dev serves templates and static files from disk.
+	Dev bool
+	// DevDir is the directory Dev reads from. Defaults to internal/dashboard.
+	DevDir string
+}
+
+// Server is the dashboard HTTP server.
+type Server struct {
+	sessions Sessions
+	events   EventSource
+	hub      *Hub
+	port     int
+	files    fs.FS
+	dev      bool
+	tmpl     *template.Template
+}
+
+var tips = []string{
+	"in a session, press q or scroll to the bottom to exit scroll mode and resume typing",
+	"on this dashboard, press tab and enter to quickly create a new session",
+	"run safeclaw env to manage environment variables",
+}
+
+// New builds a Server.
+func New(opts Options) (*Server, error) {
+	s := &Server{
+		sessions: opts.Sessions,
+		events:   opts.Events,
+		hub:      NewHub(),
+		port:     opts.Port,
+		dev:      opts.Dev,
+	}
+	if s.sessions == nil {
+		if opts.Manager == nil {
+			return nil, errors.New("dashboard: a session manager is required")
+		}
+		s.sessions = opts.Manager
+	}
+	if s.events == nil && opts.Manager != nil {
+		s.events = opts.Manager.Docker.Events
+	}
+	if s.port == 0 {
+		s.port = config.DashboardPort
+	}
+	if opts.Dev {
+		dir := opts.DevDir
+		if dir == "" {
+			dir = "internal/dashboard"
+		}
+		if _, err := os.Stat(dir + "/templates"); err != nil {
+			return nil, fmt.Errorf("--dev needs %s/templates; run it from the repository root: %w", dir, err)
+		}
+		s.files = os.DirFS(dir)
+	} else {
+		s.files = assets
+	}
+	t, err := s.parseTemplates()
+	if err != nil {
+		return nil, err
+	}
+	s.tmpl = t
+	return s, nil
+}
+
+func (s *Server) parseTemplates() (*template.Template, error) {
+	return template.New("").Funcs(template.FuncMap{
+		"tip": func() string { return tips[rand.IntN(len(tips))] },
+		"display": func(url string) string {
+			return strings.TrimPrefix(url, "http://")
+		},
+		"action": func(name, kind, variant string) actionData {
+			return actionData{Name: name, Kind: kind, Variant: variant}
+		},
+		"busy": func(kind string) string {
+			switch kind {
+			case "start":
+				return "starting"
+			case "delete":
+				return "deleting"
+			}
+			return "stopping"
+		},
+	}).ParseFS(s.files, "templates/*.html")
+}
+
+func (s *Server) templates() (*template.Template, error) {
+	if s.dev {
+		return s.parseTemplates()
+	}
+	return s.tmpl, nil
+}
+
+// Handler returns the dashboard's HTTP handler, with cross-origin and Host
+// protections applied.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+
+	static, _ := fs.Sub(s.files, "static")
+	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
+
+	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.HandleFunc("GET /fragments/sessions", s.handleFragment("sessions"))
+	mux.HandleFunc("GET /fragments/frames", s.handleFragment("frames"))
+	mux.HandleFunc("GET /events", s.handleEvents)
+
+	mux.HandleFunc("POST /sessions", s.handleCreate)
+	mux.HandleFunc("GET /sessions/validate", s.handleValidate)
+	mux.HandleFunc("GET /sessions/{name}/info", s.handleInfo)
+	mux.HandleFunc("GET /sessions/{name}/actions", s.handleActions)
+	mux.HandleFunc("POST /sessions/{name}/start", s.handleStart)
+	mux.HandleFunc("POST /sessions/{name}/stop", s.handleConfirmed("stop"))
+	mux.HandleFunc("POST /sessions/{name}/delete", s.handleConfirmed("delete"))
+
+	mux.HandleFunc("GET /api/sessions", s.apiSessions)
+	mux.HandleFunc("POST /api/start", s.apiStart)
+	mux.HandleFunc("POST /api/stop", s.apiStop)
+	mux.HandleFunc("POST /api/delete", s.apiDelete)
+	mux.HandleFunc("POST /api/create", s.apiCreate)
+	mux.HandleFunc("GET /api/events", s.apiEvents)
+
+	cop := http.NewCrossOriginProtection()
+	return s.checkHost(cop.Handler(mux))
+}
+
+// checkHost rejects requests whose Host is not a loopback name, which blocks
+// DNS rebinding.
+func (s *Server) checkHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		switch strings.Trim(host, "[]") {
+		case "localhost", "127.0.0.1", "::1":
+			next.ServeHTTP(w, r)
+		default:
+			http.Error(w, "forbidden host", http.StatusForbidden)
+		}
+	})
+}
+
+// ListenAndServe serves until ctx is done.
+func (s *Server) ListenAndServe(ctx context.Context, out io.Writer) error {
+	addr := "127.0.0.1:" + strconv.Itoa(s.port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	if s.events != nil {
+		go s.hub.Run(ctx, s.events)
+	}
+	srv := &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(shutdownCtx)
+	}()
+	fmt.Fprintf(out, "Dashboard: http://localhost:%d\n", s.port)
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// view is the data the templates render.
+type view struct {
+	Sessions []session.Session
+	Active   []session.Session
+	Err      string
+}
+
+func (s *Server) load(ctx context.Context) view {
+	list, err := s.sessions.List(ctx)
+	v := view{Sessions: list}
+	if err != nil {
+		v.Err = err.Error()
+	}
+	for _, x := range list {
+		if x.Active && x.URL != "" {
+			v.Active = append(v.Active, x)
+		}
+	}
+	return v
+}
+
+func (s *Server) render(w http.ResponseWriter, status int, name string, data any) {
+	t, err := s.templates()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	var buf bytes.Buffer
+	if err := t.ExecuteTemplate(&buf, name, data); err != nil {
+		log.Printf("render %s: %v", name, err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = buf.WriteTo(w)
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	s.render(w, http.StatusOK, "page", s.load(r.Context()))
+}
+
+func (s *Server) handleFragment(name string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s.render(w, http.StatusOK, name, s.load(r.Context()))
+	}
+}
+
+// refresh tells the page to re-render the sessions table and frames.
+func refresh(w http.ResponseWriter) {
+	w.Header().Set("HX-Trigger", "sessions")
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) exists(ctx context.Context, name string) bool {
+	list, err := s.sessions.List(ctx)
+	if err != nil {
+		return false
+	}
+	c := config.ContainerName(name)
+	for _, x := range list {
+		if x.Container == c {
+			return true
+		}
+	}
+	return false
+}
+
+type hintData struct {
+	Name   string
+	Exists bool
+}
+
+func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
+	name := session.NormalizeName(r.URL.Query().Get("name"))
+	s.render(w, http.StatusOK, "name-hint", hintData{Name: name, Exists: s.exists(r.Context(), name)})
+}
+
+type createResult struct {
+	URL     string `json:"url"`
+	OpenTab bool   `json:"openTab"`
+}
+
+func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		s.render(w, http.StatusUnprocessableEntity, "create-error", err.Error())
+		return
+	}
+	name := session.NormalizeName(r.PostForm.Get("name"))
+	if s.exists(r.Context(), name) {
+		s.render(w, http.StatusUnprocessableEntity, "create-error", fmt.Sprintf("session %q already seems to exist", name))
+		return
+	}
+	res, err := s.sessions.Ensure(r.Context(), session.Options{
+		Name:   name,
+		Volume: strings.TrimSpace(r.PostForm.Get("volume")),
+		Query:  strings.TrimSpace(r.PostForm.Get("query")),
+		NoOpen: true,
+	})
+	if err != nil {
+		s.render(w, http.StatusUnprocessableEntity, "create-error", err.Error())
+		return
+	}
+	trigger, _ := json.Marshal(map[string]any{
+		"session-created": createResult{URL: res.URL, OpenTab: r.PostForm.Get("open_tab") != ""},
+		"sessions":        true,
+	})
+	w.Header().Set("HX-Trigger", string(trigger))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
+	name := config.SessionName(r.PathValue("name"))
+	s.render(w, http.StatusOK, "info", map[string]string{
+		"Name":    name,
+		"Command": fmt.Sprintf("docker exec -it %s tmux attach -t %s", config.ContainerName(name), config.TmuxSession),
+	})
+}
+
+// actionData renders a session's action button.
+type actionData struct {
+	Name    string
+	Kind    string // stop, delete, start
+	Variant string // "" for the table button, "link" for the frame bar
+	Confirm bool
+	Failed  string
+}
+
+func (s *Server) handleActions(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	s.render(w, http.StatusOK, "action", actionData{
+		Name:    config.SessionName(r.PathValue("name")),
+		Kind:    kindOrDefault(q.Get("kind")),
+		Variant: q.Get("variant"),
+	})
+}
+
+func kindOrDefault(k string) string {
+	switch k {
+	case "stop", "delete", "start":
+		return k
+	}
+	return "stop"
+}
+
+func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
+	name := config.SessionName(r.PathValue("name"))
+	if _, err := s.sessions.Ensure(r.Context(), session.Options{Name: name, NoOpen: true}); err != nil {
+		s.render(w, http.StatusOK, "action", actionData{Name: name, Kind: "start", Failed: err.Error()})
+		return
+	}
+	refresh(w)
+}
+
+// handleConfirmed implements the two-click confirm: the first POST returns
+// the confirm button, the second (confirm=1) performs the action.
+func (s *Server) handleConfirmed(kind string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := config.SessionName(r.PathValue("name"))
+		_ = r.ParseForm()
+		d := actionData{Name: name, Kind: kind, Variant: r.Form.Get("variant")}
+		if r.Form.Get("confirm") != "1" {
+			d.Confirm = true
+			s.render(w, http.StatusOK, "action", d)
+			return
+		}
+		var err error
+		if kind == "stop" {
+			err = s.sessions.Stop(r.Context(), name)
+		} else {
+			err = s.sessions.Delete(r.Context(), name, false)
+		}
+		if err != nil {
+			d.Failed = err.Error()
+			s.render(w, http.StatusOK, "action", d)
+			return
+		}
+		refresh(w)
+	}
+}
+
+// handleEvents streams a "sessions" event whenever a safeclaw container changes.
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	s.stream(w, r, func(string) string { return "event: sessions\ndata: changed\n\n" }, ": connected\n\n")
+}
+
+func (s *Server) stream(w http.ResponseWriter, r *http.Request, format func(action string) string, hello string) {
+	rc := http.NewResponseController(w)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, hello)
+	if err := rc.Flush(); err != nil {
+		return
+	}
+	ch, unsubscribe := s.hub.Subscribe()
+	defer unsubscribe()
+	ping := time.NewTicker(30 * time.Second)
+	defer ping.Stop()
+	for {
+		var msg string
+		select {
+		case <-r.Context().Done():
+			return
+		case action := <-ch:
+			msg = format(action)
+		case <-ping.C:
+			msg = ": ping\n\n"
+		}
+		if _, err := io.WriteString(w, msg); err != nil {
+			return
+		}
+		if err := rc.Flush(); err != nil {
+			return
+		}
+	}
+}

@@ -1,0 +1,128 @@
+package dashboard
+
+import (
+	"encoding/json"
+	"net/http"
+	"strconv"
+
+	"github.com/josegonzalez/safeclaw/internal/config"
+	"github.com/josegonzalez/safeclaw/internal/session"
+)
+
+// The JSON API mirrors upstream's /api endpoints for scripting.
+
+type apiSession struct {
+	Name   string  `json:"name"`
+	Port   *string `json:"port"`
+	URL    *string `json:"url"`
+	Volume string  `json:"volume"`
+	Active bool    `json:"active"`
+}
+
+type apiResult struct {
+	Success bool   `json:"success"`
+	URL     string `json:"url,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+type apiRequest struct {
+	Name   string `json:"name"`
+	Volume string `json:"volume"`
+	Query  string `json:"query"`
+}
+
+func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func readRequest(r *http.Request) (apiRequest, error) {
+	var req apiRequest
+	r.Body = http.MaxBytesReader(nil, r.Body, 1<<20)
+	err := json.NewDecoder(r.Body).Decode(&req)
+	return req, err
+}
+
+func (s *Server) apiSessions(w http.ResponseWriter, r *http.Request) {
+	list, err := s.sessions.List(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	out := make([]apiSession, 0, len(list))
+	for _, x := range list {
+		a := apiSession{Name: x.Container, Volume: x.Volume, Active: x.Active}
+		if x.Port > 0 {
+			p := strconv.Itoa(x.Port)
+			u := x.URL
+			a.Port, a.URL = &p, &u
+		}
+		out = append(out, a)
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) apiStart(w http.ResponseWriter, r *http.Request) {
+	req, err := readRequest(r)
+	if err != nil {
+		writeJSON(w, apiResult{Error: err.Error()})
+		return
+	}
+	res, err := s.sessions.Ensure(r.Context(), session.Options{Name: config.SessionName(req.Name), NoOpen: true})
+	if err != nil {
+		writeJSON(w, apiResult{Error: err.Error()})
+		return
+	}
+	writeJSON(w, apiResult{Success: true, URL: res.URL})
+}
+
+func (s *Server) apiStop(w http.ResponseWriter, r *http.Request) {
+	req, err := readRequest(r)
+	if err != nil {
+		writeJSON(w, apiResult{Error: err.Error()})
+		return
+	}
+	err = s.sessions.Stop(r.Context(), config.SessionName(req.Name))
+	writeJSON(w, apiResult{Success: err == nil, Error: errString(err)})
+}
+
+func (s *Server) apiDelete(w http.ResponseWriter, r *http.Request) {
+	req, err := readRequest(r)
+	if err != nil {
+		writeJSON(w, apiResult{Error: err.Error()})
+		return
+	}
+	err = s.sessions.Delete(r.Context(), config.SessionName(req.Name), false)
+	writeJSON(w, apiResult{Success: err == nil, Error: errString(err)})
+}
+
+func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {
+	req, err := readRequest(r)
+	if err != nil {
+		writeJSON(w, apiResult{Error: err.Error()})
+		return
+	}
+	res, err := s.sessions.Ensure(r.Context(), session.Options{
+		Name:   session.NormalizeName(req.Name),
+		Volume: req.Volume,
+		Query:  req.Query,
+		NoOpen: true,
+	})
+	if err != nil {
+		writeJSON(w, apiResult{Error: err.Error()})
+		return
+	}
+	writeJSON(w, apiResult{Success: true, URL: res.URL})
+}
+
+// apiEvents streams raw docker actions in upstream's `data: <action>` format.
+func (s *Server) apiEvents(w http.ResponseWriter, r *http.Request) {
+	s.stream(w, r, func(action string) string { return "data: " + action + "\n\n" }, "data: connected\n\n")
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
