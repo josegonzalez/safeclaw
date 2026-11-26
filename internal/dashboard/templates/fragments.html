@@ -22,6 +22,14 @@
 
 {{define "create-error"}}<p class="modal-hint error">{{.}}</p>{{end}}
 
+{{define "info-error"}}
+<h2 id="session-info-title">{{.Name}}</h2>
+<p class="modal-hint error">{{.Error}}</p>
+<div class="modal-actions">
+    <button class="modal-cancel" type="button" data-close-dialog>close</button>
+</div>
+{{end}}
+
 {{define "info"}}
 <h2 id="session-info-title">{{.Name}}</h2>
 <div class="modal-field">

@@ -16,7 +16,7 @@ make lint               # golangci-lint
 make test-integration   # real docker; needs the safeclaw image
 ```
 
-Unit tests use `internal/docker/dockertest`, a fake docker runner that records every command. The integration test (`-tags integration`) creates, restarts, and deletes a real session container.
+Unit tests use `internal/docker/dockertest`, a fake docker runner that records every command. The integration tests (`-tags integration`) create, restart, and delete a real session container, and check a real sandbox's isolation: its user, network, read-only mounts and root fs, `docker cp` into `/sandbox`, and that removing it removes its volume.
 
 ## End to end
 
@@ -32,6 +32,16 @@ Open the printed URL and verify:
 1. Claude Code launches automatically with bypass permissions
 2. It shows the correct model (Opus 5.5) and doesn't ask for login
 3. Send a message and confirm it gets a response
+
+For sandboxes:
+
+```bash
+safeclaw sandbox run -s t -v ./docs:/in
+safeclaw sandbox exec t -- id                # uid=2000(sandbox)
+safeclaw sandbox exec t -- ls /home/sclaw    # permission denied
+safeclaw sandbox exec t -- touch /in/x       # read-only file system
+safeclaw sandbox rm -f t
+```
 
 ## Dashboard hot reload
 

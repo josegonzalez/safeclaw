@@ -13,6 +13,7 @@ import (
 	"github.com/josegonzalez/safeclaw"
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
+	"github.com/josegonzalez/safeclaw/internal/session"
 	"github.com/josegonzalez/safeclaw/internal/version"
 )
 
@@ -105,28 +106,37 @@ func reportStale(ctx context.Context, d *docker.Client, out io.Writer, recreate 
 	if err != nil {
 		return err
 	}
-	var stale []string
+	var stale []docker.Container
 	for _, c := range cs {
 		if c.Image != imageID {
-			stale = append(stale, c.ShortName())
+			stale = append(stale, c)
 		}
 	}
 	if len(stale) == 0 {
 		return nil
 	}
 	if recreate {
-		for _, name := range stale {
-			fmt.Fprintf(out, "Removing old container: %s\n", name)
-			if err := d.Remove(ctx, name, true); err != nil {
+		for _, c := range stale {
+			fmt.Fprintf(out, "Removing old container: %s\n", c.ShortName())
+			if err := d.Remove(ctx, c.ShortName(), true); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 	fmt.Fprintln(out, "\nThese sessions still use an older image:")
-	for _, name := range stale {
-		fmt.Fprintf(out, "  %s\n", config.SessionName(name))
+	sandboxes := false
+	for _, c := range stale {
+		name := config.SessionName(c.ShortName())
+		if session.TypeOf(c) == config.TypeSandbox {
+			sandboxes = true
+			name += " (sandbox)"
+		}
+		fmt.Fprintf(out, "  %s\n", name)
 	}
 	fmt.Fprintln(out, "\nRemove them with `safeclaw rm -f <name>` (or rebuild with --recreate) so the next run uses the new image. Conversation history is kept on the host.")
+	if sandboxes {
+		fmt.Fprintln(out, "Remove sandboxes with `safeclaw sandbox rm -f <name>`.")
+	}
 	return nil
 }

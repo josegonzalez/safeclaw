@@ -12,6 +12,7 @@ import (
 const inspectJSON = `[{
   "Name": "/safeclaw-work",
   "Image": "sha256:abc",
+  "Config": {"Labels": {"safeclaw.type": "sandbox"}},
   "State": {"Status": "exited", "Running": false},
   "HostConfig": {"PortBindings": {"7681/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7683"}]}},
   "Mounts": [
@@ -35,6 +36,12 @@ func TestParseInspect(t *testing.T) {
 	}
 	if got := c.HostPort(22); got != 0 {
 		t.Errorf("HostPort(22) = %d", got)
+	}
+	if got := c.Label("safeclaw.type"); got != "sandbox" {
+		t.Errorf("Label = %q, want sandbox", got)
+	}
+	if got := c.Label("missing"); got != "" {
+		t.Errorf("Label(missing) = %q", got)
 	}
 	want := []string{"/Users/me/proj:/home/sclaw/proj"}
 	if got := c.BindMounts("/home/sclaw/.claude/projects"); !reflect.DeepEqual(got, want) {
@@ -97,5 +104,16 @@ func TestExecArgs(t *testing.T) {
 	_, _ = c.Exec(context.Background(), "safeclaw-a", docker.ExecOptions{Detach: true}, "ttyd", "-p", "7681")
 	if got := r.Commands()[0]; got != "exec -d safeclaw-a ttyd -p 7681" {
 		t.Errorf("exec = %q", got)
+	}
+}
+
+func TestRemoveDropsAnonymousVolumes(t *testing.T) {
+	r := &dockertest.Runner{}
+	c := r.Client()
+	_ = c.Remove(context.Background(), "safeclaw-a", false)
+	_ = c.Remove(context.Background(), "safeclaw-b", true)
+	want := []string{"rm -v safeclaw-a", "rm -v -f safeclaw-b"}
+	if got := r.Commands(); !reflect.DeepEqual(got, want) {
+		t.Errorf("rm = %v, want %v", got, want)
 	}
 }

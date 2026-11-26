@@ -225,12 +225,15 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		return nil, ErrNoImage
 	}
 
-	if err := m.ensureTokens(opts.Interactive); err != nil {
-		return nil, err
-	}
-
 	existing, err := m.Docker.InspectOne(ctx, container)
 	if err != nil {
+		return nil, err
+	}
+	if existing != nil && TypeOf(*existing) == config.TypeSandbox {
+		return nil, wrongType(name, ErrIsSandbox)
+	}
+
+	if err := m.ensureTokens(opts.Interactive); err != nil {
 		return nil, err
 	}
 
@@ -500,6 +503,22 @@ type Session struct {
 	Volume string `json:"volume"`
 	Active bool   `json:"active"`
 	Status string `json:"-"`
+	// Type is config.TypeSession or config.TypeSandbox.
+	Type string `json:"type"`
+}
+
+// IsSandbox reports whether the session is a headless sandbox.
+func (s Session) IsSandbox() bool {
+	return s.Type == config.TypeSandbox
+}
+
+// TypeOf returns a container's session type. Containers without a type label
+// are interactive sessions.
+func TypeOf(c docker.Container) string {
+	if t := c.Label(config.LabelType); t != "" {
+		return t
+	}
+	return config.TypeSession
 }
 
 // List returns all sessions, active first, then by name.
@@ -520,6 +539,7 @@ func (m *Manager) List(ctx context.Context) ([]Session, error) {
 			Active:    c.State.Running,
 			Status:    c.State.Status,
 			Volume:    "-",
+			Type:      TypeOf(c),
 		}
 		if mounts := c.BindMounts(config.ProjectsMount); len(mounts) > 0 {
 			s.Volume = strings.Join(mounts, ", ")

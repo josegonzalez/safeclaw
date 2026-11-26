@@ -30,6 +30,18 @@ const (
 	LegacyWrapper = "/home/sclaw/ttyd-wrapper.sh"
 	// TmuxSession is the tmux session name Claude Code runs in.
 	TmuxSession = "main"
+
+	// LabelType is the container label that records a session's type.
+	// Containers without it are interactive sessions.
+	LabelType = "safeclaw.type"
+	// TypeSession is the type of an interactive Claude Code session.
+	TypeSession = "session"
+	// TypeSandbox is the type of a headless sandbox for untrusted files.
+	TypeSandbox = "sandbox"
+	// SandboxUser is the unprivileged, non-login user sandboxes run as.
+	SandboxUser = "sandbox"
+	// SandboxDir is the sandbox user's home and working directory.
+	SandboxDir = "/sandbox"
 )
 
 // Dir returns the safeclaw config directory, honoring XDG_CONFIG_HOME.

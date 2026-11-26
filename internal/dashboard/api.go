@@ -17,6 +17,7 @@ type apiSession struct {
 	URL    *string `json:"url"`
 	Volume string  `json:"volume"`
 	Active bool    `json:"active"`
+	Type   string  `json:"type"`
 }
 
 type apiResult struct {
@@ -32,7 +33,12 @@ type apiRequest struct {
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
+	writeJSONStatus(w, http.StatusOK, v)
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
@@ -51,7 +57,7 @@ func (s *Server) apiSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]apiSession, 0, len(list))
 	for _, x := range list {
-		a := apiSession{Name: x.Container, Volume: x.Volume, Active: x.Active}
+		a := apiSession{Name: x.Container, Volume: x.Volume, Active: x.Active, Type: x.Type}
 		if x.Port > 0 {
 			p := strconv.Itoa(x.Port)
 			u := x.URL
@@ -70,7 +76,7 @@ func (s *Server) apiStart(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := s.sessions.Ensure(r.Context(), session.Options{Name: config.SessionName(req.Name), NoOpen: true})
 	if err != nil {
-		writeJSON(w, apiResult{Error: err.Error()})
+		writeJSONStatus(w, errStatus(err, http.StatusOK), apiResult{Error: err.Error()})
 		return
 	}
 	writeJSON(w, apiResult{Success: true, URL: res.URL})
@@ -109,7 +115,7 @@ func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {
 		NoOpen: true,
 	})
 	if err != nil {
-		writeJSON(w, apiResult{Error: err.Error()})
+		writeJSONStatus(w, errStatus(err, http.StatusOK), apiResult{Error: err.Error()})
 		return
 	}
 	writeJSON(w, apiResult{Success: true, URL: res.URL})

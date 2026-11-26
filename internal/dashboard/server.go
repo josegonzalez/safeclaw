@@ -269,18 +269,39 @@ func refresh(w http.ResponseWriter) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) exists(ctx context.Context, name string) bool {
+// find returns the named session, or nil if it does not exist or the list
+// fails.
+func (s *Server) find(ctx context.Context, name string) *session.Session {
 	list, err := s.sessions.List(ctx)
 	if err != nil {
-		return false
+		return nil
 	}
 	c := config.ContainerName(name)
 	for _, x := range list {
 		if x.Container == c {
-			return true
+			return &x
 		}
 	}
-	return false
+	return nil
+}
+
+func (s *Server) exists(ctx context.Context, name string) bool {
+	return s.find(ctx, name) != nil
+}
+
+// sandboxError returns the error for an interactive-only action on a
+// sandbox.
+func sandboxError(name string) error {
+	return fmt.Errorf("session %q %w", name, session.ErrIsSandbox)
+}
+
+// errStatus returns 409 for actions refused because the target is a sandbox
+// and fallback otherwise.
+func errStatus(err error, fallback int) int {
+	if errors.Is(err, session.ErrIsSandbox) {
+		return http.StatusConflict
+	}
+	return fallback
 }
 
 type hintData struct {
@@ -328,6 +349,13 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	name := config.SessionName(r.PathValue("name"))
+	if x := s.find(r.Context(), name); x != nil && x.IsSandbox() {
+		s.render(w, http.StatusConflict, "info-error", map[string]string{
+			"Name":  name,
+			"Error": sandboxError(name).Error(),
+		})
+		return
+	}
 	s.render(w, http.StatusOK, "info", map[string]string{
 		"Name":    name,
 		"Command": fmt.Sprintf("docker exec -it %s tmux attach -t %s", config.ContainerName(name), config.TmuxSession),
@@ -363,7 +391,7 @@ func kindOrDefault(k string) string {
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	name := config.SessionName(r.PathValue("name"))
 	if _, err := s.sessions.Ensure(r.Context(), session.Options{Name: name, NoOpen: true}); err != nil {
-		s.render(w, http.StatusOK, "action", actionData{Name: name, Kind: "start", Failed: err.Error()})
+		s.render(w, errStatus(err, http.StatusOK), "action", actionData{Name: name, Kind: "start", Failed: err.Error()})
 		return
 	}
 	refresh(w)
