@@ -1,0 +1,385 @@
+package session
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
+	"github.com/josegonzalez/safeclaw/internal/secrets"
+)
+
+type fakeContainer struct {
+	Running bool
+	Port    int
+	Mounts  []string // source:destination bind mounts
+	Image   string
+}
+
+// world is a tiny fake docker daemon.
+type world struct {
+	image      string
+	containers map[string]*fakeContainer
+	native     bool
+	prompt     bool
+}
+
+func (w *world) inspectJSON(names []string) []byte {
+	var out []map[string]any
+	for _, n := range names {
+		c, ok := w.containers[n]
+		if !ok {
+			continue
+		}
+		var mounts []map[string]string
+		for _, m := range c.Mounts {
+			src, dst, _ := strings.Cut(m, ":")
+			mounts = append(mounts, map[string]string{"Type": "bind", "Source": src, "Destination": dst})
+		}
+		status := "exited"
+		if c.Running {
+			status = "running"
+		}
+		out = append(out, map[string]any{
+			"Name":  "/" + n,
+			"Image": c.Image,
+			"State": map[string]any{"Status": status, "Running": c.Running},
+			"HostConfig": map[string]any{"PortBindings": map[string]any{
+				"7681/tcp": []map[string]string{{"HostIp": "127.0.0.1", "HostPort": fmt.Sprint(c.Port)}},
+			}},
+			"Mounts": mounts,
+		})
+	}
+	b, _ := json.Marshal(out)
+	return b
+}
+
+func (w *world) handle(args []string, _ string) ([]byte, error) {
+	switch {
+	case args[0] == "image" && args[1] == "inspect":
+		if w.image == "" {
+			return nil, dockertest.NotFound(args)
+		}
+		return []byte(w.image + "\n"), nil
+	case args[0] == "ps":
+		var names []string
+		for n := range w.containers {
+			names = append(names, n)
+		}
+		slices.Sort(names)
+		return []byte(strings.Join(names, "\n")), nil
+	case args[0] == "container" && args[1] == "inspect":
+		b := w.inspectJSON(args[2:])
+		if string(b) == "null" {
+			return nil, dockertest.NotFound(args)
+		}
+		return b, nil
+	case args[0] == "run":
+		var name string
+		var port int
+		var mounts []string
+		for i := 0; i < len(args); i++ {
+			switch args[i] {
+			case "--name":
+				name = args[i+1]
+			case "-p":
+				_, _ = fmt.Sscanf(args[i+1], "127.0.0.1:%d:7681", &port)
+			case "-v":
+				mounts = append(mounts, args[i+1])
+			}
+		}
+		w.containers[name] = &fakeContainer{Running: true, Port: port, Mounts: mounts, Image: w.image}
+		return []byte("id\n"), nil
+	case args[0] == "rm":
+		delete(w.containers, args[len(args)-1])
+	case args[0] == "start":
+		w.containers[args[1]].Running = true
+	case args[0] == "stop":
+		w.containers[args[len(args)-1]].Running = false
+	case args[0] == "exec":
+		cmd := strings.Join(args, " ")
+		if strings.Contains(cmd, "command -v safeclaw") && !w.native {
+			return nil, errors.New("exit 1")
+		}
+		if strings.Contains(cmd, "capture-pane") && w.prompt {
+			return []byte("────\n❯ \n"), nil
+		}
+	}
+	return nil, nil
+}
+
+func newTestManager(t *testing.T, w *world) (*Manager, *dockertest.Runner) {
+	t.Helper()
+	r := &dockertest.Runner{Handler: w.handle}
+	dir := t.TempDir()
+	store := secrets.Store{Dir: filepath.Join(dir, ".secrets")}
+	if _, err := store.Set(secrets.ClaudeToken, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{
+		Docker:        r.Client(),
+		Secrets:       store,
+		SessionsDir:   filepath.Join(dir, "sessions"),
+		PortFree:      func(int) bool { return true },
+		Sleep:         func(time.Duration) {},
+		OpenBrowser:   func(string) error { return nil },
+		PromptTimeout: time.Second,
+	}
+	return m, r
+}
+
+func hasCall(r *dockertest.Runner, prefix string) bool {
+	_, ok := r.Find(prefix)
+	return ok
+}
+
+func TestEnsureCreatesContainer(t *testing.T) {
+	w := &world{image: "sha256:new", containers: map[string]*fakeContainer{
+		"safeclaw-a": {Port: 7681, Image: "sha256:new"},
+		"safeclaw-b": {Running: true, Port: 7682, Image: "sha256:new"},
+	}, native: true}
+	m, r := newTestManager(t, w)
+	_, _ = m.Secrets.Set("WEIRD", "it's")
+
+	res, err := m.Ensure(context.Background(), Options{Name: "work", NoOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 7681 is reserved by a stopped container, 7682 by a running one.
+	if res.Port != 7683 || res.URL != "http://localhost:7683" || res.Container != "safeclaw-work" {
+		t.Errorf("result = %+v", res)
+	}
+	run, ok := r.Find("run ")
+	if !ok {
+		t.Fatal("no docker run")
+	}
+	want := "run -d --ipc=host --name safeclaw-work -p 127.0.0.1:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects safeclaw sleep infinity"
+	if run.String() != want {
+		t.Errorf("run = %q\nwant  %q", run.String(), want)
+	}
+	if _, err := os.Stat(filepath.Join(m.SessionsDir, "work")); err != nil {
+		t.Errorf("session dir not created: %v", err)
+	}
+
+	env, ok := r.Find("exec -i safeclaw-work sh -c umask 077")
+	if !ok {
+		t.Fatal("env not written")
+	}
+	if !strings.Contains(env.Stdin, "export CLAUDE_CODE_OAUTH_TOKEN='tok'\n") || !strings.Contains(env.Stdin, `export WEIRD='it'\''s'`) {
+		t.Errorf("env stdin = %q", env.Stdin)
+	}
+	for _, c := range r.Commands() {
+		if strings.Contains(c, "tok") {
+			t.Errorf("secret leaked into argv: %q", c)
+		}
+	}
+	if !hasCall(r, "exec -d safeclaw-work ttyd -W -t titleFixed=SafeClaw - work -p 7681 safeclaw ttyd-wrapper") {
+		t.Errorf("ttyd not started natively: %v", r.Commands())
+	}
+	if hasCall(r, "exec safeclaw-work bash -c") {
+		t.Error("git config should be skipped without GH_TOKEN")
+	}
+}
+
+func TestEnsureReusesRunningContainer(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{
+		"safeclaw-default": {Running: true, Port: 7690, Image: "img"},
+	}}
+	m, r := newTestManager(t, w)
+	_, _ = m.Secrets.Set(secrets.GitHubToken, "gh")
+	res, err := m.Ensure(context.Background(), Options{NoOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Port != 7690 {
+		t.Errorf("port = %d, want reused 7690", res.Port)
+	}
+	for _, p := range []string{"exec safeclaw-default pkill -f ttyd", "exec safeclaw-default tmux kill-server", "exec safeclaw-default bash -c"} {
+		if !hasCall(r, p) {
+			t.Errorf("missing %q in %v", p, r.Commands())
+		}
+	}
+	if hasCall(r, "run ") || hasCall(r, "start ") {
+		t.Error("should not create or start")
+	}
+	// Upstream image: falls back to the legacy wrapper script.
+	if !hasCall(r, "exec -d safeclaw-default ttyd -W -t titleFixed=SafeClaw - default -p 7681 /home/sclaw/ttyd-wrapper.sh") {
+		t.Errorf("legacy wrapper not used: %v", r.Commands())
+	}
+}
+
+func TestEnsureStartsStoppedContainer(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{
+		"safeclaw-x": {Port: 7700, Image: "img"},
+	}, native: true}
+	m, r := newTestManager(t, w)
+	res, err := m.Ensure(context.Background(), Options{Name: "x", NoOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Port != 7700 || !hasCall(r, "start safeclaw-x") {
+		t.Errorf("port=%d calls=%v", res.Port, r.Commands())
+	}
+}
+
+func TestEnsureVolumeRecreates(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{
+		"safeclaw-p": {Running: true, Port: 7705, Image: "img"},
+	}, native: true}
+	m, r := newTestManager(t, w)
+	home, _ := os.UserHomeDir()
+	res, err := m.Ensure(context.Background(), Options{Name: "p", Volume: "~/proj:/home/sclaw/proj", NoOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasCall(r, "rm -f safeclaw-p") {
+		t.Error("container not removed")
+	}
+	if res.Port != 7705 {
+		t.Errorf("port = %d, want the old port 7705 reused", res.Port)
+	}
+	run, _ := r.Find("run ")
+	if !strings.Contains(run.String(), "-v "+filepath.Join(home, "proj")+":/home/sclaw/proj") {
+		t.Errorf("volume not expanded: %q", run.String())
+	}
+}
+
+func TestEnsureQuery(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{}, native: true, prompt: true}
+	m, r := newTestManager(t, w)
+	if _, err := m.Ensure(context.Background(), Options{Name: "q", Query: "Enter the dragon", NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	cmds := r.Commands()
+	i := slices.Index(cmds, "exec safeclaw-q safeclaw ttyd-wrapper --no-attach")
+	j := slices.Index(cmds, "exec safeclaw-q tmux send-keys -t main -l Enter the dragon")
+	if i < 0 || j < i {
+		t.Fatalf("query flow wrong: %v", cmds)
+	}
+	if cmds[j+1] != "exec safeclaw-q tmux send-keys -t main Enter" || cmds[j+2] != "exec safeclaw-q tmux send-keys -t main Enter" {
+		t.Errorf("expected two Enters after query: %v", cmds[j:])
+	}
+}
+
+func TestEnsureErrors(t *testing.T) {
+	m, _ := newTestManager(t, &world{containers: map[string]*fakeContainer{}})
+	if _, err := m.Ensure(context.Background(), Options{NoOpen: true}); !errors.Is(err, ErrNoImage) {
+		t.Errorf("err = %v, want ErrNoImage", err)
+	}
+
+	m, r := newTestManager(t, &world{image: "img", containers: map[string]*fakeContainer{}})
+	_ = m.Secrets.Delete(secrets.ClaudeToken)
+	if _, err := m.Ensure(context.Background(), Options{NoOpen: true}); !errors.Is(err, ErrNoClaudeToken) {
+		t.Errorf("err = %v, want ErrNoClaudeToken", err)
+	}
+	if hasCall(r, "run ") {
+		t.Error("container created before token check")
+	}
+
+	if _, err := m.Ensure(context.Background(), Options{Name: "bad name", NoOpen: true}); err == nil {
+		t.Error("invalid name accepted")
+	}
+}
+
+type fakePrompter struct{ claude, gh string }
+
+func (p fakePrompter) ClaudeToken() (string, error) { return p.claude, nil }
+func (p fakePrompter) GitHubToken() (string, error) { return p.gh, nil }
+
+func TestEnsurePromptsWhenInteractive(t *testing.T) {
+	m, _ := newTestManager(t, &world{image: "img", containers: map[string]*fakeContainer{}, native: true})
+	_ = m.Secrets.Delete(secrets.ClaudeToken)
+	m.Prompter = fakePrompter{claude: "new-tok", gh: ""}
+	if _, err := m.Ensure(context.Background(), Options{NoOpen: true, Interactive: true}); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := m.Secrets.Get(secrets.ClaudeToken); v != "new-tok" {
+		t.Errorf("token = %q", v)
+	}
+	if m.Secrets.Has(secrets.GitHubToken) {
+		t.Error("empty GH token should be skipped")
+	}
+}
+
+func TestList(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{
+		"safeclaw-zeta":  {Running: true, Port: 7682, Mounts: []string{"/s:/home/sclaw/.claude/projects", "/p:/home/sclaw/p"}},
+		"safeclaw-alpha": {Port: 7681, Mounts: []string{"/s:/home/sclaw/.claude/projects"}},
+		"safeclaw-beta":  {Running: true, Port: 7683},
+	}}
+	m, _ := newTestManager(t, w)
+	list, err := m.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, s := range list {
+		names = append(names, s.Name)
+	}
+	if !slices.Equal(names, []string{"beta", "zeta", "alpha"}) {
+		t.Errorf("order = %v, want active first then by name", names)
+	}
+	if list[1].Volume != "/p:/home/sclaw/p" || list[2].Volume != "-" {
+		t.Errorf("volumes = %q, %q", list[1].Volume, list[2].Volume)
+	}
+	if list[2].URL != "" || list[0].URL != "http://localhost:7683" {
+		t.Errorf("urls = %q, %q", list[0].URL, list[2].URL)
+	}
+}
+
+func TestNormalizeAndValidate(t *testing.T) {
+	cases := map[string]string{"": "default", "  ": "default", "My Project": "my-project", "work": "work"}
+	for in, want := range cases {
+		if got := NormalizeName(in); got != want {
+			t.Errorf("NormalizeName(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for _, bad := range []string{"-x", "a b", "a/b", "a;rm"} {
+		if ValidateName(bad) == nil {
+			t.Errorf("%q should be invalid", bad)
+		}
+	}
+}
+
+func TestExpandVolume(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	wd, _ := os.Getwd()
+	cases := map[string]string{
+		"~/p:/home/sclaw/p":    filepath.Join(home, "p") + ":/home/sclaw/p",
+		"./p:/home/sclaw/p:ro": filepath.Join(wd, "p") + ":/home/sclaw/p:ro",
+		"/abs:/home/sclaw/abs": "/abs:/home/sclaw/abs",
+	}
+	for in, want := range cases {
+		if got, err := ExpandVolume(in); err != nil || got != want {
+			t.Errorf("ExpandVolume(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if _, err := ExpandVolume("nocolon"); err == nil {
+		t.Error("expected error")
+	}
+}
+
+func TestPromptReady(t *testing.T) {
+	if !PromptReady("header\n────\n❯ \n────\n") {
+		t.Error("empty input line not detected")
+	}
+	if PromptReady("  ❯ No, exit\n    Yes, I accept\n") {
+		t.Error("selection menu mistaken for the input prompt")
+	}
+}
+
+func TestPromptReadyPlaceholder(t *testing.T) {
+	if !PromptReady("────\n❯ Try \"fix lint errors\"\n────\n") {
+		t.Error("input line with placeholder not detected")
+	}
+	if PromptReady(" ❯ No, exit\n   Yes, I trust this folder\n") {
+		t.Error("indented menu matched")
+	}
+}
