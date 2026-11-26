@@ -45,7 +45,7 @@ This runs [air](https://github.com/air-verse/air), which rebuilds on Go changes 
 
 Push a `v*` tag. The release workflow:
 
-- runs goreleaser to publish darwin/linux amd64/arm64 binaries with completions, and updates the Homebrew cask in `josegonzalez/homebrew-repo` (needs the `HOMEBREW_TAP_GITHUB_TOKEN` secret)
+- runs goreleaser to publish darwin/linux amd64/arm64 archives with completions. The `safeclaw` formula in `josegonzalez/homebrew-repo` is bumped by that repo's daily `update-formulas.yml` workflow, which opens a PR when a new release appears
 - builds the image natively on amd64 and arm64 runners and pushes a multi-arch manifest to `ghcr.io/josegonzalez/safeclaw` tagged with the version and `latest`
 
 `make release-snapshot` runs goreleaser locally without publishing.

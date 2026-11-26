@@ -21,7 +21,7 @@ Each Claude Code session runs in its own container. Spin up as many as you need 
 ## Install
 
 ```bash
-brew install --cask josegonzalez/repo/safeclaw
+brew install josegonzalez/repo/safeclaw
 # or
 go install github.com/josegonzalez/safeclaw/cmd/safeclaw@latest
 ```
