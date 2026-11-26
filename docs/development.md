@@ -43,8 +43,10 @@ This runs [air](https://github.com/air-verse/air), which rebuilds on Go changes 
 
 ## Releasing
 
-Push a `v*` tag. The release workflow:
+Run the Release workflow from the Actions tab (or `gh workflow run release.yml -f bump_type=patch`) and pick `patch`, `minor`, or `major`. It:
 
+- bumps the latest `v*` tag, then creates and pushes the new tag
+- runs the tests against the tagged commit
 - runs goreleaser to publish darwin/linux amd64/arm64 archives with completions. The `safeclaw` formula in `josegonzalez/homebrew-repo` is bumped by that repo's daily `update-formulas.yml` workflow, which opens a PR when a new release appears
 - builds the image natively on amd64 and arm64 runners and pushes a multi-arch manifest to `ghcr.io/josegonzalez/safeclaw` tagged with the version and `latest`
 
