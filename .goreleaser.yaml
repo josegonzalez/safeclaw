@@ -1,0 +1,54 @@
+version: 2
+
+project_name: safeclaw
+
+before:
+  hooks:
+    - go mod tidy
+    - sh -c 'mkdir -p completions && for sh in bash zsh fish; do go run ./cmd/safeclaw completion "$sh" > "completions/safeclaw.$sh"; done'
+
+builds:
+  - main: ./cmd/safeclaw
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w
+      - -X github.com/josegonzalez/safeclaw/internal/version.Version={{.Version}}
+      - -X github.com/josegonzalez/safeclaw/internal/version.Commit={{.ShortCommit}}
+      - -X github.com/josegonzalez/safeclaw/internal/version.Date={{.Date}}
+
+archives:
+  - formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+      - completions/*
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+homebrew_casks:
+  - name: safeclaw
+    repository:
+      owner: josegonzalez
+      name: homebrew-repo
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    homepage: https://github.com/josegonzalez/safeclaw
+    description: Run Claude Code sessions in isolated Docker containers with a web dashboard
+    license: MIT
+    binaries: [safeclaw]
+    completions:
+      bash: completions/safeclaw.bash
+      zsh: completions/safeclaw.zsh
+      fish: completions/safeclaw.fish

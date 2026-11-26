@@ -1,0 +1,14 @@
+root = "."
+tmp_dir = "tmp/air"
+
+[build]
+  cmd = "go build -o ./tmp/air/safeclaw ./cmd/safeclaw"
+  entrypoint = ["./tmp/air/safeclaw", "dashboard", "--dev"]
+  include_ext = ["go"]
+  exclude_dir = ["tmp", "dist", "setup", "internal/dashboard/templates", "internal/dashboard/static"]
+  delay = 500
+  kill_delay = "1s"
+  send_interrupt = true
+
+[log]
+  time = false
