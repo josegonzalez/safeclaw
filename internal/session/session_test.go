@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,13 +23,20 @@ type fakeContainer struct {
 	Mounts  []string // source:destination bind mounts, or a bare anonymous volume path
 	Image   string
 	Labels  map[string]string
+	// RunImage is the image name the container was run from.
+	RunImage string
+	// Memory, NanoCPUs, and PidsLimit are the limits docker reports.
+	Memory, NanoCPUs, PidsLimit int64
 	// AutoRemove is set for containers run with --rm.
 	AutoRemove bool
 }
 
 // world is a tiny fake docker daemon.
 type world struct {
-	image      string
+	// image is the ID every image name resolves to, unless images is set.
+	image string
+	// images maps image names to IDs. Names it lacks do not exist.
+	images     map[string]string
 	containers map[string]*fakeContainer
 	native     bool
 	prompt     bool
@@ -41,15 +49,15 @@ func (w *world) inspectJSON(names []string) []byte {
 		if !ok {
 			continue
 		}
-		var mounts []map[string]string
+		var mounts []map[string]any
 		for _, m := range c.Mounts {
 			src, dst, ok := strings.Cut(m, ":")
 			if !ok {
-				mounts = append(mounts, map[string]string{"Type": "volume", "Source": "/var/lib/docker/volumes/anon", "Destination": m})
+				mounts = append(mounts, map[string]any{"Type": "volume", "Source": "/var/lib/docker/volumes/anon", "Destination": m, "RW": true})
 				continue
 			}
-			dst, _, _ = strings.Cut(dst, ":")
-			mounts = append(mounts, map[string]string{"Type": "bind", "Source": src, "Destination": dst})
+			dst, opt, _ := strings.Cut(dst, ":")
+			mounts = append(mounts, map[string]any{"Type": "bind", "Source": src, "Destination": dst, "RW": !strings.Contains(opt, "ro")})
 		}
 		bindings := map[string]any{}
 		if c.Port > 0 {
@@ -64,7 +72,7 @@ func (w *world) inspectJSON(names []string) []byte {
 			"Image":      c.Image,
 			"Config":     map[string]any{"Labels": c.Labels},
 			"State":      map[string]any{"Status": status, "Running": c.Running},
-			"HostConfig": map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove},
+			"HostConfig": map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit},
 			"Mounts":     mounts,
 		})
 	}
@@ -75,10 +83,14 @@ func (w *world) inspectJSON(names []string) []byte {
 func (w *world) handle(args []string, _ string) ([]byte, error) {
 	switch {
 	case args[0] == "image" && args[1] == "inspect":
-		if w.image == "" {
+		id := w.image
+		if w.images != nil {
+			id = w.images[args[len(args)-1]]
+		}
+		if id == "" {
 			return nil, dockertest.NotFound(args)
 		}
-		return []byte(w.image + "\n"), nil
+		return []byte(id + "\n"), nil
 	case args[0] == "ps":
 		var names []string
 		for n := range w.containers {
@@ -97,7 +109,12 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		var port int
 		var mounts []string
 		var autoRemove bool
+		var memory, cpus, pids int64
 		labels := map[string]string{}
+		image := ""
+		if i := slices.Index(args, "sleep"); i > 0 {
+			image = args[i-1]
+		}
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
 			case "--rm":
@@ -111,9 +128,24 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 				_, _ = fmt.Sscanf(args[i+1], "127.0.0.1:%d:7681", &port)
 			case "-v":
 				mounts = append(mounts, args[i+1])
+			case "--memory":
+				memory, _ = strconv.ParseInt(strings.TrimSuffix(args[i+1], "g"), 10, 64)
+				if strings.HasSuffix(args[i+1], "g") {
+					memory <<= 30
+				}
+			case "--cpus":
+				f, _ := strconv.ParseFloat(args[i+1], 64)
+				cpus = int64(f * 1e9)
+			case "--pids-limit":
+				pids, _ = strconv.ParseInt(args[i+1], 10, 64)
 			}
 		}
-		w.containers[name] = &fakeContainer{Running: true, Port: port, Mounts: mounts, Image: w.image, Labels: labels, AutoRemove: autoRemove}
+		id := w.image
+		if w.images != nil {
+			id = w.images[image]
+		}
+		w.containers[name] = &fakeContainer{Running: true, Port: port, Mounts: mounts, Image: id, RunImage: image, Labels: labels, AutoRemove: autoRemove,
+			Memory: memory, NanoCPUs: cpus, PidsLimit: pids}
 		return []byte("id\n"), nil
 	case args[0] == "rm":
 		delete(w.containers, args[len(args)-1])

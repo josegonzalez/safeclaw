@@ -196,3 +196,107 @@ jobs:
             -t "${IMAGE}:${NEW_VERSION#v}" \
             -t "${IMAGE}:latest" \
             "${sources[@]}"
+
+  # Built-in image variants, built on the multi-arch image the manifest job
+  # just published.
+  variant-image:
+    needs: [bump, manifest]
+    strategy:
+      matrix:
+        variant: [sandbox]
+        platform: [linux/amd64, linux/arm64]
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.bump.outputs.new_version }}
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve base image
+        id: base
+        env:
+          NEW_VERSION: ${{ needs.bump.outputs.new_version }}
+        run: echo "ref=${IMAGE}:${NEW_VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Dockerfile
+        env:
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          # An empty config directory, so only the built-in definition applies
+          mkdir -p /tmp/variant-config /tmp/variant-context
+          XDG_CONFIG_HOME=/tmp/variant-config go run ./cmd/safeclaw variant dockerfile "$VARIANT" > /tmp/variant-context/Dockerfile
+          cat /tmp/variant-context/Dockerfile
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: /tmp/variant-context
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            BASE=${{ steps.base.outputs.ref }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: variant-digest-${{ matrix.variant }}-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  variant-manifest:
+    needs: [bump, variant-image]
+    strategy:
+      matrix:
+        variant: [sandbox]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: variant-digest-${{ matrix.variant }}-*
+          path: /tmp/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        env:
+          NEW_VERSION: ${{ needs.bump.outputs.new_version }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          sources=()
+          for digest in *; do
+            sources+=("${IMAGE}@sha256:${digest}")
+          done
+          docker buildx imagetools create \
+            -t "${IMAGE}:${NEW_VERSION#v}-${VARIANT}" \
+            -t "${IMAGE}:${VARIANT}" \
+            "${sources[@]}"

@@ -12,7 +12,6 @@ import (
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/dashboard"
-	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/envtui"
 	"github.com/josegonzalez/safeclaw/internal/prompt"
 	"github.com/josegonzalez/safeclaw/internal/secrets"
@@ -23,38 +22,62 @@ import (
 
 func newPullCommand() *cobra.Command {
 	var tag string
+	var variants []string
 	cmd := &cobra.Command{
 		Use:   "pull",
-		Short: "Pull the published safeclaw image and tag it locally",
-		Args:  cobra.NoArgs,
+		Short: "Pull the published safeclaw image and its variants, and tag them locally",
+		Long: "Pull the published safeclaw image and tag it locally. Then fetch each variant named with --variant, and every variant already present locally: " +
+			"built-in variants are pulled, and variants from the config file are built on the pulled image.",
+		Example: `  safeclaw pull
+  safeclaw pull --variant sandbox`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			out := cmd.OutOrStdout()
 			if tag == "" {
 				tag = version.ImageTag()
 			}
+			set, err := loadVariants()
+			if err != nil {
+				return err
+			}
+			d := newDocker()
+			refresh, err := variantsToRefresh(ctx, d, set, variants)
+			if err != nil {
+				return err
+			}
 			ref := config.RemoteImage + ":" + tag
-			d := docker.New()
-			if err := d.R.Passthrough(cmd.Context(), "pull", ref); err != nil {
+			if err := d.R.Passthrough(ctx, "pull", ref); err != nil {
 				return err
 			}
-			if err := d.Tag(cmd.Context(), ref, config.ImageName); err != nil {
+			if err := d.Tag(ctx, ref, config.ImageName); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Tagged %s as %s\n", ref, config.ImageName)
-			return reportStale(cmd.Context(), d, cmd.OutOrStdout(), false)
+			fmt.Fprintf(out, "Tagged %s as %s\n", ref, config.ImageName)
+			for _, v := range refresh {
+				if err := pullVariant(ctx, d, out, v, tag); err != nil {
+					return err
+				}
+			}
+			return reportStale(ctx, d, out, false)
 		},
 	}
 	cmd.Flags().StringVar(&tag, "tag", "", "image tag to pull (default: this binary's version, or latest)")
+	cmd.Flags().StringSliceVar(&variants, "variant", nil, "also fetch this image variant (repeatable)")
+	_ = cmd.RegisterFlagCompletionFunc("variant", completeVariants)
 	return cmd
 }
 
 type runFlags struct {
-	session, volume, query string
-	noOpen                 bool
+	session, volume, variant, query string
+	noOpen                          bool
 }
 
 func (f *runFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVarP(&f.session, "session", "s", "", "session name (default \"default\")")
 	cmd.Flags().StringVarP(&f.volume, "volume", "v", "", "mount a host directory, /host/path:/container/path (recreates an existing container)")
+	cmd.Flags().StringVar(&f.variant, "variant", "", "image variant, or base for the base image (default from the config file, else base; a different one recreates an existing container)")
+	_ = cmd.RegisterFlagCompletionFunc("variant", completeVariants)
 	cmd.Flags().BoolVarP(&f.noOpen, "no-open", "n", false, "do not open the browser")
 	cmd.Flags().StringVarP(&f.query, "query", "q", "", "send this query to Claude Code once it starts")
 }
@@ -63,6 +86,7 @@ func (f *runFlags) options(interactive bool) session.Options {
 	return session.Options{
 		Name:        f.session,
 		Volume:      f.volume,
+		Variant:     f.variant,
 		Query:       f.query,
 		NoOpen:      f.noOpen,
 		Interactive: interactive,
@@ -160,7 +184,7 @@ func newListCommand() *cobra.Command {
 // writeSessions writes the `safeclaw ls` table.
 func writeSessions(out io.Writer, list []session.Session) error {
 	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "SESSION\tTYPE\tSTATUS\tURL\tVOLUME")
+	fmt.Fprintln(w, "SESSION\tTYPE\tVARIANT\tSTATUS\tURL\tVOLUME")
 	for _, s := range list {
 		url := s.URL
 		if url == "" {
@@ -170,7 +194,7 @@ func writeSessions(out io.Writer, list []session.Session) error {
 		if s.IsOneOff() {
 			typ += " (one-off)"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.Name, typ, s.Status, url, s.Volume)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.Name, typ, variantColumn(s), s.Status, url, s.Volume)
 	}
 	return w.Flush()
 }

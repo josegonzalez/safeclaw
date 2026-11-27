@@ -26,6 +26,7 @@ type Mount struct {
 	Type        string `json:"Type"`
 	Source      string `json:"Source"`
 	Destination string `json:"Destination"`
+	RW          bool   `json:"RW"`
 }
 
 // PortBinding is a host binding for a container port.
@@ -49,6 +50,12 @@ type Container struct {
 		PortBindings map[string][]PortBinding `json:"PortBindings"`
 		// AutoRemove is set for containers created with `docker run --rm`.
 		AutoRemove bool `json:"AutoRemove"`
+		// Memory is the memory limit in bytes, 0 for none.
+		Memory int64 `json:"Memory"`
+		// NanoCpus is the CPU limit in billionths of a CPU, 0 for none.
+		NanoCpus int64 `json:"NanoCpus"`
+		// PidsLimit is the process limit, nil or 0 for none.
+		PidsLimit *int64 `json:"PidsLimit"`
 	} `json:"HostConfig"`
 	Mounts []Mount `json:"Mounts"`
 }
@@ -89,6 +96,30 @@ outer:
 			}
 		}
 		out = append(out, m.Source+":"+m.Destination)
+	}
+	return out
+}
+
+// BindSpecs returns each bind mount as a `docker run -v` spec,
+// "source:destination", with ":ro" appended for read-only mounts, skipping
+// any whose destination is in skip.
+func (c Container) BindSpecs(skip ...string) []string {
+	var out []string
+outer:
+	for _, m := range c.Mounts {
+		if m.Type != "bind" {
+			continue
+		}
+		for _, s := range skip {
+			if m.Destination == s {
+				continue outer
+			}
+		}
+		spec := m.Source + ":" + m.Destination
+		if !m.RW {
+			spec += ":ro"
+		}
+		out = append(out, spec)
 	}
 	return out
 }

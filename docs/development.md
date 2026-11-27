@@ -6,6 +6,7 @@
 make build      # ./safeclaw with version info
 make install    # go install
 make image      # build the image from this checkout (safeclaw build --context .)
+./safeclaw build --context . --variant sandbox   # also build the sandbox variant
 ```
 
 ## Testing
@@ -13,10 +14,10 @@ make image      # build the image from this checkout (safeclaw build --context .
 ```bash
 make test               # unit tests (docker is faked)
 make lint               # golangci-lint
-make test-integration   # real docker; needs the safeclaw image
+make test-integration   # real docker; needs the safeclaw image, and safeclaw:sandbox for the variant test
 ```
 
-Unit tests use `internal/docker/dockertest`, a fake docker runner that records every command. The integration tests (`-tags integration`) create, restart, and delete a real session container, and check a real sandbox's isolation: its user, network, read-only mounts and root fs, `docker cp` into `/sandbox`, and that removing it removes its volume. They also check that a one-off sandbox from `sandbox run --rm` is removed with its volume when stopped, and that `sandbox exec --ephemeral` passes stdin, stdout, and the exit code through and leaves no container behind.
+Unit tests use `internal/docker/dockertest`, a fake docker runner that records every command. The integration tests (`-tags integration`) create, restart, and delete a real session container, and check a real sandbox's isolation: its user, network, read-only mounts and root fs, `docker cp` into `/sandbox`, and that removing it removes its volume. They also check that a one-off sandbox from `sandbox run --rm` is removed with its volume when stopped, and that `sandbox exec --ephemeral` passes stdin, stdout, and the exit code through and leaves no container behind. These run on the base image. With the `sandbox` variant built, another test checks that sandboxes use it by default, that its poppler, tesseract (with English), 7zip, and file tools run, and that it keeps the sandbox's label, user, and network isolation.
 
 ## End to end
 
@@ -41,6 +42,16 @@ safeclaw sandbox exec t -- id                # uid=2000(sandbox)
 safeclaw sandbox exec t -- ls /home/sclaw    # permission denied
 safeclaw sandbox exec t -- touch /in/x       # read-only file system
 safeclaw sandbox rm -f t
+```
+
+For the sandbox variant:
+
+```bash
+./safeclaw build --context . --variant sandbox
+safeclaw variant ls                                          # safeclaw:sandbox (present)
+safeclaw sandbox exec --ephemeral -v ./docs:/in -- file /in/README.md
+safeclaw sandbox exec --ephemeral -- tesseract --list-langs   # includes eng
+safeclaw sandbox exec --ephemeral --variant base -- sh -c 'command -v pdftotext'   # not found
 ```
 
 For one-off sandboxes:
@@ -69,9 +80,10 @@ Run the Release workflow from the Actions tab (or `gh workflow run release.yml -
 - runs the tests against the tagged commit
 - runs goreleaser to publish darwin/linux amd64/arm64 archives with completions. The `safeclaw` formula in `josegonzalez/homebrew-repo` is bumped by that repo's daily `update-formulas.yml` workflow, which opens a PR when a new release appears
 - builds the image natively on amd64 and arm64 runners and pushes a multi-arch manifest to `ghcr.io/josegonzalez/safeclaw` tagged with the version and `latest`
+- builds each built-in variant on top of that image from `safeclaw variant dockerfile NAME`, with an empty config directory so only the built-in definition applies, and pushes it tagged `<version>-NAME` and `NAME`
 
 `make release-snapshot` runs goreleaser locally without publishing.
 
 ## Updating pinned versions
 
-Image versions are `ARG`s at the top of the `Dockerfile`'s runtime stage (`CLAUDE_CODE_VERSION`, `PLAYWRIGHT_MCP_VERSION`, `CLAUDE_CODE_TIPS_VERSION`, `NODE_VERSION`, `NODE_LIEF_VERSION`). Update the README's "What's included" section to match. Go dependencies are updated with `go get -u ./... && go mod tidy`. htmx is vendored from the `htmx.org` npm package's `dist/` directory.
+Built-in variants and their packages are defined in `internal/variant/variant.go` (`Builtins`). Image versions are `ARG`s at the top of the `Dockerfile`'s runtime stage (`CLAUDE_CODE_VERSION`, `PLAYWRIGHT_MCP_VERSION`, `CLAUDE_CODE_TIPS_VERSION`, `NODE_VERSION`, `NODE_LIEF_VERSION`). Update the README's "What's included" section to match. Go dependencies are updated with `go get -u ./... && go mod tidy`. htmx is vendored from the `htmx.org` npm package's `dist/` directory.

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/secrets"
+	"github.com/josegonzalez/safeclaw/internal/variant"
 )
 
 // TestIntegrationLifecycle runs a real session against the local safeclaw
@@ -117,7 +119,7 @@ func TestIntegrationSandbox(t *testing.T) {
 	container := config.ContainerName(name)
 	t.Cleanup(func() { _ = d.Remove(ctx, container, true) })
 
-	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name, Volume: in + ":/in"}); err != nil {
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name, Volume: in + ":/in", Variant: config.BaseVariant}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -222,7 +224,7 @@ func TestIntegrationSandboxRemove(t *testing.T) {
 		SessionsDir: filepath.Join(dir, "sessions"),
 		Out:         os.Stdout,
 	}
-	res, err := m.EnsureSandbox(ctx, SandboxOptions{Remove: true})
+	res, err := m.EnsureSandbox(ctx, SandboxOptions{Remove: true, Variant: config.BaseVariant})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,6 +278,9 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 	m := &Manager{Docker: d}
 	run := func(opts SandboxOptions, stdin string, cmd ...string) (string, error) {
 		t.Helper()
+		if opts.Variant == "" {
+			opts.Variant = config.BaseVariant
+		}
 		argv, name, err := m.PrepareEphemeral(ctx, opts, stdin != "", false, cmd)
 		if err != nil {
 			t.Fatal(err)
@@ -309,4 +314,71 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 	if !errors.As(err, &exit) || exit.ExitCode() != 3 {
 		t.Errorf("exit code: err = %v, want exit status 3", err)
 	}
+}
+
+// TestIntegrationSandboxVariant checks that the built-in sandbox variant has
+// the document extraction tools, that sandboxes use it by default, and that
+// it keeps the sandbox isolation.
+func TestIntegrationSandboxVariant(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, variant.Image(variant.Sandbox)); err != nil || id == "" {
+		t.Skip("sandbox variant not built; run `safeclaw build --variant sandbox` first")
+	}
+	m := &Manager{Docker: d}
+	run := func(cmd ...string) (string, error) {
+		t.Helper()
+		argv, name, err := m.PrepareEphemeral(ctx, SandboxOptions{}, false, false, cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(argv, variant.Image(variant.Sandbox)) {
+			t.Errorf("argv does not use the sandbox variant: %v", argv)
+		}
+		container := config.ContainerName(name)
+		t.Cleanup(func() { _ = d.Remove(ctx, container, true) })
+		out, err := d.R.Output(ctx, nil, argv[1:]...)
+		waitGone(t, d, container)
+		return string(out), err
+	}
+	for _, cmd := range [][]string{
+		{"pdftotext", "-v"},
+		{"pdfinfo", "-v"},
+		{"pdftoppm", "-v"},
+		{"7z", "i"},
+		{"file", "--version"},
+	} {
+		if _, err := run(cmd...); err != nil {
+			t.Errorf("%v: %v", cmd, err)
+		}
+	}
+	if out, err := run("tesseract", "--list-langs"); err != nil || !strings.Contains(out, "eng") {
+		t.Errorf("tesseract languages = %q, %v", out, err)
+	}
+	if out, err := run("file", "--brief", "/etc/hostname"); err != nil || strings.TrimSpace(out) == "" {
+		t.Errorf("file = %q, %v", out, err)
+	}
+
+	res, err := m.EnsureSandbox(ctx, SandboxOptions{Remove: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Remove(ctx, res.Container, true) })
+	c, err := d.InspectOne(ctx, res.Container)
+	if err != nil || c == nil {
+		t.Fatalf("inspect = %v, %v", c, err)
+	}
+	if c.Label(config.LabelVariant) != variant.Sandbox || c.Label(config.LabelType) != config.TypeSandbox {
+		t.Errorf("labels = %v", c.Config.Labels)
+	}
+	if out, err := d.Exec(ctx, res.Container, docker.ExecOptions{}, "id", "-un"); err != nil || strings.TrimSpace(string(out)) != config.SandboxUser {
+		t.Errorf("exec user = %q, %v", out, err)
+	}
+	if out, err := d.Exec(ctx, res.Container, docker.ExecOptions{}, "ls", "/sys/class/net"); err != nil || strings.TrimSpace(string(out)) != "lo" {
+		t.Errorf("network interfaces = %q, %v", out, err)
+	}
+	if err := m.Stop(ctx, res.Name); err != nil {
+		t.Fatal(err)
+	}
+	waitGone(t, d, res.Container)
 }

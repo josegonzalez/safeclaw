@@ -34,9 +34,9 @@ func newSandboxCommand() *cobra.Command {
 }
 
 type sandboxFlags struct {
-	session, volume, memory, cpus string
-	pidsLimit                     int
-	remove                        bool
+	session, volume, variant, memory, cpus string
+	pidsLimit                              int
+	remove                                 bool
 }
 
 // limitFlags are the sandbox run flags that recreate an existing sandbox
@@ -44,28 +44,38 @@ type sandboxFlags struct {
 var limitFlags = []string{"memory", "pids-limit", "cpus"}
 
 // createFlags are the flags that configure a new sandbox.
-var createFlags = append([]string{"session", "volume"}, limitFlags...)
+var createFlags = append([]string{"session", "volume", "variant"}, limitFlags...)
 
 // register adds the flags that configure a new sandbox. recreates is
 // appended to the help of the flags that recreate an existing sandbox.
 func (f *sandboxFlags) register(cmd *cobra.Command, nameHelp, recreates string) {
 	cmd.Flags().StringVarP(&f.session, "session", "s", "", nameHelp)
 	cmd.Flags().StringVarP(&f.volume, "volume", "v", "", "mount a host directory read-only, /host/path:/container/path"+recreates)
+	cmd.Flags().StringVar(&f.variant, "variant", "", "image variant, or base for the base image (default from the config file, else sandbox)"+recreates)
+	_ = cmd.RegisterFlagCompletionFunc("variant", completeVariants)
 	cmd.Flags().StringVar(&f.memory, "memory", session.DefaultSandboxMemory, "memory limit"+recreates)
 	cmd.Flags().IntVar(&f.pidsLimit, "pids-limit", session.DefaultSandboxPidsLimit, "process limit"+recreates)
 	cmd.Flags().StringVar(&f.cpus, "cpus", session.DefaultSandboxCPUs, "CPU limit"+recreates)
 }
 
 // options maps the flags to SandboxOptions. changed reports whether a flag
-// was set on the command line.
+// was set on the command line. Limits are only passed when set, so a
+// recreated sandbox keeps the others.
 func (f sandboxFlags) options(changed func(name string) bool) session.SandboxOptions {
 	opts := session.SandboxOptions{
-		Name:      f.session,
-		Volume:    f.volume,
-		Memory:    f.memory,
-		PidsLimit: f.pidsLimit,
-		CPUs:      f.cpus,
-		Remove:    f.remove,
+		Name:    f.session,
+		Volume:  f.volume,
+		Variant: f.variant,
+		Remove:  f.remove,
+	}
+	if changed("memory") {
+		opts.Memory = f.memory
+	}
+	if changed("pids-limit") {
+		opts.PidsLimit = f.pidsLimit
+	}
+	if changed("cpus") {
+		opts.CPUs = f.cpus
 	}
 	for _, name := range limitFlags {
 		if changed(name) {
@@ -155,7 +165,7 @@ func newSandboxExecCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var argv []string
 			if ephemeral {
-				opts := f.options(func(string) bool { return false })
+				opts := f.options(func(name string) bool { return cmd.Flags().Changed(name) })
 				var err error
 				argv, _, err = session.NewManager(nil).PrepareEphemeral(cmd.Context(), opts, interactive, tty, args)
 				if err != nil {
@@ -200,14 +210,14 @@ func newSandboxListCommand() *cobra.Command {
 // writeSandboxes writes the `safeclaw sandbox ls` table.
 func writeSandboxes(out io.Writer, list []session.Session) error {
 	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "SANDBOX\tSTATUS\tONE-OFF\tVOLUME")
+	fmt.Fprintln(w, "SANDBOX\tVARIANT\tSTATUS\tONE-OFF\tVOLUME")
 	for _, s := range list {
 		if s.IsSandbox() {
 			oneOff := "-"
 			if s.IsOneOff() {
 				oneOff = "yes"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", s.Name, s.Status, oneOff, s.Volume)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.Name, variantColumn(s), s.Status, oneOff, s.Volume)
 		}
 	}
 	return w.Flush()
@@ -247,4 +257,13 @@ func newSandboxRemoveCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "remove a running sandbox too")
 	return cmd
+}
+
+// variantColumn returns a session's variant for listings, "-" for the base
+// image.
+func variantColumn(s session.Session) string {
+	if s.Variant == "" {
+		return "-"
+	}
+	return s.Variant
 }

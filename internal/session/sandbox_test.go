@@ -15,7 +15,9 @@ import (
 
 var sandboxLabels = map[string]string{"safeclaw.type": "sandbox"}
 
-const sandboxRunPrefix = "run -d --name safeclaw-box --label safeclaw.type=sandbox --network none --user sandbox --workdir /sandbox" +
+// sandboxRunPrefix is the run command of a sandbox on the default sandbox
+// variant.
+const sandboxRunPrefix = "run -d --name safeclaw-box --label safeclaw.type=sandbox --label safeclaw.variant=sandbox --network none --user sandbox --workdir /sandbox" +
 	" --env HOME=/sandbox --env BASH_ENV= --env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" +
 	" --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m -v /sandbox"
 
@@ -37,7 +39,7 @@ func TestEnsureSandboxCreates(t *testing.T) {
 	if !ok {
 		t.Fatal("no docker run")
 	}
-	want := sandboxRunPrefix + " --memory 1g --pids-limit 256 --cpus 1 safeclaw sleep infinity"
+	want := sandboxRunPrefix + " --memory 1g --pids-limit 256 --cpus 1 safeclaw:sandbox sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -64,7 +66,7 @@ func TestEnsureSandboxLimitsAndVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, _ := r.Find("run ")
-	want := sandboxRunPrefix + " --memory 512m --pids-limit 64 --cpus 0.5 -v /in:/in:ro,z safeclaw sleep infinity"
+	want := sandboxRunPrefix + " --memory 512m --pids-limit 64 --cpus 0.5 -v /in:/in:ro,z safeclaw:sandbox sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -241,7 +243,7 @@ func TestEnsureSandboxRemove(t *testing.T) {
 	}
 	run, _ := r.Find("run ")
 	want := strings.Replace(sandboxRunPrefix, "run -d --name safeclaw-box", "run -d --rm --name safeclaw-job", 1) +
-		" --memory 1g --pids-limit 256 --cpus 1 safeclaw sleep infinity"
+		" --memory 1g --pids-limit 256 --cpus 1 safeclaw:sandbox sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -316,17 +318,22 @@ func TestEnsureSandboxRemoveErrors(t *testing.T) {
 
 func TestEphemeralRunArgs(t *testing.T) {
 	isolation := strings.TrimPrefix(sandboxRunPrefix, "run -d ")
+	base := strings.Replace(isolation, " --label safeclaw.variant=sandbox", "", 1)
 	limits := " --memory 1g --pids-limit 256 --cpus 1"
+	sb := SandboxOptions{Variant: "sandbox"}
 	cases := []struct {
 		i, t bool
 		opts SandboxOptions
 		want string
 	}{
-		{false, false, SandboxOptions{}, "--rm --init " + isolation + limits + " safeclaw pdftotext - -"},
-		{true, false, SandboxOptions{}, "--rm --init -i " + isolation + limits + " safeclaw pdftotext - -"},
-		{true, true, SandboxOptions{}, "--rm --init -i -t " + isolation + limits + " safeclaw pdftotext - -"},
-		{false, false, SandboxOptions{Volume: "/in:/in:rw", Memory: "2g", PidsLimit: 8, CPUs: "2"},
-			"--rm --init " + isolation + " --memory 2g --pids-limit 8 --cpus 2 -v /in:/in:ro safeclaw pdftotext - -"},
+		{false, false, sb, "--rm --init " + isolation + limits + " safeclaw:sandbox pdftotext - -"},
+		{true, false, sb, "--rm --init -i " + isolation + limits + " safeclaw:sandbox pdftotext - -"},
+		{true, true, sb, "--rm --init -i -t " + isolation + limits + " safeclaw:sandbox pdftotext - -"},
+		{false, false, SandboxOptions{Variant: "sandbox", Volume: "/in:/in:rw", Memory: "2g", PidsLimit: 8, CPUs: "2"},
+			"--rm --init " + isolation + " --memory 2g --pids-limit 8 --cpus 2 -v /in:/in:ro safeclaw:sandbox pdftotext - -"},
+		// Already resolved: empty is the base image.
+		{false, false, SandboxOptions{}, "--rm --init " + base + limits + " safeclaw pdftotext - -"},
+		{false, false, SandboxOptions{Variant: "base"}, "--rm --init " + base + limits + " safeclaw pdftotext - -"},
 	}
 	for _, tc := range cases {
 		got, err := EphemeralRunArgs("safeclaw-box", tc.opts, tc.i, tc.t, []string{"pdftotext", "-", "-"})
@@ -356,7 +363,7 @@ func TestPrepareEphemeral(t *testing.T) {
 	if name != "tmp-abcd1234" {
 		t.Errorf("name = %q", name)
 	}
-	want, _ := EphemeralRunArgs("safeclaw-tmp-abcd1234", SandboxOptions{}, true, false, []string{"cat"})
+	want, _ := EphemeralRunArgs("safeclaw-tmp-abcd1234", SandboxOptions{Variant: "sandbox"}, true, false, []string{"cat"})
 	if !slices.Equal(argv, append([]string{"docker", "run"}, want...)) {
 		t.Errorf("argv = %v", argv)
 	}

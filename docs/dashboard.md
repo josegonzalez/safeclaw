@@ -12,6 +12,8 @@ The server runs one `docker events` stream, restarted a second after it exits. W
 
 Sandboxes are listed in the table with a `sandbox` badge and only their stop or delete button. They have no URL, info dialog, start button, or iframe, and start and info return 409 for them. Create refuses a sandbox's name like any other taken name. One-off sandboxes also get a `one-off` badge, and stopping one removes its row, because docker removes the container when it stops.
 
+The new session dialog has an image variant picker listing `base` and every [variant](architecture.md#image-variants). Its first option, `default`, sends no variant, so the session gets the configured default, named in the option. Sessions and sandboxes on a variant show a badge with its name. Variants are read from the config file on every page load; if the file is invalid, the picker shows only `default` along with the error.
+
 Dashboard actions respond with `HX-Trigger: sessions`, so the page also refreshes right away without waiting for the docker event.
 
 ## Two-click confirm
@@ -25,7 +27,7 @@ Stop and delete need two clicks. The first POST returns a "stop?"/"delete?" butt
 | `GET /` | Full page |
 | `GET /fragments/sessions`, `GET /fragments/frames` | Table (or empty state) and frames grid |
 | `GET /events` | SSE stream of `sessions` events |
-| `POST /sessions` | Create a session (`name`, `volume`, `query`, `open_tab`). Errors return 422 and render in the dialog |
+| `POST /sessions` | Create a session (`name`, `volume`, `variant`, `query`, `open_tab`). Errors return 422 and render in the dialog |
 | `GET /sessions/validate?name=` | Name hint shown while typing |
 | `GET /sessions/{name}/info` | Session info dialog with the `docker exec` attach command |
 | `GET /sessions/{name}/actions` | Normal action button, used to revert a confirm |
@@ -35,11 +37,11 @@ The JSON API from upstream is kept for scripting:
 
 | Route | Body | Response |
 |-------|------|----------|
-| `GET /api/sessions` | | `[{name, port, url, volume, active, type, autoRemove}]`, `type` is `session` or `sandbox`, `autoRemove` is true for one-off sandboxes |
+| `GET /api/sessions` | | `[{name, port, url, volume, active, type, variant, autoRemove}]`, `type` is `session` or `sandbox`, `variant` is the image variant (`""` for the base image), `autoRemove` is true for one-off sandboxes |
 | `POST /api/start` | `{"name"}` | `{success, url}`, or 409 for a sandbox |
 | `POST /api/stop` | `{"name"}` | `{success}` |
 | `POST /api/delete` | `{"name"}` | `{success}` |
-| `POST /api/create` | `{"name", "volume", "query"}` | `{success, url}` or `{success: false, error}`, with 409 for a sandbox name |
+| `POST /api/create` | `{"name", "volume", "variant", "query"}` | `{success, url}` or `{success: false, error}`, with 409 for a sandbox name |
 | `GET /api/events` | | SSE, `data: <docker action>` |
 
 ## Security

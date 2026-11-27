@@ -14,20 +14,42 @@ import (
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/session"
+	"github.com/josegonzalez/safeclaw/internal/variant"
 	"github.com/josegonzalez/safeclaw/internal/version"
+)
+
+// newDocker and loadVariants are replaced in tests.
+var (
+	newDocker    = docker.New
+	loadVariants = func() (*variant.Set, error) { return variant.Load(config.File()) }
 )
 
 func newBuildCommand() *cobra.Command {
 	var contextDir string
+	var variants []string
 	var noCache, recreate bool
 	cmd := &cobra.Command{
 		Use:   "build",
-		Short: "Build the safeclaw image",
-		Long:  "Build the safeclaw image from the build context embedded in this binary, or from a checkout with --context. Afterwards, warns about session containers that still run an older image.",
-		Args:  cobra.NoArgs,
+		Short: "Build the safeclaw image and its variants",
+		Long: "Build the safeclaw image from the build context embedded in this binary, or from a checkout with --context. " +
+			"Then build each variant named with --variant, and rebuild every variant already built locally, so none is left on the old image. " +
+			"Afterwards, warns about session containers that still run an older image.",
+		Example: `  safeclaw build
+  safeclaw build --variant sandbox`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			out := cmd.OutOrStdout()
+			set, err := loadVariants()
+			if err != nil {
+				return err
+			}
+			d := newDocker()
+			// Find the variants to rebuild before the base image changes.
+			refresh, err := variantsToRefresh(ctx, d, set, variants)
+			if err != nil {
+				return err
+			}
 			dir := contextDir
 			if dir == "" {
 				tmp, err := os.MkdirTemp("", "safeclaw-build-")
@@ -51,17 +73,88 @@ func newBuildCommand() *cobra.Command {
 				args = append(args, "--no-cache")
 			}
 			args = append(args, dir)
-			d := docker.New()
 			if err := d.R.Passthrough(ctx, args...); err != nil {
 				return err
+			}
+			for _, v := range refresh {
+				if err := buildVariant(ctx, d, out, v, noCache); err != nil {
+					return err
+				}
 			}
 			return reportStale(ctx, d, out, recreate)
 		},
 	}
 	cmd.Flags().StringVar(&contextDir, "context", "", "build from this directory instead of the embedded build context")
+	cmd.Flags().StringSliceVar(&variants, "variant", nil, "also build this image variant (repeatable)")
+	_ = cmd.RegisterFlagCompletionFunc("variant", completeVariants)
 	cmd.Flags().BoolVar(&noCache, "no-cache", false, "do not use the docker build cache")
 	cmd.Flags().BoolVar(&recreate, "recreate", false, "remove session containers built from an older image (history is kept on the host)")
 	return cmd
+}
+
+// variantsToRefresh returns the requested variants plus every variant whose
+// image exists locally, sorted by name. Requesting base is a no-op.
+func variantsToRefresh(ctx context.Context, d *docker.Client, set *variant.Set, requested []string) ([]variant.Variant, error) {
+	want := map[string]bool{}
+	for _, name := range requested {
+		name, err := set.Resolve(name)
+		if err != nil {
+			return nil, err
+		}
+		if name != "" {
+			want[name] = true
+		}
+	}
+	var out []variant.Variant
+	for _, v := range set.All() {
+		if !want[v.Name] {
+			id, err := d.ImageID(ctx, v.Image())
+			if err != nil {
+				return nil, err
+			}
+			if id == "" {
+				continue
+			}
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// buildVariant builds a variant on top of the local base image.
+func buildVariant(ctx context.Context, d *docker.Client, out io.Writer, v variant.Variant, noCache bool) error {
+	dir, err := os.MkdirTemp("", "safeclaw-variant-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	if err := os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte(variant.Dockerfile(v)), 0o644); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Building variant %s...\n", v.Name)
+	args := []string{"build", "-t", v.Image(), "--build-arg", "BASE=" + config.ImageName}
+	if noCache {
+		args = append(args, "--no-cache")
+	}
+	return d.R.Passthrough(ctx, append(args, dir)...)
+}
+
+// pullVariant pulls a published built-in variant for tag and tags it
+// locally. Variants from the config file are built on the local base image
+// instead.
+func pullVariant(ctx context.Context, d *docker.Client, out io.Writer, v variant.Variant, tag string) error {
+	if !v.Published() {
+		return buildVariant(ctx, d, out, v, false)
+	}
+	ref := variant.RemoteRef(tag, v.Name)
+	if err := d.R.Passthrough(ctx, "pull", ref); err != nil {
+		return fmt.Errorf("pull %s: %w (build it locally with `safeclaw build --variant %s`)", ref, err, v.Name)
+	}
+	if err := d.Tag(ctx, ref, v.Image()); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Tagged %s as %s\n", ref, v.Image())
+	return nil
 }
 
 // extractFS writes an fs.FS to dir.
@@ -96,19 +189,25 @@ func extractFS(src fs.FS, dir string) error {
 }
 
 // reportStale lists session containers that are not running the current
-// image, and removes them if recreate is set.
+// image of their variant, and removes them if recreate is set.
 func reportStale(ctx context.Context, d *docker.Client, out io.Writer, recreate bool) error {
-	imageID, err := d.ImageID(ctx, config.ImageName)
-	if err != nil || imageID == "" {
-		return err
-	}
 	cs, err := d.List(ctx, config.ContainerPrefix)
 	if err != nil {
 		return err
 	}
+	ids := map[string]string{}
 	var stale []docker.Container
 	for _, c := range cs {
-		if c.Image != imageID {
+		image := variant.Image(c.Label(config.LabelVariant))
+		id, ok := ids[image]
+		if !ok {
+			if id, err = d.ImageID(ctx, image); err != nil {
+				return err
+			}
+			ids[image] = id
+		}
+		// A container whose image is gone is stale too.
+		if id == "" || c.Image != id {
 			stale = append(stale, c)
 		}
 	}
