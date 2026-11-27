@@ -166,8 +166,8 @@ func TestIndexRendersSessionsAndFrames(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		`hx-sse:connect="/events"`,
-		`<a href="/sessions/work/terminal" target="_blank" title="localhost:7681">localhost:7681</a>`,
-		`<td class="volume" title="/p:/home/sclaw/p">/p:/home/sclaw/p</td>`,
+		`<a href="/sessions/work/terminal" target="_blank" title="localhost:7681"><bdi>localhost:7681</bdi></a>`,
+		`<td class="volume" title="/p:/home/sclaw/p"><bdi>/p:/home/sclaw/p</bdi></td>`,
 		`hx-post="/sessions/work/stop"`,
 		`hx-post="/sessions/old/start"`,
 		`hx-post="/sessions/old/delete"`,
