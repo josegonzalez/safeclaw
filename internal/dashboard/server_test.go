@@ -166,13 +166,13 @@ func TestIndexRendersSessionsAndFrames(t *testing.T) {
 	body := rec.Body.String()
 	for _, want := range []string{
 		`hx-sse:connect="/events"`,
-		`<a href="http://localhost:7681" target="_blank">localhost:7681</a>`,
+		`<a href="/sessions/work/terminal" target="_blank">localhost:7681</a>`,
 		`hx-post="/sessions/work/stop"`,
 		`hx-post="/sessions/old/start"`,
 		`hx-post="/sessions/old/delete"`,
 		`class="inactive-row"`,
 		`/p:/home/sclaw/p`,
-		`<iframe id="iframe-safeclaw-work" src="http://localhost:7681">`,
+		`<iframe id="iframe-safeclaw-work" src="/sessions/work/terminal">`,
 		`class="frames single"`,
 		`<dialog id="new-session-modal"`,
 	} {
@@ -274,7 +274,7 @@ func TestCreate(t *testing.T) {
 	}
 	var created createResult
 	_ = json.Unmarshal(trig["session-created"], &created)
-	if created.URL != "http://localhost:7690" || !created.OpenTab {
+	if created.URL != "/sessions/new-one/terminal" || !created.OpenTab {
 		t.Errorf("trigger = %s", rec.Header().Get("HX-Trigger"))
 	}
 	if _, ok := trig["sessions"]; !ok {

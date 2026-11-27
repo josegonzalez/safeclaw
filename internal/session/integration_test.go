@@ -41,6 +41,7 @@ func TestIntegrationLifecycle(t *testing.T) {
 		Docker:      d,
 		Secrets:     store,
 		SessionsDir: filepath.Join(dir, "sessions"),
+		TTYDDir:     filepath.Join(dir, "ttyd"),
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 		OpenBrowser: func(string) error { return nil },
@@ -55,6 +56,17 @@ func TestIntegrationLifecycle(t *testing.T) {
 	waitHTTP(t, res.URL)
 	if c, err := d.InspectOne(ctx, res.Container); err != nil || c == nil || c.HostConfig.IpcMode == config.IPCHost {
 		t.Errorf("session shares the host IPC namespace: %+v, %v", c, err)
+	}
+	// Without the credential, ttyd refuses the request, and nothing
+	// answers on the dashboard cookie's host.
+	if resp, err := http.Get(URLFor(res.Port)); err != nil || resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("ttyd without the credential: %v, %v", resp, err)
+	} else {
+		_ = resp.Body.Close()
+	}
+	if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", res.Port)); err == nil {
+		_ = resp.Body.Close()
+		t.Errorf("session terminal answered on 127.0.0.1: %d", resp.StatusCode)
 	}
 
 	if err := m.Stop(ctx, name); err != nil {
@@ -117,6 +129,7 @@ func TestIntegrationSandbox(t *testing.T) {
 		Docker:      d,
 		Secrets:     secrets.FileStore{Dir: filepath.Join(dir, ".secrets")},
 		SessionsDir: filepath.Join(dir, "sessions"),
+		TTYDDir:     filepath.Join(dir, "ttyd"),
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 	}
@@ -227,6 +240,7 @@ func TestIntegrationSandboxRemove(t *testing.T) {
 		Docker:      d,
 		Secrets:     secrets.FileStore{Dir: filepath.Join(dir, ".secrets")},
 		SessionsDir: filepath.Join(dir, "sessions"),
+		TTYDDir:     filepath.Join(dir, "ttyd"),
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 	}
@@ -415,6 +429,7 @@ func TestIntegrationSecrets(t *testing.T) {
 		Docker:      d,
 		Secrets:     store,
 		SessionsDir: filepath.Join(dir, "sessions"),
+		TTYDDir:     filepath.Join(dir, "ttyd"),
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 		OpenBrowser: func(string) error { return nil },
@@ -483,6 +498,7 @@ func TestIntegrationNetwork(t *testing.T) {
 		Docker:      d,
 		Secrets:     store,
 		SessionsDir: filepath.Join(dir, "sessions"),
+		TTYDDir:     filepath.Join(dir, "ttyd"),
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 		OpenBrowser: func(string) error { return nil },
@@ -548,6 +564,7 @@ func TestIntegrationSandboxCopy(t *testing.T) {
 		Docker:      d,
 		Secrets:     secrets.FileStore{Dir: filepath.Join(dir, ".secrets")},
 		SessionsDir: filepath.Join(dir, "sessions"),
+		TTYDDir:     filepath.Join(dir, "ttyd"),
 		NetworkDir:  filepath.Join(dir, "network"),
 		CopyDir:     filepath.Join(dir, "copy"),
 		Out:         os.Stdout,

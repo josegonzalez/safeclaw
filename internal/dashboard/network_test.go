@@ -30,13 +30,13 @@ func TestOfflineRendering(t *testing.T) {
 	if !strings.Contains(body, `title="disconnected from every network, held by job (opening a pdf)">offline</span>`) {
 		t.Error("offline badge with holders missing")
 	}
-	if strings.Contains(body, `href="http://localhost:7682"`) || strings.Contains(body, `iframe-safeclaw-triage`) {
+	if strings.Contains(body, `href="/sessions/triage/terminal"`) || strings.Contains(body, `iframe-safeclaw-triage`) {
 		t.Error("offline session still links or frames its web terminal")
 	}
 	if !strings.Contains(body, `id="offline-safeclaw-triage"`) || !strings.Contains(body, "safeclaw net on triage") {
 		t.Error("offline placeholder missing")
 	}
-	if !strings.Contains(body, `<iframe id="iframe-safeclaw-work" src="http://localhost:7681">`) {
+	if !strings.Contains(body, `<iframe id="iframe-safeclaw-work" src="/sessions/work/terminal">`) {
 		t.Error("online frame missing")
 	}
 	for _, want := range []string{

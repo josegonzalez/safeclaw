@@ -50,6 +50,9 @@ type Options struct {
 	Sessions Sessions
 	// Events overrides the docker event stream (used in tests).
 	Events EventSource
+	// Terminals overrides Manager for reaching session terminals (used in
+	// tests).
+	Terminals Terminals
 	// Port is the port to listen on.
 	Port int
 	// Dev serves templates and static files from disk.
@@ -66,13 +69,14 @@ type Options struct {
 
 // Server is the dashboard HTTP server.
 type Server struct {
-	sessions Sessions
-	events   EventSource
-	hub      *Hub
-	port     int
-	files    fs.FS
-	dev      bool
-	tmpl     *template.Template
+	sessions  Sessions
+	events    EventSource
+	terminals Terminals
+	hub       *Hub
+	port      int
+	files     fs.FS
+	dev       bool
+	tmpl      *template.Template
 	// token is the launch token, kept in tokenFile while serving.
 	token     string
 	tokenFile string
@@ -88,17 +92,21 @@ var tips = []string{
 // New builds a Server.
 func New(opts Options) (*Server, error) {
 	s := &Server{
-		sessions: opts.Sessions,
-		events:   opts.Events,
-		hub:      NewHub(),
-		port:     opts.Port,
-		dev:      opts.Dev,
+		sessions:  opts.Sessions,
+		events:    opts.Events,
+		terminals: opts.Terminals,
+		hub:       NewHub(),
+		port:      opts.Port,
+		dev:       opts.Dev,
 	}
 	if s.sessions == nil {
 		if opts.Manager == nil {
 			return nil, errors.New("dashboard: a session manager is required")
 		}
 		s.sessions = opts.Manager
+	}
+	if s.terminals == nil && opts.Manager != nil {
+		s.terminals = opts.Manager
 	}
 	if s.events == nil && opts.Manager != nil {
 		s.events = opts.Manager.Docker.Events
@@ -162,7 +170,8 @@ func (s *Server) parseTemplates() (*template.Template, error) {
 			}
 			return "stopping"
 		},
-		"holders": holders,
+		"holders":  holders,
+		"terminal": terminalPath,
 	}).ParseFS(s.files, "templates/*.html")
 }
 
@@ -192,6 +201,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /sessions/validate", s.handleValidate)
 	mux.HandleFunc("GET /sessions/{name}/info", s.handleInfo)
 	mux.HandleFunc("GET /sessions/{name}/actions", s.handleActions)
+	mux.HandleFunc("GET /sessions/{name}/terminal", s.handleTerminal)
+	mux.HandleFunc("GET /sessions/{name}/terminal/ws", s.handleTerminalSocket)
 	mux.HandleFunc("POST /sessions/{name}/start", s.handleStart)
 	mux.HandleFunc("POST /sessions/{name}/stop", s.handleConfirmed("stop"))
 	mux.HandleFunc("POST /sessions/{name}/delete", s.handleConfirmed("delete"))
@@ -454,7 +465,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	trigger, _ := json.Marshal(map[string]any{
-		"session-created": createResult{URL: res.URL, OpenTab: r.PostForm.Get("open_tab") != ""},
+		"session-created": createResult{URL: terminalPath(res.Name), OpenTab: r.PostForm.Get("open_tab") != ""},
 		"sessions":        true,
 	})
 	w.Header().Set("HX-Trigger", string(trigger))
