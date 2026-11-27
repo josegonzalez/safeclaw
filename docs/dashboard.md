@@ -12,7 +12,7 @@ Each running session's frame is an iframe of `/sessions/NAME/terminal`, the dash
 
 ## Live updates
 
-The server runs one `docker events` stream of container and network events, restarted a second after it exits. Whenever a `safeclaw-*` container is created, started, stopped, dies, or is destroyed, or one is connected to or disconnected from a network (checked by container ID, since network events name the network), it sends a `sessions` event to every browser on `/events`. The page then re-fetches the sessions table and the frames grid and morphs them into place (`innerMorph`/`outerMorph`). Unchanged iframes keep their DOM node, so running terminals don't reconnect when another session changes.
+The server runs one `docker events` stream of container and network events. When it exits it is restarted after a second, and the wait doubles each time it exits again, up to 30 seconds, until a stream lasts that long. Whenever a `safeclaw-*` container is created, started, stopped, dies, or is destroyed, or one is connected to or disconnected from a network (checked by container ID, since network events name the network), it sends a `sessions` event to every browser on `/events`. The container behind a network event is inspected in the background, at most four at a time, so a slow inspect doesn't hold up other events. Events may be missed while the stream restarts, and an event line over 1 MiB or that isn't JSON is skipped, so both also send a `sessions` event, and `refresh` on `/api/events`. The page then re-fetches the sessions table and the frames grid and morphs them into place (`innerMorph`/`outerMorph`). Unchanged iframes keep their DOM node, so running terminals don't reconnect when another session changes.
 
 Sandboxes are listed in the table with a `sandbox` badge and only their stop or delete button. They have no URL, info dialog, start button, or iframe, and start and info return 409 for them. Create refuses a sandbox's name like any other taken name. One-off sandboxes also get a `one-off` badge, and stopping one removes its row, because docker removes the container when it stops.
 
@@ -67,7 +67,7 @@ curl -H "Authorization: Bearer $(cat ~/.config/safeclaw/dashboard/7680.token)" h
 | `POST /api/net/off` | `{"name", "owner", "reason"}` | `{success, offline, holds}`, or 409 for a sandbox or a network that can't be disconnected |
 | `POST /api/net/on` | `{"name", "owner", "force"}` | `{success, offline, holds}`. `offline` stays true while other holds remain. 409 with the holders when `owner` holds nothing but others do |
 | `POST /api/create` | `{"name", "volume", "variant", "secrets", "query", "recreate"}` | `{success, url}` (with the credential, as for start) or `{success: false, error}`, with 400 for an invalid name, 409 for a sandbox name, for an existing session's name unless `recreate` is true, or when it would recreate an offline session. With `recreate`, an existing session is started, and recreated when a volume is given or the variant or secrets differ, as `safeclaw run` does. `secrets` is `"all"`, `"none"`, or a list of names; leaving it out keeps an existing session's set, or gives a new one every secret |
-| `GET /api/events` | | SSE, `data: <docker action>` |
+| `GET /api/events` | | SSE, `data: <docker action>`, or `data: refresh` when events may have been missed |
 
 ## Security
 

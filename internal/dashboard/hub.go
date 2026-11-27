@@ -28,6 +28,24 @@ var watchedNetworkActions = map[string]bool{
 	"disconnect": true,
 }
 
+// RefreshAction is published when events may have been missed, because
+// the event stream restarted or a line of it could not be read, so clients
+// should fetch everything again.
+const RefreshAction = "refresh"
+
+const (
+	// minRestartDelay and maxRestartDelay bound how long Run waits before
+	// restarting the event stream. The delay doubles each time the stream
+	// ends, and is reset once a stream lasts maxRestartDelay.
+	minRestartDelay = time.Second
+	maxRestartDelay = 30 * time.Second
+	// maxLookups is how many IsSession lookups run at once.
+	maxLookups = 4
+	// maxPendingLookups is how many containers can wait for a lookup.
+	// Past it, network events are published without one.
+	maxPendingLookups = 256
+)
+
 // EventSource streams docker container events until ctx ends or the stream fails.
 type EventSource func(ctx context.Context, fn func(docker.Event)) error
 
@@ -37,19 +55,39 @@ type Hub struct {
 	clients map[chan string]struct{}
 	// IsSession reports whether a container ID belongs to a safeclaw
 	// container, to filter network events. Nil publishes them all. An error
-	// means it could not tell, and the answer is not cached.
+	// means it could not tell, and the answer is not cached. It is called
+	// off the event loop, so a slow inspect doesn't hold up other events.
 	IsSession func(id string) (bool, error)
 
 	// sessions caches IsSession answers by container ID. An entry is dropped
 	// when its container is destroyed, and all of them when the event stream
-	// restarts, since a destroy may have been missed.
+	// restarts, since a destroy may have been missed. pending holds the
+	// lookups running or waiting for a slot, by container ID.
 	sessionsMu sync.Mutex
 	sessions   map[string]bool
+	pending    map[string]*lookup
+	slots      chan struct{}
+	lookups    sync.WaitGroup
+
+	minDelay, maxDelay time.Duration
+}
+
+// lookup is an IsSession call for one container, with the actions of the
+// network events waiting on its answer.
+type lookup struct {
+	actions []string
 }
 
 // NewHub returns an empty Hub.
 func NewHub() *Hub {
-	return &Hub{clients: map[chan string]struct{}{}, sessions: map[string]bool{}}
+	return &Hub{
+		clients:  map[chan string]struct{}{},
+		sessions: map[string]bool{},
+		pending:  map[string]*lookup{},
+		slots:    make(chan struct{}, maxLookups),
+		minDelay: minRestartDelay,
+		maxDelay: maxRestartDelay,
+	}
 }
 
 // Subscribe registers a client. Call the returned function to unsubscribe.
@@ -80,11 +118,17 @@ func (h *Hub) Publish(action string) {
 
 // Handle publishes an event if it is a watched action on a safeclaw
 // container. Network events name the network, so their container is
-// checked by ID.
+// checked by ID. A line that could not be read publishes RefreshAction,
+// since the event it held is lost.
 func (h *Hub) Handle(ev docker.Event) {
+	if ev.Err != nil {
+		log.Printf("docker events: skipped an event: %v", ev.Err)
+		h.Publish(RefreshAction)
+		return
+	}
 	if ev.Type == "network" {
-		if watchedNetworkActions[ev.Action] && h.isSession(ev.Container) {
-			h.Publish(ev.Action)
+		if watchedNetworkActions[ev.Action] {
+			h.publishIfSession(ev.Container, ev.Action)
 		}
 		return
 	}
@@ -97,34 +141,76 @@ func (h *Hub) Handle(ev docker.Event) {
 	h.Publish(ev.Action)
 }
 
-// isSession answers IsSession for a container ID, from the cache when it can.
-func (h *Hub) isSession(id string) bool {
+// publishIfSession publishes action if the container is a session. An
+// answer that isn't cached is looked up in the background, and the action
+// published when it comes, so the event loop never waits on docker.
+func (h *Hub) publishIfSession(id, action string) {
 	if h.IsSession == nil {
-		return true
+		h.Publish(action)
+		return
 	}
 	if id == "" {
-		return false
+		return
 	}
 	h.sessionsMu.Lock()
-	v, ok := h.sessions[id]
-	h.sessionsMu.Unlock()
-	if ok {
-		return v
+	if v, ok := h.sessions[id]; ok {
+		h.sessionsMu.Unlock()
+		if v {
+			h.Publish(action)
+		}
+		return
 	}
+	if l, ok := h.pending[id]; ok {
+		l.actions = append(l.actions, action)
+		h.sessionsMu.Unlock()
+		return
+	}
+	if len(h.pending) >= maxPendingLookups {
+		h.sessionsMu.Unlock()
+		// Too many lookups are stuck to wait for another; an extra
+		// refresh is harmless.
+		h.Publish(action)
+		return
+	}
+	l := &lookup{actions: []string{action}}
+	h.pending[id] = l
+	h.lookups.Add(1)
+	h.sessionsMu.Unlock()
+	go h.lookup(id, l)
+}
+
+// lookup answers a pending lookup and publishes its actions if the
+// container is a session.
+func (h *Hub) lookup(id string, l *lookup) {
+	defer h.lookups.Done()
+	h.slots <- struct{}{}
 	v, err := h.IsSession(id)
-	if err != nil {
-		return false
-	}
+	<-h.slots
 	h.sessionsMu.Lock()
-	h.sessions[id] = v
+	// The lookup was dropped if the container was destroyed or the stream
+	// restarted meanwhile, and its answer may be stale.
+	current := h.pending[id] == l
+	if current {
+		delete(h.pending, id)
+		if err == nil {
+			h.sessions[id] = v
+		}
+	}
+	actions := l.actions
 	h.sessionsMu.Unlock()
-	return v
+	if err != nil || !v {
+		return
+	}
+	for _, a := range actions {
+		h.Publish(a)
+	}
 }
 
 // forget drops a container's cached IsSession answer.
 func (h *Hub) forget(id string) {
 	h.sessionsMu.Lock()
 	delete(h.sessions, id)
+	delete(h.pending, id)
 	h.sessionsMu.Unlock()
 }
 
@@ -132,6 +218,7 @@ func (h *Hub) forget(id string) {
 func (h *Hub) forgetAll() {
 	h.sessionsMu.Lock()
 	clear(h.sessions)
+	clear(h.pending)
 	h.sessionsMu.Unlock()
 }
 
@@ -155,19 +242,33 @@ func isSession(d *docker.Client) func(id string) (bool, error) {
 	}
 }
 
-// Run consumes events until ctx is done, restarting the stream a second
-// after it ends.
+// Run consumes events until ctx is done. When the stream ends it is
+// restarted after a delay that backs off while it keeps failing, and
+// clients are told to refresh, since events may have been missed.
 func (h *Hub) Run(ctx context.Context, events EventSource) {
-	for ctx.Err() == nil {
+	delay := h.minDelay
+	for restarted := false; ctx.Err() == nil; restarted = true {
 		// Destroy events may have been missed while the stream was down.
 		h.forgetAll()
-		if err := events(ctx, h.Handle); err != nil && ctx.Err() == nil {
+		if restarted {
+			h.Publish(RefreshAction)
+		}
+		start := time.Now()
+		err := events(ctx, h.Handle)
+		if ctx.Err() != nil {
+			return
+		}
+		if err != nil {
 			log.Printf("docker events: %v", err)
+		}
+		if time.Since(start) >= h.maxDelay {
+			delay = h.minDelay
 		}
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(time.Second):
+		case <-time.After(delay):
 		}
+		delay = min(delay*2, h.maxDelay)
 	}
 }

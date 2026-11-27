@@ -206,6 +206,7 @@ func TestHubNetworkEvents(t *testing.T) {
 	h.Handle(docker.Event{Type: "network", Action: "disconnect", Name: "bridge", Container: "other"})
 	h.Handle(docker.Event{Type: "network", Action: "create", Name: "bridge", Container: "abc"})
 	h.Handle(docker.Event{Type: "network", Action: "disconnect", Name: "bridge", Container: "abc"})
+	h.lookups.Wait()
 	select {
 	case got := <-ch:
 		if got != "disconnect" {
