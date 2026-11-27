@@ -190,7 +190,9 @@ func (s *Server) templates() (*template.Template, error) {
 
 // Handler returns the dashboard's HTTP handler, with Host, authentication,
 // and cross-origin protections applied. Every route, static files included,
-// needs the launch token.
+// needs the launch token, and every route but the page shells and static
+// files needs it as the bearer token or the cookie with its second secret
+// (see Access).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -201,6 +203,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fragments/sessions", s.handleFragment("sessions"))
 	mux.HandleFunc("GET /fragments/frames", s.handleFragment("frames"))
 	mux.HandleFunc("GET /fragments/auth", s.handleFragment("auth-banner"))
+	mux.HandleFunc("GET /fragments/options", s.handleOptions)
 	mux.HandleFunc("GET /events", s.handleEvents)
 
 	mux.HandleFunc("POST /sessions", s.handleCreate)
@@ -223,6 +226,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/net/off", s.apiNetOff)
 	mux.HandleFunc("POST /api/net/on", s.apiNetOn)
 	mux.HandleFunc("GET /api/events", s.apiEvents)
+
+	mux.HandleFunc("POST /tickets", s.access.handleTicket)
 
 	cop := http.NewCrossOriginProtection()
 	return refuseFraming(s.checkHost(s.access.Middleware(cop.Handler(mux))))
@@ -380,17 +385,7 @@ func (s *Server) load(ctx context.Context) view {
 	if err != nil {
 		v.Err = err.Error()
 	}
-	if set, err := s.sessions.Variants(); err != nil {
-		v.VariantErr = err.Error()
-	} else {
-		v.Variants = append([]string{config.BaseVariant}, set.Names()...)
-		v.DefaultVariant = variant.Label(set.DefaultFor(config.TypeSession))
-	}
-	if names, err := s.sessions.SecretNames(); err != nil {
-		v.SecretErr = err.Error()
-	} else {
-		v.SecretNames = names
-	}
+	s.loadOptions(&v)
 	if st, err := s.sessions.ClaudeTokenStatus(time.Now()); err != nil {
 		v.TokenErr = err.Error()
 	} else {
@@ -402,6 +397,22 @@ func (s *Server) load(ctx context.Context) view {
 		}
 	}
 	return v
+}
+
+// loadOptions loads the variants and secret names the new session form
+// offers into v.
+func (s *Server) loadOptions(v *view) {
+	if set, err := s.sessions.Variants(); err != nil {
+		v.VariantErr = err.Error()
+	} else {
+		v.Variants = append([]string{config.BaseVariant}, set.Names()...)
+		v.DefaultVariant = variant.Label(set.DefaultFor(config.TypeSession))
+	}
+	if names, err := s.sessions.SecretNames(); err != nil {
+		v.SecretErr = err.Error()
+	} else {
+		v.SecretNames = names
+	}
 }
 
 func (s *Server) render(w http.ResponseWriter, status int, name string, data any) {
@@ -421,14 +432,25 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, data any
 	_, _ = buf.WriteTo(w)
 }
 
-func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	s.render(w, http.StatusOK, "page", s.load(r.Context()))
+// handleIndex serves the page shell, which a browser opens with only the
+// cookie, so it shows no state: the sessions, frames, banner, and new
+// session options are fetched by htmx, which sends the second secret.
+func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
+	s.render(w, http.StatusOK, "page", nil)
 }
 
 func (s *Server) handleFragment(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusOK, name, s.load(r.Context()))
 	}
+}
+
+// handleOptions renders the new session form's variant and secrets
+// pickers.
+func (s *Server) handleOptions(w http.ResponseWriter, _ *http.Request) {
+	var v view
+	s.loadOptions(&v)
+	s.render(w, http.StatusOK, "session-options", v)
 }
 
 // refresh tells the page to re-render the sessions table and frames.

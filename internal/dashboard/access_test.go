@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -101,7 +102,14 @@ var routes = []struct{ method, path, body string }{
 	{"POST", "/api/net/off", `{"name":"work"}`},
 	{"POST", "/api/net/on", `{"name":"work","force":true}`},
 	{"GET", "/api/events", ""},
+	{"POST", "/tickets", "path=/sessions/work/terminal/ws"},
 	{"GET", "/missing", ""},
+}
+
+// isPage reports whether path is one of the page shells or static files,
+// which the cookie opens on its own.
+func isPage(method, path string) bool {
+	return method == "GET" && (path == "/" || strings.HasPrefix(path, "/static/") || path == "/sessions/work/terminal")
 }
 
 func newAuthServer(t *testing.T, sessions Sessions) http.Handler {
@@ -123,6 +131,42 @@ func login(t *testing.T, h http.Handler) string {
 		t.Fatalf("exchange = %d, cookies %v", rec.Code, cookies)
 	}
 	return cookies[0].Name + "=" + cookies[0].Value
+}
+
+// browserLogin opens the launch URL on h like a browser and returns the
+// headers its pages then send: the cookie, and the second secret from the
+// redirect's fragment.
+func browserLogin(t *testing.T, h http.Handler) map[string]string {
+	t.Helper()
+	rec := send(h, "GET", "http://127.0.0.1:7680/?token="+testToken, "", nil)
+	cookies := rec.Result().Cookies()
+	if rec.Code != http.StatusSeeOther || len(cookies) != 1 {
+		t.Fatalf("exchange = %d, cookies %v", rec.Code, cookies)
+	}
+	return map[string]string{"Cookie": cookies[0].Name + "=" + cookies[0].Value, secretHeader: fragmentSecret(t, rec.Header().Get("Location"))}
+}
+
+// fragmentSecret returns the second secret in the fragment of loc.
+func fragmentSecret(t *testing.T, loc string) string {
+	t.Helper()
+	_, frag, ok := strings.Cut(loc, "#")
+	secret, found := strings.CutPrefix(frag, secretFragment+"=")
+	if !ok || !found || len(secret) < 26 {
+		t.Fatalf("redirect %q carries no secret", loc)
+	}
+	return secret
+}
+
+// with returns a copy of hdr with the extra pairs set.
+func with(hdr map[string]string, pairs ...string) map[string]string {
+	out := map[string]string{}
+	for k, v := range hdr {
+		out[k] = v
+	}
+	for i := 0; i+1 < len(pairs); i += 2 {
+		out[pairs[i]] = pairs[i+1]
+	}
+	return out
 }
 
 func send(h http.Handler, method, target, body string, hdr map[string]string) *httptest.ResponseRecorder {
@@ -266,11 +310,11 @@ func TestTokenInPOSTQueryIsRefused(t *testing.T) {
 func TestBearerAndCookieAuthorize(t *testing.T) {
 	f := &fakeSessions{list: sampleSessions()}
 	h := newAuthServer(t, f)
-	cookie := login(t, h)
+	browser := browserLogin(t, h)
 	for name, hdr := range map[string]map[string]string{
-		"bearer":           {"Authorization": "Bearer " + testToken},
-		"lowercase bearer": {"Authorization": "bearer " + testToken},
-		"cookie":           {"Cookie": cookie},
+		"bearer":            {"Authorization": "Bearer " + testToken},
+		"lowercase bearer":  {"Authorization": "bearer " + testToken},
+		"cookie and secret": browser,
 	} {
 		for _, path := range []string{"/", "/static/app.js", "/fragments/sessions", "/api/sessions"} {
 			if rec := send(h, "GET", "http://127.0.0.1:7680"+path, "", hdr); rec.Code != http.StatusOK {
@@ -286,12 +330,9 @@ func TestBearerAndCookieAuthorize(t *testing.T) {
 	if rec := send(h, "GET", "http://evil.example/", "", map[string]string{"Authorization": "Bearer " + testToken}); rec.Code != http.StatusForbidden {
 		t.Errorf("foreign Host with the token = %d", rec.Code)
 	}
-	rec = send(h, "POST", "http://127.0.0.1:7680/sessions/work/stop", "confirm=1", map[string]string{
-		"Cookie":         cookie,
-		"Sec-Fetch-Site": "cross-site",
-	})
+	rec = send(h, "POST", "http://127.0.0.1:7680/sessions/work/stop", "confirm=1", with(browser, "Sec-Fetch-Site", "cross-site"))
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("cross-site POST with the cookie = %d", rec.Code)
+		t.Errorf("cross-site POST with the cookie and secret = %d", rec.Code)
 	}
 }
 
@@ -300,16 +341,20 @@ func TestBearerAndCookieAuthorize(t *testing.T) {
 // as the cookie, and only for this run of the dashboard.
 func TestCookieIsNotTheToken(t *testing.T) {
 	h := newAuthServer(t, &fakeSessions{list: sampleSessions()})
-	cookie := login(t, h)
+	browser := browserLogin(t, h)
+	cookie := browser["Cookie"]
 	name, value, _ := strings.Cut(cookie, "=")
 	if name != "safeclaw_dashboard_7680" || value == testToken || strings.Contains(value, testToken) || len(value) < 26 {
 		t.Fatalf("cookie = %q", cookie)
 	}
-	if again := login(t, h); again != cookie {
-		t.Errorf("second login got %q, want the same cookie %q", again, cookie)
+	if secret := browser[secretHeader]; secret == value || secret == testToken || strings.Contains(secret, testToken) {
+		t.Fatalf("secret = %q, cookie %q", secret, value)
 	}
-	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", map[string]string{"Cookie": cookie}); rec.Code != http.StatusOK {
-		t.Errorf("cookie = %d", rec.Code)
+	if again := browserLogin(t, h); again["Cookie"] != cookie || again[secretHeader] != browser[secretHeader] {
+		t.Errorf("second login got %v, want the same cookie and secret %v", again, browser)
+	}
+	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", browser); rec.Code != http.StatusOK {
+		t.Errorf("cookie and secret = %d", rec.Code)
 	}
 	for name, hdr := range map[string]map[string]string{
 		"cookie value as bearer": {"Authorization": "Bearer " + value},
@@ -325,13 +370,156 @@ func TestCookieIsNotTheToken(t *testing.T) {
 	}
 	// A bearer header decides on its own; a valid cookie beside a wrong
 	// bearer doesn't let it through.
-	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", map[string]string{"Cookie": cookie, "Authorization": "Bearer nope"}); rec.Code != http.StatusUnauthorized {
+	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", with(browser, "Authorization", "Bearer nope")); rec.Code != http.StatusUnauthorized {
 		t.Errorf("wrong bearer with the cookie = %d", rec.Code)
 	}
 	// Another run of the dashboard, with the same token, refuses it.
 	other := newAuthServer(t, &fakeSessions{list: sampleSessions()})
-	if rec := send(other, "GET", "http://127.0.0.1:7680/api/sessions", "", map[string]string{"Cookie": cookie}); rec.Code != http.StatusUnauthorized {
-		t.Errorf("cookie from another run = %d", rec.Code)
+	if rec := send(other, "GET", "http://127.0.0.1:7680/api/sessions", "", browser); rec.Code != http.StatusUnauthorized {
+		t.Errorf("cookie and secret from another run = %d", rec.Code)
+	}
+	if rec := send(other, "GET", "http://127.0.0.1:7680/", "", browser); rec.Code != http.StatusUnauthorized {
+		t.Errorf("page with the cookie from another run = %d", rec.Code)
+	}
+}
+
+// TestCookieAloneOpensOnlyPages is the regression test for #106: the
+// browser sends the cookie to every port on 127.0.0.1, so whoever listens
+// on one can replay it from a client without Origin or Sec-Fetch-Site. The
+// cookie alone, or with any header such a client can make up, only opens
+// the page shells and static files, which show no state.
+func TestCookieAloneOpensOnlyPages(t *testing.T) {
+	h := newAuthServer(t, noSessions{t})
+	browser := browserLogin(t, h)
+	cookie := browser["Cookie"]
+	_, value, _ := strings.Cut(cookie, "=")
+	for name, hdr := range map[string]map[string]string{
+		"cookie":             {"Cookie": cookie},
+		"wrong secret":       {"Cookie": cookie, secretHeader: "nope"},
+		"token as secret":    {"Cookie": cookie, secretHeader: testToken},
+		"cookie as secret":   {"Cookie": cookie, secretHeader: value},
+		"forged same-origin": {"Cookie": cookie, "Origin": "http://127.0.0.1:7680", "Sec-Fetch-Site": "same-origin"},
+		"made up ticket":     {"Cookie": cookie},
+	} {
+		for _, rt := range routes {
+			target := "http://127.0.0.1:7680" + rt.path
+			if name == "made up ticket" {
+				target += "?ticket=" + value
+			}
+			rec := send(h, rt.method, target, rt.body, hdr)
+			want := http.StatusUnauthorized
+			if isPage(rt.method, rt.path) {
+				want = http.StatusOK
+			}
+			if rec.Code != want {
+				t.Errorf("%s: %s %s = %d, want %d", name, rt.method, rt.path, rec.Code, want)
+			}
+		}
+	}
+	// The secret without the cookie is no good either.
+	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", map[string]string{secretHeader: browser[secretHeader]}); rec.Code != http.StatusUnauthorized {
+		t.Errorf("secret without the cookie = %d", rec.Code)
+	}
+
+	// The browser's own requests, which carry the secret, go through.
+	f := &fakeSessions{list: sampleSessions()}
+	h = newAuthServer(t, f)
+	browser = browserLogin(t, h)
+	cookieOnly := map[string]string{"Cookie": browser["Cookie"]}
+	create := `{"name":"v2","volume":"/:/host"}`
+	if rec := send(h, "POST", "http://127.0.0.1:7680/api/create", create, cookieOnly); rec.Code != http.StatusUnauthorized || len(f.ensured) != 0 {
+		t.Fatalf("cookie-only create = %d, ensured %v", rec.Code, f.ensured)
+	}
+	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", cookieOnly); rec.Code != http.StatusUnauthorized {
+		t.Errorf("cookie-only sessions = %d", rec.Code)
+	}
+	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", browser); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"name":"safeclaw-work"`) {
+		t.Errorf("sessions with the secret = %d %s", rec.Code, rec.Body)
+	}
+	if rec := send(h, "POST", "http://127.0.0.1:7680/api/create", create, browser); rec.Code != http.StatusOK || len(f.ensured) != 1 || f.ensured[0].Volume != "/:/host" {
+		t.Errorf("create with the secret = %d %s, ensured %v", rec.Code, rec.Body, f.ensured)
+	}
+}
+
+// mintTicket asks h for a ticket for path with hdr and returns it.
+func mintTicket(t *testing.T, h http.Handler, hdr map[string]string, path string) string {
+	t.Helper()
+	rec := send(h, "POST", "http://127.0.0.1:7680/tickets", "path="+path, hdr)
+	if rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("ticket for %s = %d %q", path, rec.Code, rec.Body)
+	}
+	return rec.Body.String()
+}
+
+func TestTickets(t *testing.T) {
+	h := newAuthServer(t, &fakeSessions{list: sampleSessions()})
+	browser := browserLogin(t, h)
+	cookieOnly := map[string]string{"Cookie": browser["Cookie"]}
+	const ws = "/sessions/work/terminal/ws"
+
+	if rec := send(h, "POST", "http://127.0.0.1:7680/tickets", "path="+ws, cookieOnly); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ticket with only the cookie = %d", rec.Code)
+	}
+	for _, bad := range []string{"/api/sessions", "/events", ws + "?x=1", "http://127.0.0.1:7680" + ws, "sessions/work/terminal/ws", ""} {
+		if rec := send(h, "POST", "http://127.0.0.1:7680/tickets", "path="+url.QueryEscape(bad), browser); rec.Code != http.StatusBadRequest {
+			t.Errorf("ticket for %q = %d", bad, rec.Code)
+		}
+	}
+
+	// A ticket opens only its own path, only with the cookie, and only once.
+	// The terminal route answers 404 here, since the server has no
+	// terminals, which shows the request got past authentication.
+	tk := mintTicket(t, h, browser, ws)
+	if rec := send(h, "GET", "http://127.0.0.1:7680/sessions/other/terminal/ws?ticket="+tk, "", cookieOnly); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ticket on another path = %d", rec.Code)
+	}
+	if rec := send(h, "GET", "http://127.0.0.1:7680"+ws+"?ticket="+tk, "", cookieOnly); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ticket used after a refused try = %d", rec.Code)
+	}
+	tk = mintTicket(t, h, browser, ws)
+	if rec := send(h, "GET", "http://127.0.0.1:7680"+ws+"?ticket="+tk, "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ticket without the cookie = %d", rec.Code)
+	}
+	tk = mintTicket(t, h, browser, ws)
+	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions?ticket="+tk, "", cookieOnly); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ticket on the API = %d", rec.Code)
+	}
+	tk = mintTicket(t, h, browser, ws)
+	if rec := send(h, "GET", "http://127.0.0.1:7680"+ws+"?ticket="+tk, "", cookieOnly); rec.Code != http.StatusNotFound {
+		t.Errorf("ticket = %d, want it past authentication", rec.Code)
+	}
+	if rec := send(h, "GET", "http://127.0.0.1:7680"+ws+"?ticket="+tk, "", cookieOnly); rec.Code != http.StatusUnauthorized {
+		t.Errorf("ticket used twice = %d", rec.Code)
+	}
+	// Bearer callers can mint them too.
+	mintTicket(t, h, map[string]string{"Authorization": "Bearer " + testToken}, ws)
+}
+
+func TestTicketExpiryAndLimit(t *testing.T) {
+	a := NewAccess(testToken, 7680, "")
+	now := time.Unix(1000, 0)
+	a.now = func() time.Time { return now }
+	const ws = "/sessions/work/terminal/ws"
+	tk, ok := a.mint(ws)
+	if !ok {
+		t.Fatal("mint refused")
+	}
+	now = now.Add(ticketTTL)
+	if a.redeem(tk, ws) {
+		t.Error("expired ticket redeemed")
+	}
+	for i := range maxTickets {
+		if _, ok := a.mint(ws); !ok {
+			t.Fatalf("mint %d refused", i)
+		}
+	}
+	if _, ok := a.mint(ws); ok {
+		t.Error("minted past the limit")
+	}
+	// Expired tickets make room again.
+	now = now.Add(ticketTTL)
+	if _, ok := a.mint(ws); !ok {
+		t.Error("expired tickets kept their room")
 	}
 }
 
@@ -339,8 +527,13 @@ func TestTokenExchange(t *testing.T) {
 	h := newAuthServer(t, &fakeSessions{list: sampleSessions()})
 
 	rec := send(h, "GET", "http://127.0.0.1:7680/?token="+testToken, "", nil)
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/" {
-		t.Fatalf("exchange = %d to %q", rec.Code, rec.Header().Get("Location"))
+	loc := rec.Header().Get("Location")
+	if rec.Code != http.StatusSeeOther || !strings.HasPrefix(loc, "/#"+secretFragment+"=") {
+		t.Fatalf("exchange = %d to %q", rec.Code, loc)
+	}
+	secret := fragmentSecret(t, loc)
+	if secret == testToken || strings.Contains(secret, testToken) {
+		t.Errorf("secret = %q", secret)
 	}
 	if rec.Header().Get("Cache-Control") != "no-store" || rec.Header().Get("Referrer-Policy") != "no-referrer" {
 		t.Errorf("exchange headers %v", rec.Header())
@@ -350,17 +543,17 @@ func TestTokenExchange(t *testing.T) {
 		t.Fatalf("cookies = %v", cookies)
 	}
 	c := cookies[0]
-	if c.Name != "safeclaw_dashboard_7680" || c.Value == "" || c.Value == testToken || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" {
+	if c.Name != "safeclaw_dashboard_7680" || c.Value == "" || c.Value == testToken || c.Value == secret || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" {
 		t.Errorf("cookie = %+v", c)
 	}
 
 	rec = send(h, "GET", "http://127.0.0.1:7680/fragments/sessions?a=1&token="+testToken, "", nil)
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/fragments/sessions?a=1" {
+	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/fragments/sessions?a=1#"+secretFragment+"="+secret {
 		t.Errorf("exchange keeps other params: %d to %q", rec.Code, rec.Header().Get("Location"))
 	}
 
 	rec = send(h, "GET", "http://127.0.0.1:7680//evil.example/?token="+testToken, "", nil)
-	if loc := rec.Header().Get("Location"); loc != "/evil.example/" {
+	if loc := rec.Header().Get("Location"); loc != "/evil.example/#"+secretFragment+"="+secret {
 		t.Errorf("exchange redirects off-site: %q", loc)
 	}
 
@@ -404,20 +597,34 @@ func TestBrowserFlow(t *testing.T) {
 	}
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || resp.Request.URL.String() != srv.URL+"/" || !bytes.Contains(body, []byte(`hx-sse:connect="/events"`)) {
+	landed := *resp.Request.URL
+	landed.Fragment, landed.RawFragment = "", ""
+	if resp.StatusCode != http.StatusOK || landed.String() != srv.URL+"/" || !bytes.Contains(body, []byte(`hx-sse:connect="/events"`)) {
 		t.Fatalf("launch = %d at %s", resp.StatusCode, resp.Request.URL)
 	}
+	secret := fragmentSecret(t, resp.Request.URL.String())
 	if c := jar.Cookies(resp.Request.URL); len(c) != 1 || c[0].Value == testToken {
 		t.Errorf("browser cookies = %v, want one that is not the token", c)
 	}
 
+	// The cookie alone doesn't open the stream; htmx sends the secret.
 	resp, err = client.Get(srv.URL + "/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("events with only the cookie = %d", resp.StatusCode)
+	}
+	req, _ := http.NewRequest("GET", srv.URL+"/events", nil)
+	req.Header.Set(secretHeader, secret)
+	resp, err = client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = resp.Body.Close() })
 	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "text/event-stream" {
-		t.Fatalf("events with the cookie = %d %q", resp.StatusCode, resp.Header.Get("Content-Type"))
+		t.Fatalf("events with the cookie and secret = %d %q", resp.StatusCode, resp.Header.Get("Content-Type"))
 	}
 	if line, _ := bufio.NewReader(resp.Body).ReadString('\n'); line != ": connected\n" {
 		t.Errorf("events = %q", line)

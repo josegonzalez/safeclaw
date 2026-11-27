@@ -25,7 +25,7 @@ func networkSessions() []session.Session {
 
 func TestOfflineRendering(t *testing.T) {
 	h := newTestServer(t, &fakeSessions{list: networkSessions()})
-	body := do(h, "GET", "/", nil, nil).Body.String()
+	body := fullPage(h)
 
 	if !strings.Contains(body, `title="disconnected from every network, held by job (opening a pdf)">offline</span>`) {
 		t.Error("offline badge with holders missing")

@@ -19,7 +19,7 @@ func TestVariantPicker(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newTestServer(t, &fakeSessions{variants: set})
-	body := do(h, "GET", "/", nil, nil).Body.String()
+	body := fullPage(h)
 	for _, want := range []string{
 		`<select id="session-variant" name="variant">`,
 		`<option value="">default (docs)</option>`,
@@ -33,7 +33,7 @@ func TestVariantPicker(t *testing.T) {
 	}
 
 	h = newTestServer(t, &fakeSessions{variantErr: errors.New("bad config")})
-	body = do(h, "GET", "/", nil, nil).Body.String()
+	body = fullPage(h)
 	if !strings.Contains(body, "could not load variants: bad config") || !strings.Contains(body, `<option value="">default</option>`) {
 		t.Errorf("variant error not shown")
 	}

@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/dashproof"
 )
@@ -38,41 +40,124 @@ func NewToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
+// secretHeader carries a browser login's second secret on every request
+// its pages make.
+const secretHeader = "Safeclaw-Secret"
+
+// secretFragment names the second secret in the fragment of the URL the
+// token exchange redirects to.
+const secretFragment = "safeclaw-secret"
+
+// ticketParam is the query parameter carrying a ticket on the routes a
+// browser can't send headers to.
+const ticketParam = "ticket"
+
+// ticketTTL is how long a ticket can be redeemed for, and maxTickets bounds
+// how many are outstanding at once.
+const (
+	ticketTTL  = 30 * time.Second
+	maxTickets = 64
+)
+
+// pageRoutes are what a browser loads by navigating, which can't carry the
+// second secret: the page shells and the static files. They serve only the
+// dashboard's own code, never the state of a session or the host, so they
+// need just the cookie. Everything they show is fetched by app.js, which
+// sends the secret.
+var pageRoutes = []string{"GET /{$}", "GET /static/", "GET /sessions/{name}/terminal"}
+
+// ticketRoutes are opened by a browser API that can't set headers, the
+// terminal WebSocket, so they take the cookie with a ticket in place of the
+// secret.
+var ticketRoutes = []string{"GET /sessions/{name}/terminal/ws"}
+
 // Access authenticates dashboard callers. Browsers open the URL carrying
 // the launch token once and get an HttpOnly, SameSite=Strict cookie in
-// exchange; other clients send the token as `Authorization: Bearer`.
+// exchange, plus a second secret in the redirect's fragment, which app.js
+// keeps in the origin's localStorage and sends in the Safeclaw-Secret header.
+// Other clients send the token as `Authorization: Bearer`.
 //
-// The cookie holds a separate random value, not the token. Cookies are not
-// scoped by port, so the browser also sends it to anything else listening
-// on 127.0.0.1, such as a session published there before sessions moved to
-// [::1]. What such a listener gets is only good as this cookie, for this
-// run of the dashboard: it is not the bearer token that the token file and
-// the CLI use.
+// Cookies are not scoped by port, so the browser also sends the cookie to
+// anything else listening on 127.0.0.1, such as a session published there
+// before sessions moved to [::1] or another local user's server, which can
+// then replay it from any client with any headers. So the cookie alone only
+// opens the page shells. Storage is scoped to the origin, port included, and
+// no route returns the secret, so such a listener can't get it.
 type Access struct {
 	token string
-	// session is the cookie's value. It is only kept in memory, so it stops
-	// working when the dashboard stops.
+	// session is the cookie's value and secret the value that must come
+	// with it. Both are only kept in memory, so they stop working when the
+	// dashboard stops.
 	session string
+	secret  string
 	cookie  string
 	// port is the dashboard's port, which its proofs are bound to.
 	port int
 	// file is where the token is stored for API callers, named in the 401
 	// response.
 	file string
+
+	pages    *http.ServeMux
+	ticketed *http.ServeMux
+
+	mu      sync.Mutex
+	tickets map[string]ticket
+	now     func() time.Time
+}
+
+// ticket lets the cookie open path once, until expires.
+type ticket struct {
+	path    string
+	expires time.Time
 }
 
 // NewAccess returns an Access for token. The cookie is named after port so
 // dashboards on different ports don't overwrite each other's cookie.
 func NewAccess(token string, port int, file string) *Access {
-	return &Access{token: token, session: rand.Text(), cookie: "safeclaw_dashboard_" + strconv.Itoa(port), port: port, file: file}
+	return &Access{
+		token:    token,
+		session:  rand.Text(),
+		secret:   rand.Text(),
+		cookie:   "safeclaw_dashboard_" + strconv.Itoa(port),
+		port:     port,
+		file:     file,
+		pages:    routeSet(pageRoutes),
+		ticketed: routeSet(ticketRoutes),
+		tickets:  map[string]ticket{},
+		now:      time.Now,
+	}
 }
 
-// Middleware lets a request through to next only when it carries the
-// session cookie or the token in its Authorization header. A GET carrying
-// the token in the query is answered with the cookie and a redirect to the
-// same URL without the token. A request for dashproof.Path is answered with
-// the proof that this dashboard holds the token, with no login needed.
-// Anything else gets 401 without reaching next.
+// routeMark is the handler routeSet registers, so a match can be told from
+// the mux's own redirects and 404s.
+type routeMark struct{}
+
+func (*routeMark) ServeHTTP(http.ResponseWriter, *http.Request) {}
+
+var mark = &routeMark{}
+
+func routeSet(patterns []string) *http.ServeMux {
+	m := http.NewServeMux()
+	for _, p := range patterns {
+		m.Handle(p, mark)
+	}
+	return m
+}
+
+// isRoute reports whether r is for one of the routes in m.
+func isRoute(m *http.ServeMux, r *http.Request) bool {
+	h, _ := m.Handler(r)
+	return h == mark
+}
+
+// Middleware lets a request through to next only when it carries the token
+// in its Authorization header, or the session cookie with the second secret
+// in its Safeclaw-Secret header. The cookie alone is enough for pageRoutes,
+// and with a ticket for ticketRoutes. A GET carrying the token in the query
+// is answered with the cookie and a redirect to the same URL without the
+// token, with the secret in its fragment. A request for dashproof.Path is
+// answered with the proof that this dashboard holds the token, with no
+// login needed. Anything else gets 401 without reaching next.
 //
 // A handler behind it that forwards requests elsewhere, such as a session's
 // web terminal, must drop the cookie and Authorization header first.
@@ -87,7 +172,7 @@ func (a *Access) Middleware(next http.Handler) http.Handler {
 			a.exchange(w, r, q)
 			return
 		}
-		if a.Authorized(r) {
+		if a.allowed(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -95,14 +180,24 @@ func (a *Access) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// Authorized reports whether r carries the token as a bearer token or the
-// session value in the cookie. Neither is accepted in place of the other.
-func (a *Access) Authorized(r *http.Request) bool {
+// allowed reports whether r may reach the route it asks for. A bearer
+// header decides on its own, so a cookie can't make up for a wrong token.
+// Neither the token nor the cookie is accepted in place of the other.
+func (a *Access) allowed(r *http.Request) bool {
 	if scheme, tok, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "Bearer") {
 		return equal(strings.TrimSpace(tok), a.token)
 	}
-	if c, err := r.Cookie(a.cookie); err == nil {
-		return equal(c.Value, a.session)
+	c, err := r.Cookie(a.cookie)
+	if err != nil || !equal(c.Value, a.session) {
+		return false
+	}
+	switch {
+	case equal(r.Header.Get(secretHeader), a.secret):
+		return true
+	case isRoute(a.pages, r):
+		return true
+	case isRoute(a.ticketed, r):
+		return a.redeem(r.URL.Query().Get(ticketParam), r.URL.Path)
 	}
 	return false
 }
@@ -113,8 +208,10 @@ func equal(got, want string) bool {
 
 // exchange swaps the token in the query for the session cookie and
 // redirects to the URL without it, so the token leaves the address bar and
-// history. On any host other than 127.0.0.1 it first redirects there,
-// keeping the token.
+// history. The redirect's fragment carries the second secret, which the
+// browser never sends to a server or in a Referer; app.js stores it and
+// removes it from the address bar. On any host other than 127.0.0.1 it
+// first redirects there, keeping the token.
 func (a *Access) exchange(w http.ResponseWriter, r *http.Request, q url.Values) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -145,7 +242,63 @@ func (a *Access) exchange(w http.ResponseWriter, r *http.Request, q url.Values) 
 	delete(q, tokenParam)
 	// A path starting with // would redirect to another host.
 	u := url.URL{Path: "/" + strings.TrimLeft(r.URL.Path, "/"), RawQuery: q.Encode()}
-	http.Redirect(w, r, u.RequestURI(), http.StatusSeeOther)
+	http.Redirect(w, r, u.RequestURI()+"#"+secretFragment+"="+a.secret, http.StatusSeeOther)
+}
+
+// handleTicket answers with a ticket that lets the cookie open the path in
+// the form once, within ticketTTL, which must be one of ticketRoutes. It is
+// behind Middleware like every route, and isn't a page or ticket route, so
+// only a caller with the secret or the token gets one.
+func (a *Access) handleTicket(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	u, err := url.Parse(r.PostFormValue("path"))
+	if err != nil || u.Scheme != "" || u.Host != "" || u.RawQuery != "" || u.Fragment != "" || !strings.HasPrefix(u.Path, "/") ||
+		!isRoute(a.ticketed, &http.Request{Method: http.MethodGet, URL: &url.URL{Path: u.Path}, Host: r.Host}) {
+		http.Error(w, "tickets are only for the terminal WebSocket", http.StatusBadRequest)
+		return
+	}
+	t, ok := a.mint(u.Path)
+	if !ok {
+		http.Error(w, "too many outstanding tickets", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = io.WriteString(w, t)
+}
+
+// mint returns a new ticket for path, or false when maxTickets are still
+// outstanding. Expired tickets are dropped first.
+func (a *Access) mint(path string) (string, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	for k, t := range a.tickets {
+		if !now.Before(t.expires) {
+			delete(a.tickets, k)
+		}
+	}
+	if len(a.tickets) >= maxTickets {
+		return "", false
+	}
+	v := rand.Text()
+	a.tickets[v] = ticket{path: path, expires: now.Add(ticketTTL)}
+	return v, true
+}
+
+// redeem reports whether v is an unexpired ticket for path, and uses it up
+// whether or not it is.
+func (a *Access) redeem(v, path string) bool {
+	if v == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	t, ok := a.tickets[v]
+	if !ok {
+		return false
+	}
+	delete(a.tickets, v)
+	return t.path == path && a.now().Before(t.expires)
 }
 
 // prove answers the nonce in r with the proof that this dashboard holds the

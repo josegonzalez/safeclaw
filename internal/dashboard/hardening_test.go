@@ -165,7 +165,7 @@ func TestHxValsAndPaths(t *testing.T) {
 
 	// Rendered names go through them too.
 	h := newTestServer(t, &fakeSessions{list: []session.Session{{Container: "safeclaw-a&b", Name: "a&b", Active: true, Port: 7681, URL: "http://localhost:7681", Type: "session", Network: session.NetOnline}}})
-	body := do(h, "GET", "/", nil, nil).Body.String()
+	body := fullPage(h)
 	for _, want := range []string{`hx-post="/sessions/a&amp;b/stop"`, `hx-get="/sessions/a&amp;b/info"`, `src="/sessions/a&amp;b/terminal"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("index missing %s", want)

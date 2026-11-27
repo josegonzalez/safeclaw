@@ -24,7 +24,7 @@ func TestAuthBanner(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newTestServer(t, tc.f)
-			page := do(h, "GET", "/", nil, nil).Body.String()
+			page := fullPage(h)
 			frag := do(h, "GET", "/fragments/auth", nil, nil).Body.String()
 			for _, want := range tc.wants {
 				if !strings.Contains(page, want) {
@@ -34,7 +34,7 @@ func TestAuthBanner(t *testing.T) {
 					t.Errorf("fragment lacks %q", want)
 				}
 			}
-			if !strings.Contains(page, `<div id="auth-banner" hx-get="/fragments/auth" hx-trigger="sessions from:body"`) {
+			if !strings.Contains(page, `<div id="auth-banner" hx-get="/fragments/auth" hx-trigger="load, sessions from:body"`) {
 				t.Error("banner does not refresh on the sessions trigger")
 			}
 		})
