@@ -219,24 +219,43 @@ type Terminal struct {
 	Addr string
 	// Host is the Host and Origin ttyd's origin check expects,
 	// localhost:PORT.
-	Host       string
+	Host string
+	// Port is the host port, which session URLs name.
+	Port       int
 	Credential Credential
 }
 
+// URL returns the terminal's URL with its credential in it; see
+// URLWithCredential.
+func (t *Terminal) URL() string {
+	return URLWithCredential(t.Port, t.Credential)
+}
+
 // Terminal returns where to reach a running, online interactive session's
-// ttyd, and its credential.
+// ttyd, and its credential. A session without one gets an error wrapping
+// ErrNoTerminal that says why.
 func (m *Manager) Terminal(ctx context.Context, name string) (*Terminal, error) {
 	name = config.SessionName(name)
 	c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
 	if err != nil {
 		return nil, err
 	}
-	if c == nil || TypeOf(*c) != config.TypeSession || !c.State.Running || Offline(*c) {
-		return nil, fmt.Errorf("session %q %w", name, ErrNoTerminal)
+	noTerminal := func(why string) error {
+		return fmt.Errorf("session %q %w: %s", name, ErrNoTerminal, why)
+	}
+	switch {
+	case c == nil:
+		return nil, noTerminal("it does not exist")
+	case TypeOf(*c) != config.TypeSession:
+		return nil, noTerminal("it is a sandbox")
+	case !c.State.Running:
+		return nil, noTerminal("it is stopped; start it with `safeclaw run -s " + name + "`")
+	case Offline(*c):
+		return nil, noTerminal("it is offline; bring it back with `safeclaw net on " + name + "`")
 	}
 	port := c.HostPort(config.TTYDPort)
 	if port == 0 {
-		return nil, fmt.Errorf("session %q %w", name, ErrNoTerminal)
+		return nil, noTerminal("it has no published port")
 	}
 	cred, err := m.Credential(name)
 	if err != nil {
@@ -252,6 +271,7 @@ func (m *Manager) Terminal(ctx context.Context, name string) (*Terminal, error) 
 	return &Terminal{
 		Addr:       net.JoinHostPort(ip, strconv.Itoa(port)),
 		Host:       "localhost:" + strconv.Itoa(port),
+		Port:       port,
 		Credential: cred,
 	}, nil
 }

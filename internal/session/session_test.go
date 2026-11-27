@@ -305,6 +305,7 @@ func newTestManager(t *testing.T, w *world) (*Manager, *dockertest.Runner) {
 		Secrets:       store,
 		SessionsDir:   filepath.Join(dir, "sessions"),
 		TTYDDir:       filepath.Join(dir, "ttyd"),
+		DashboardDir:  filepath.Join(dir, "dashboard"),
 		NetworkDir:    filepath.Join(dir, "network"),
 		CopyDir:       filepath.Join(dir, "copy"),
 		PortFree:      func(int) bool { return true },
