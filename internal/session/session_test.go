@@ -355,7 +355,7 @@ func TestEnsureCreatesContainer(t *testing.T) {
 			t.Errorf("secret leaked into argv: %q", c)
 		}
 	}
-	if !hasCall(r, `exec -d safeclaw-work sh -c exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O -t titleFixed=SafeClaw - work -p 7681 safeclaw ttyd-wrapper`) {
+	if !hasCall(r, `exec -d safeclaw-work sh -c umask 022; exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O -t titleFixed=SafeClaw - work -p 7681 safeclaw ttyd-wrapper`) {
 		t.Errorf("ttyd not started natively: %v", r.Commands())
 	}
 	if hasCall(r, "exec safeclaw-work bash -c") {
@@ -376,7 +376,7 @@ func TestEnsureReusesRunningContainer(t *testing.T) {
 	if res.Port != 7690 {
 		t.Errorf("port = %d, want reused 7690", res.Port)
 	}
-	for _, p := range []string{"exec safeclaw-default pkill -f ttyd", "exec safeclaw-default tmux kill-server", "exec safeclaw-default bash -c"} {
+	for _, p := range []string{"exec safeclaw-default pkill -f ttyd", "exec safeclaw-default tmux kill-server", "exec safeclaw-default bash -c umask 022\n"} {
 		if !hasCall(r, p) {
 			t.Errorf("missing %q in %v", p, r.Commands())
 		}
@@ -385,7 +385,7 @@ func TestEnsureReusesRunningContainer(t *testing.T) {
 		t.Error("should not create or start")
 	}
 	// Upstream image: falls back to the legacy wrapper script.
-	if !hasCall(r, `exec -d safeclaw-default sh -c exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O -t titleFixed=SafeClaw - default -p 7681 /home/sclaw/ttyd-wrapper.sh`) {
+	if !hasCall(r, `exec -d safeclaw-default sh -c umask 022; exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O -t titleFixed=SafeClaw - default -p 7681 /home/sclaw/ttyd-wrapper.sh`) {
 		t.Errorf("legacy wrapper not used: %v", r.Commands())
 	}
 }
@@ -440,6 +440,18 @@ func TestEnsureQuery(t *testing.T) {
 	}
 	if cmds[j+1] != "exec safeclaw-q tmux send-keys -t main Enter" || cmds[j+2] != "exec safeclaw-q tmux send-keys -t main Enter" {
 		t.Errorf("expected two Enters after query: %v", cmds[j:])
+	}
+}
+
+func TestEnsureQueryLegacyUmask(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{}, prompt: true}
+	m, r := newTestManager(t, w)
+	if _, err := m.Ensure(context.Background(), Options{Name: "q", Query: "hi", NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The tmux server started here is the one Claude Code runs in.
+	if !hasCall(r, "exec safeclaw-q bash -c umask 022\nif ! tmux has-session") {
+		t.Errorf("legacy tmux session not started with umask 022: %v", r.Commands())
 	}
 }
 

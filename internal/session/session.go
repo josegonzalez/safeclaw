@@ -26,8 +26,13 @@ import (
 	"github.com/josegonzalez/safeclaw/internal/variant"
 )
 
+// sessionUmask starts every script that creates files in a session, or
+// starts processes that do: `docker exec` does not inherit the container's
+// umask on every engine, and some run commands with 0000.
+const sessionUmask = "umask 022"
+
 // gitConfigScript sets the container's git identity from the GitHub account.
-const gitConfigScript = `
+const gitConfigScript = sessionUmask + `
 if gh auth status >/dev/null 2>&1; then
     USER_DATA=$(gh api user 2>/dev/null)
     if [ -n "$USER_DATA" ]; then
@@ -44,7 +49,7 @@ fi
 
 // legacyTmuxScript starts the tmux session in containers built from the
 // upstream image, which do not ship the safeclaw binary.
-const legacyTmuxScript = `
+const legacyTmuxScript = sessionUmask + `
 if ! tmux has-session -t main 2>/dev/null; then
     tmux -f /dev/null new -d -s main
     tmux set -t main status off

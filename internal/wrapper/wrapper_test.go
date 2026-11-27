@@ -2,6 +2,7 @@ package wrapper
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -11,11 +12,18 @@ type fakeCommander struct {
 	hasSession bool
 	runs       []string
 	exec       string
+	// calls records umask and run calls in order.
+	calls []string
+}
+
+func (f *fakeCommander) Umask(mask int) {
+	f.calls = append(f.calls, fmt.Sprintf("umask %04o", mask))
 }
 
 func (f *fakeCommander) Run(name string, args ...string) error {
 	cmd := name + " " + strings.Join(args, " ")
 	f.runs = append(f.runs, cmd)
+	f.calls = append(f.calls, cmd)
 	if strings.Contains(cmd, "has-session") && !f.hasSession {
 		return errors.New("no session")
 	}
@@ -54,5 +62,17 @@ func TestRunExistingSessionNoAttach(t *testing.T) {
 	}
 	if len(f.runs) != 1 || f.exec != "" {
 		t.Errorf("runs = %q exec = %q", f.runs, f.exec)
+	}
+}
+
+func TestRunSetsUmaskBeforeTmux(t *testing.T) {
+	for _, attach := range []bool{true, false} {
+		f := &fakeCommander{}
+		if err := Run(f, attach); err != nil {
+			t.Fatal(err)
+		}
+		if len(f.calls) < 2 || f.calls[0] != "umask 0022" {
+			t.Errorf("attach=%v: calls = %q, want umask 0022 before any tmux command", attach, f.calls)
+		}
 	}
 }
