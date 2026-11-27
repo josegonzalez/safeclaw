@@ -216,10 +216,10 @@ func TestSetupToken(t *testing.T) {
 		"image inspect --format {{json .}} safeclaw",
 		`ps -a --filter label=safeclaw.auth --format {{.ID}} {{.Names}} {{.Label "safeclaw.auth"}}`,
 		"rm -v -f deadid",
-		"run -d --name safeclaw.auth.test --label safeclaw.auth=" + testOwner + " --cap-drop ALL --security-opt no-new-privileges safeclaw sleep infinity",
-		"exec -it authid script -qec claude setup-token /tmp/setup-token.log",
-		"exec authid cat /tmp/setup-token.log",
-		"exec authid rm -f /tmp/setup-token.log",
+		"run -d --name safeclaw.auth.test --label safeclaw.auth=" + testOwner + " --user sclaw --cap-drop ALL --security-opt no-new-privileges --label safeclaw.image=safeclaw sha256:img sleep infinity",
+		"exec -it --user sclaw authid script -qec claude setup-token /tmp/setup-token.log",
+		"exec --user sclaw authid cat /tmp/setup-token.log",
+		"exec --user sclaw authid rm -f /tmp/setup-token.log",
 		"rm -v -f authid",
 	}
 	if got := r.Commands(); !slices.Equal(got, want) {
@@ -302,8 +302,8 @@ func TestSetupTokenRemovesLogAfterReading(t *testing.T) {
 			m, r := newAuthManager(t, w)
 			_, _ = m.SetupToken(context.Background())
 			got := r.Commands()
-			cat := slices.Index(got, "exec authid cat /tmp/setup-token.log")
-			rm := slices.Index(got, "exec authid rm -f /tmp/setup-token.log")
+			cat := slices.Index(got, "exec --user sclaw authid cat /tmp/setup-token.log")
+			rm := slices.Index(got, "exec --user sclaw authid rm -f /tmp/setup-token.log")
 			if cat < 0 || rm != cat+1 {
 				t.Errorf("log not removed right after reading:\n%s", strings.Join(got, "\n"))
 			}

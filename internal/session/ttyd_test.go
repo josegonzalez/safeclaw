@@ -35,7 +35,7 @@ func TestTTYDRequiresCredentialAndOrigin(t *testing.T) {
 		t.Errorf("url = %q", res.URL)
 	}
 
-	start, ok := r.Find("exec -d safeclaw-work sh -c ")
+	start, ok := r.Find("exec -d --user sclaw safeclaw-work sh -c ")
 	if !ok {
 		t.Fatalf("ttyd not started: %v", r.Commands())
 	}
@@ -48,7 +48,7 @@ func TestTTYDRequiresCredentialAndOrigin(t *testing.T) {
 	if slices.Contains(argv, "-c") || strings.Contains(startTTYDScript, "$(") || strings.Contains(startTTYDScript, " -c ") {
 		t.Errorf("ttyd gets the credential on its command line: %q", start.Args)
 	}
-	write, ok := r.Find("exec -i safeclaw-work sh -c umask 077 && cat > /home/sclaw/.ttyd-credential")
+	write, ok := r.Find("exec -i --user sclaw safeclaw-work sh -c umask 077 && cat > /home/sclaw/.ttyd-credential")
 	if !ok || write.Stdin != cred.String() {
 		t.Errorf("credential not written to the container on stdin: %+v", write)
 	}
@@ -114,7 +114,7 @@ func TestCredentialFileIsPrivateAndPersists(t *testing.T) {
 // credential file.
 func lastCredentialWrite(t *testing.T, r *dockertest.Runner, container string) string {
 	t.Helper()
-	prefix := "exec -i " + container + " sh -c umask 077 && cat > /home/sclaw/.ttyd-credential"
+	prefix := "exec -i --user sclaw " + container + " sh -c umask 077 && cat > /home/sclaw/.ttyd-credential"
 	for _, c := range slices.Backward(r.Calls) {
 		if strings.HasPrefix(c.String(), prefix) {
 			return c.Stdin
@@ -249,7 +249,7 @@ func TestCredentialAfterFailedRecreate(t *testing.T) {
 		if err != nil || c == nil || !c.State.Running || !secretsOf(*c).Equal(AllSecrets()) {
 			t.Fatalf("container not restored: %+v", c)
 		}
-		if hasCall(r, "exec -d safeclaw-work") {
+		if hasCall(r, "exec -d --user sclaw safeclaw-work") {
 			t.Errorf("ttyd started after a failed recreate: %v", r.Commands())
 		}
 
@@ -344,7 +344,7 @@ func TestLegacyPublishRecreatedOnPublishHost(t *testing.T) {
 			t.Errorf("run lacks %q: %q", want, run.String())
 		}
 	}
-	if !strings.HasSuffix(run.String(), " safeclaw:sandbox sleep infinity") {
+	if !strings.HasSuffix(run.String(), " --label safeclaw.image=safeclaw:sandbox sha256:sb-id sleep infinity") {
 		t.Errorf("run = %q, want the sandbox variant", run.String())
 	}
 	if _, err := os.Stat(filepath.Join(m.SessionsDir, "old")); err != nil {
@@ -790,7 +790,7 @@ func TestTTYDNeverTakesCredentialOnArgv(t *testing.T) {
 			if res.URL != URLWithCredential(res.Port, cred) {
 				t.Errorf("url = %q", res.URL)
 			}
-			start, ok := r.Find("exec -d safeclaw-work sh -c ")
+			start, ok := r.Find("exec -d --user sclaw safeclaw-work sh -c ")
 			if !ok {
 				t.Fatalf("ttyd not started: %v", r.Commands())
 			}

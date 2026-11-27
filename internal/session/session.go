@@ -126,15 +126,21 @@ var ErrImageLabel = errors.New("image carries a safeclaw label")
 
 // checkImage returns an error wrapping ErrNoImage unless the image for a
 // variant ("" for the base image) exists, and one wrapping ErrImageLabel if
-// it carries safeclaw labels other than its own variant's.
-func (m *Manager) checkImage(ctx context.Context, name string) error {
-	_, err := m.checkedImageLabels(ctx, name)
-	return err
+// it carries safeclaw labels other than its own variant's. Otherwise it
+// returns the image's ID, which callers run instead of the tag, so the
+// image whose labels were checked is the one that runs even if the tag is
+// moved, by a pull or a build, in between.
+func (m *Manager) checkImage(ctx context.Context, name string) (string, error) {
+	img, err := m.checkedImage(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	return img.ID, nil
 }
 
-// checkedImageLabels checks the image for a variant like checkImage and
-// returns its labels.
-func (m *Manager) checkedImageLabels(ctx context.Context, name string) (map[string]string, error) {
+// checkedImage checks the image for a variant like checkImage and returns
+// its ID and labels.
+func (m *Manager) checkedImage(ctx context.Context, name string) (*docker.Image, error) {
 	img, err := m.Docker.InspectImage(ctx, variant.Image(name))
 	if err != nil {
 		return nil, err
@@ -142,7 +148,30 @@ func (m *Manager) checkedImageLabels(ctx context.Context, name string) (map[stri
 	if img == nil {
 		return nil, noImageError{variant: name}
 	}
-	return img.Config.Labels, checkImageLabels(variant.Image(name), name, img.Config.Labels)
+	// An ID is the only reference docker can't resolve to another image
+	// later. Anything else would be run as a name.
+	if !strings.HasPrefix(img.ID, "sha256:") {
+		return nil, fmt.Errorf("image '%s' has the ID %q, not a sha256 digest", variant.Image(name), img.ID)
+	}
+	return img, checkImageLabels(variant.Image(name), name, img.Config.Labels)
+}
+
+// imageArgs returns the `docker run` label recording the tag an image ID
+// was checked by, followed by the ID itself, so docker runs exactly the
+// checked image and listings can still name its tag.
+func imageArgs(tag, id string) []string {
+	return []string{"--label", config.LabelImage + "=" + tag, id}
+}
+
+// userArgs are the `docker run` flags that run a session or sign-in
+// container as sclaw, rather than as whatever user the image ends on.
+var userArgs = []string{"--user", config.SessionUser}
+
+// asSclaw runs an exec as sclaw. Every exec into a session that does not
+// need root passes it, rather than taking the container's default user.
+func asSclaw(o docker.ExecOptions) docker.ExecOptions {
+	o.User = config.SessionUser
+	return o
 }
 
 // checkImageLabels refuses an image carrying any safeclaw label except the
@@ -637,18 +666,21 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if existing != nil && TypeOf(*existing) == config.TypeSandbox {
-		return nil, wrongType(name, ErrIsSandbox)
+	if existing != nil {
+		if err := requireType(name, *existing, config.TypeSession); err != nil {
+			return nil, err
+		}
 	}
 
 	want, changed, err := m.pickVariant(opts.Variant, config.TypeSession, existing)
 	if err != nil {
 		return nil, err
 	}
-	imageLabels, err := m.checkedImageLabels(ctx, want)
+	img, err := m.checkedImage(ctx, want)
 	if err != nil {
 		return nil, err
 	}
+	imageLabels := img.Config.Labels
 
 	// A session without a container gets back the choices its last one
 	// recorded, kept on the host when it was created or removed.
@@ -829,10 +861,11 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 					return err
 				}
 			}
-			if err := m.checkImage(ctx, oldVariant); err != nil {
+			oldImage, err := m.checkImage(ctx, oldVariant)
+			if err != nil {
 				return err
 			}
-			return m.create(ctx, name, container, port, oldVariant, oldSet, oldHostIPC, oldNoMemory, oldVolumes)
+			return m.create(ctx, name, container, port, oldVariant, oldImage, oldSet, oldHostIPC, oldNoMemory, oldVolumes)
 		}
 	}
 
@@ -883,7 +916,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		if err := m.stopTTYD(ctx, name, container); err != nil {
 			return nil, err
 		}
-		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "tmux", "kill-server")
+		_, _ = m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{}), "tmux", "kill-server")
 		m.sleep(time.Second)
 	case existing != nil:
 		m.printf("Starting existing container: %s\n", container)
@@ -919,7 +952,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			})
 		}
 		m.printf("Creating container: %s\n", container)
-		if err := m.create(ctx, name, container, port, want, set, hostIPC, noMemory, volumes); err != nil {
+		if err := m.create(ctx, name, container, port, want, img.ID, set, hostIPC, noMemory, volumes); err != nil {
 			// The previous container gets its own history back.
 			if archived != "" {
 				if rerr := m.unarchiveHistory(name, archived); rerr != nil {
@@ -1149,7 +1182,8 @@ func (m *Manager) unarchiveHistory(name, archived string) error {
 	return os.Rename(archived, dir)
 }
 
-// create runs a session container. It gets docker's default private IPC
+// create runs a session container from imageID, the ID checkImage
+// returned for variantName's image, as sclaw. It gets docker's default private IPC
 // namespace and /dev/shm unless hostIPC is set: Playwright launches Chromium
 // with --disable-dev-shm-usage, so the default 64 MiB /dev/shm is enough.
 //
@@ -1157,7 +1191,7 @@ func (m *Manager) unarchiveHistory(name, archived string) error {
 // nosuid or nodev option, but hardenArgs cover both, since setuid bits are
 // ignored with no-new-privileges and device nodes can't be made without
 // CAP_MKNOD.
-func (m *Manager) create(ctx context.Context, name, container string, port int, variantName string, set SecretSet, hostIPC, noMemory bool, volumes []string) error {
+func (m *Manager) create(ctx context.Context, name, container string, port int, variantName, imageID string, set SecretSet, hostIPC, noMemory bool, volumes []string) error {
 	dataDir, err := m.historyDir(name)
 	if err != nil {
 		return err
@@ -1168,6 +1202,7 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 		"--name", container,
 		"--label", config.LabelType+"="+config.TypeSession,
 	)
+	args = append(args, userArgs...)
 	args = append(args, hardenArgs...)
 	args = append(args, publishArgs(port)...)
 	args = append(args, "-v", dataDir+":"+config.ProjectsMount)
@@ -1182,7 +1217,8 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 		m.printf("Mounting volume: %s\n", v)
 		args = append(args, "-v", v)
 	}
-	args = append(args, variant.Image(variantName), "sleep", "infinity")
+	args = append(args, imageArgs(variant.Image(variantName), imageID)...)
+	args = append(args, "sleep", "infinity")
 	_, err = m.Docker.Run(ctx, args...)
 	return err
 }
@@ -1258,7 +1294,7 @@ func (m *Manager) writeEnv(ctx context.Context, container string, set SecretSet)
 	if err != nil {
 		return nil, false, err
 	}
-	in := docker.ExecOptions{Stdin: strings.NewReader(secrets.RenderEnv(selected))}
+	in := asSclaw(docker.ExecOptions{Stdin: strings.NewReader(secrets.RenderEnv(selected))})
 	if rootOwned {
 		in.User = "root"
 		_, err = m.Docker.Exec(ctx, container, in, append(slices.Clone(rootShell), writeEnvScript)...)
@@ -1276,20 +1312,20 @@ func (m *Manager) writeGitConfig(ctx context.Context, container string, rootOwne
 		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{User: "root"}, append(slices.Clone(rootShell), gitConfigScript)...)
 		return
 	}
-	_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "bash", "-c", legacyGitConfigScript)
+	_, _ = m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{}), "bash", "-c", legacyGitConfigScript)
 }
 
 func (m *Manager) hasNativeWrapper(ctx context.Context, container string) bool {
-	_, err := m.Docker.Exec(ctx, container, docker.ExecOptions{}, "sh", "-c", "command -v safeclaw")
+	_, err := m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{}), "sh", "-c", "command -v safeclaw")
 	return err == nil
 }
 
 func (m *Manager) sendQuery(ctx context.Context, container string, native bool, query string) error {
 	var err error
 	if native {
-		_, err = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "safeclaw", "ttyd-wrapper", "--no-attach")
+		_, err = m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{}), "safeclaw", "ttyd-wrapper", "--no-attach")
 	} else {
-		_, err = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "bash", "-c", legacyTmuxScript)
+		_, err = m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{}), "bash", "-c", legacyTmuxScript)
 	}
 	if err != nil {
 		return err
@@ -1301,7 +1337,7 @@ func (m *Manager) sendQuery(ctx context.Context, container string, native bool, 
 
 	tmux := func(keys ...string) error {
 		args := append([]string{"tmux", "send-keys", "-t", config.TmuxSession}, keys...)
-		_, err := m.Docker.Exec(ctx, container, docker.ExecOptions{}, args...)
+		_, err := m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{}), args...)
 		return err
 	}
 	// -- keeps a query starting with '-' from being read as options.
@@ -1333,7 +1369,7 @@ func (m *Manager) waitForPrompt(ctx context.Context, container string) bool {
 	}
 	const interval = 500 * time.Millisecond
 	for waited := time.Duration(0); waited <= timeout; waited += interval {
-		out, err := m.Docker.Exec(ctx, container, docker.ExecOptions{}, "tmux", "capture-pane", "-t", config.TmuxSession, "-p")
+		out, err := m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{}), "tmux", "capture-pane", "-t", config.TmuxSession, "-p")
 		if err == nil && PromptReady(string(out)) {
 			return true
 		}

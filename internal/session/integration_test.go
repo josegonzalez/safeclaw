@@ -29,7 +29,8 @@ import (
 func TestIntegrationLifecycle(t *testing.T) {
 	d := docker.New()
 	ctx := context.Background()
-	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+	imageID, err := d.ImageID(ctx, config.ImageName)
+	if err != nil || imageID == "" {
 		t.Skip("safeclaw image not built; run `safeclaw build` first")
 	}
 
@@ -59,6 +60,8 @@ func TestIntegrationLifecycle(t *testing.T) {
 		t.Errorf("session shares the host IPC namespace: %+v, %v", c, err)
 	} else if !hardened(*c) {
 		t.Errorf("session keeps its capabilities: %v %v", c.HostConfig.CapDrop, c.HostConfig.SecurityOpt)
+	} else if c.Config.User != config.SessionUser || c.Image != imageID || c.Label(config.LabelImage) != config.ImageName {
+		t.Errorf("session runs as %q from %q (%q), want %s from %s (%s)", c.Config.User, c.Image, c.Label(config.LabelImage), config.SessionUser, imageID, config.ImageName)
 	}
 	// Its processes have no capabilities and can't gain privileges, and its
 	// private history directory is still writable from inside.
@@ -458,7 +461,8 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 func TestIntegrationSandboxVariant(t *testing.T) {
 	d := docker.New()
 	ctx := context.Background()
-	if id, err := d.ImageID(ctx, variant.Image(variant.Sandbox)); err != nil || id == "" {
+	sandboxID, err := d.ImageID(ctx, variant.Image(variant.Sandbox))
+	if err != nil || sandboxID == "" {
 		t.Skip("sandbox variant not built; run `safeclaw build --variant sandbox` first")
 	}
 	m := &Manager{Docker: d}
@@ -468,8 +472,9 @@ func TestIntegrationSandboxVariant(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Contains(argv, variant.Image(variant.Sandbox)) {
-			t.Errorf("argv does not use the sandbox variant: %v", argv)
+		// It runs the checked image's ID, and records the tag.
+		if !slices.Contains(argv, sandboxID) || !slices.Contains(argv, config.LabelImage+"="+variant.Image(variant.Sandbox)) {
+			t.Errorf("argv does not use the sandbox variant's ID %s: %v", sandboxID, argv)
 		}
 		container := config.ContainerName(name)
 		t.Cleanup(func() { _ = d.Remove(ctx, container, true) })

@@ -64,6 +64,11 @@ const (
 	TypeSession = "session"
 	// TypeSandbox is the type of a headless sandbox for untrusted files.
 	TypeSandbox = "sandbox"
+	// SessionUser is the unprivileged user interactive sessions and sign-in
+	// containers run as, and the user every exec into them runs as unless
+	// it needs root. It is passed explicitly rather than taken from the
+	// image's final USER.
+	SessionUser = "sclaw"
 	// SandboxUser is the unprivileged, non-login user sandboxes run as.
 	SandboxUser = "sandbox"
 	// SandboxDir is the sandbox user's home and working directory.
@@ -73,6 +78,11 @@ const (
 	// image variant a container runs. Containers without it run the base
 	// image.
 	LabelVariant = "safeclaw.variant"
+	// LabelImage is the container label that records the image tag a
+	// container was created from. Containers are run from the image ID
+	// whose labels were checked, so docker records only that ID as their
+	// image.
+	LabelImage = "safeclaw.image"
 	// BaseVariant names the base image wherever a variant is expected.
 	BaseVariant = "base"
 

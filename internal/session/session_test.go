@@ -31,8 +31,11 @@ type fakeContainer struct {
 	Mounts []string // source:destination bind mounts, or a bare anonymous volume path
 	Image  string
 	Labels map[string]string
-	// RunImage is the image name the container was run from.
+	// RunImage is the image tag whose inspected ID the container was run
+	// from.
 	RunImage string
+	// User is the --user the container was run with.
+	User string
 	// Memory, NanoCPUs, and PidsLimit are the limits docker reports.
 	Memory, NanoCPUs, PidsLimit int64
 	// Tmpfs maps each tmpfs mount point to its options.
@@ -104,6 +107,27 @@ type world struct {
 	failMemory bool
 	// onRemove runs after docker rm removes the named container.
 	onRemove func(name string)
+	// served records each image ID image inspect answered with, like the
+	// images docker keeps by ID after their tag moves. run takes only
+	// these, and gives containers the labels the image had then.
+	served map[string]servedImage
+	// onInspectImage runs after image inspect answers, for example to move
+	// a tag before the run.
+	onInspectImage func(tag string)
+}
+
+// servedImage is an image as image inspect described it.
+type servedImage struct {
+	tag, id string
+	labels  map[string]string
+}
+
+// digest returns the sha256 ID docker reports for a fake image ID.
+func digest(id string) string {
+	if strings.HasPrefix(id, "sha256:") {
+		return id
+	}
+	return "sha256:" + id
 }
 
 type runErr struct {
@@ -185,7 +209,7 @@ func (w *world) inspectJSON(names []string) []byte {
 			"Id":              id,
 			"Name":            "/" + n,
 			"Image":           c.Image,
-			"Config":          map[string]any{"Labels": labels},
+			"Config":          map[string]any{"Labels": labels, "User": c.User},
 			"State":           map[string]any{"Status": status, "Running": c.Running},
 			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode, "IpcMode": ipc, "Tmpfs": c.Tmpfs, "CapDrop": capDrop, "SecurityOpt": secOpt, "Mounts": hostMounts},
 			"NetworkSettings": map[string]any{"Networks": nets},
@@ -221,7 +245,16 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		if id == "" {
 			return nil, dockertest.NotFound(args)
 		}
-		b, _ := json.Marshal(map[string]any{"Id": id, "Config": map[string]any{"Labels": w.labelsOf(args[len(args)-1])}})
+		tag := args[len(args)-1]
+		labels := w.labelsOf(tag)
+		if w.served == nil {
+			w.served = map[string]servedImage{}
+		}
+		w.served[digest(id)] = servedImage{tag: tag, id: id, labels: maps.Clone(labels)}
+		b, _ := json.Marshal(map[string]any{"Id": digest(id), "Config": map[string]any{"Labels": labels}})
+		if w.onInspectImage != nil {
+			w.onInspectImage(tag)
+		}
 		return append(b, '\n'), nil
 	case args[0] == "ps":
 		var names []string
@@ -246,14 +279,22 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		tmpfs := map[string]string{}
 		ipc := ""
 		mode := ""
-		image := ""
+		ref := ""
 		capDropAll, noNewPrivs := false, false
 		if i := slices.Index(args, "sleep"); i > 0 {
-			image = args[i-1]
+			ref = args[i-1]
 		}
+		// safeclaw runs only image IDs it inspected, which docker keeps
+		// even after their tag moves.
+		img, ok := w.served[ref]
+		if !ok {
+			return nil, fmt.Errorf("fake: run of %q, which is not an inspected image ID", ref)
+		}
+		image := img.tag
 		// Like docker, containers start with their image's labels, which
 		// --label overrides.
-		labels := w.labelsOf(image)
+		labels := maps.Clone(img.labels)
+		user := ""
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
 			case "--rm":
@@ -284,6 +325,8 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 				tmpfs[dst] = opts
 			case "--network":
 				mode = args[i+1]
+			case "--user":
+				user = args[i+1]
 			case "--ipc=host":
 				ipc = "host"
 			case "--cap-drop":
@@ -292,10 +335,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 				noNewPrivs = noNewPrivs || args[i+1] == "no-new-privileges"
 			}
 		}
-		id := w.image
-		if w.images != nil {
-			id = w.images[image]
-		}
+		id := img.id
 		var fail runErr
 		if len(w.runErrs) > 0 {
 			fail, w.runErrs = w.runErrs[0], w.runErrs[1:]
@@ -304,7 +344,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 			}
 		}
 		w.runs++
-		w.containers[name] = &fakeContainer{Running: fail.err == nil, Port: port, HostIP: hostIP, Mounts: mounts, Image: id, RunImage: image, Labels: labels, AutoRemove: autoRemove,
+		w.containers[name] = &fakeContainer{Running: fail.err == nil, Port: port, HostIP: hostIP, Mounts: mounts, Image: id, RunImage: image, User: user, Labels: labels, AutoRemove: autoRemove,
 			Memory: memory, NanoCPUs: cpus, PidsLimit: pids, Tmpfs: tmpfs, ID: fmt.Sprintf("id-%s-%d", name, w.runs), NetworkMode: mode, IpcMode: ipc, Offline: mode == "none", Unhardened: !capDropAll || !noNewPrivs}
 		return []byte("id\n"), fail.err
 	case args[0] == "rm":
@@ -430,7 +470,7 @@ func TestEnsureCreatesContainer(t *testing.T) {
 	if !ok {
 		t.Fatal("no docker run")
 	}
-	want := "run -d --name safeclaw-work --label safeclaw.type=session --cap-drop ALL --security-opt no-new-privileges -p [::1]:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects safeclaw sleep infinity"
+	want := "run -d --name safeclaw-work --label safeclaw.type=session --user sclaw --cap-drop ALL --security-opt no-new-privileges -p [::1]:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects --label safeclaw.image=safeclaw sha256:new sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -438,7 +478,7 @@ func TestEnsureCreatesContainer(t *testing.T) {
 		t.Errorf("session dir not created: %v", err)
 	}
 
-	env, ok := r.Find("exec -i safeclaw-work sh -c umask 077")
+	env, ok := r.Find("exec -i --user sclaw safeclaw-work sh -c umask 077")
 	if !ok {
 		t.Fatal("env not written")
 	}
@@ -450,10 +490,10 @@ func TestEnsureCreatesContainer(t *testing.T) {
 			t.Errorf("secret leaked into argv: %q", c)
 		}
 	}
-	if !hasCall(r, `exec -d safeclaw-work sh -c umask 022; exec ttyd --credential-file /home/sclaw/.ttyd-credential "$@" ttyd -W -O -t titleFixed=SafeClaw - work -p 7681 safeclaw ttyd-wrapper`) {
+	if !hasCall(r, `exec -d --user sclaw safeclaw-work sh -c umask 022; exec ttyd --credential-file /home/sclaw/.ttyd-credential "$@" ttyd -W -O -t titleFixed=SafeClaw - work -p 7681 safeclaw ttyd-wrapper`) {
 		t.Errorf("ttyd not started natively: %v", r.Commands())
 	}
-	if hasCall(r, "exec safeclaw-work bash -c") {
+	if hasCall(r, "exec --user sclaw safeclaw-work bash -c") {
 		t.Error("git config should be skipped without GH_TOKEN")
 	}
 }
@@ -471,7 +511,7 @@ func TestEnsureReusesRunningContainer(t *testing.T) {
 	if res.Port != 7690 {
 		t.Errorf("port = %d, want reused 7690", res.Port)
 	}
-	for _, p := range []string{"exec safeclaw-default sh -c " + killTTYDScript, "exec safeclaw-default tmux kill-server", "exec safeclaw-default bash -c umask 022\n"} {
+	for _, p := range []string{"exec --user sclaw safeclaw-default sh -c " + killTTYDScript, "exec --user sclaw safeclaw-default tmux kill-server", "exec --user sclaw safeclaw-default bash -c umask 022\n"} {
 		if !hasCall(r, p) {
 			t.Errorf("missing %q in %v", p, r.Commands())
 		}
@@ -480,7 +520,7 @@ func TestEnsureReusesRunningContainer(t *testing.T) {
 		t.Error("should not create or start")
 	}
 	// Upstream image: falls back to the legacy wrapper script.
-	if !hasCall(r, `exec -d safeclaw-default sh -c umask 022; exec ttyd --credential-file /home/sclaw/.ttyd-credential "$@" ttyd -W -O -t titleFixed=SafeClaw - default -p 7681 /home/sclaw/ttyd-wrapper.sh`) {
+	if !hasCall(r, `exec -d --user sclaw safeclaw-default sh -c umask 022; exec ttyd --credential-file /home/sclaw/.ttyd-credential "$@" ttyd -W -O -t titleFixed=SafeClaw - default -p 7681 /home/sclaw/ttyd-wrapper.sh`) {
 		t.Errorf("legacy wrapper not used: %v", r.Commands())
 	}
 }
@@ -539,11 +579,11 @@ func TestEnsureWritesLegacyConfig(t *testing.T) {
 	if _, err := m.Ensure(context.Background(), Options{Name: "old", NoOpen: true}); err != nil {
 		t.Fatal(err)
 	}
-	env, ok := r.Find("exec -i safeclaw-old sh -c umask 077 && cat > /home/sclaw/.env && chmod 600 /home/sclaw/.env")
+	env, ok := r.Find("exec -i --user sclaw safeclaw-old sh -c umask 077 && cat > /home/sclaw/.env && chmod 600 /home/sclaw/.env")
 	if !ok || !strings.Contains(env.Stdin, "export GH_TOKEN='gh'\n") {
 		t.Errorf("legacy env not written: %v", r.Commands())
 	}
-	git, ok := r.Find("exec safeclaw-old bash -c umask 022\n")
+	git, ok := r.Find("exec --user sclaw safeclaw-old bash -c umask 022\n")
 	if !ok || !strings.Contains(git.String(), "git config --global user.name") || strings.Contains(git.String(), "credential") {
 		t.Errorf("legacy git config not written: %v", r.Commands())
 	}
@@ -620,12 +660,12 @@ func TestEnsureQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	cmds := r.Commands()
-	i := slices.Index(cmds, "exec safeclaw-q safeclaw ttyd-wrapper --no-attach")
-	j := slices.Index(cmds, "exec safeclaw-q tmux send-keys -t main -l -- Enter the dragon")
+	i := slices.Index(cmds, "exec --user sclaw safeclaw-q safeclaw ttyd-wrapper --no-attach")
+	j := slices.Index(cmds, "exec --user sclaw safeclaw-q tmux send-keys -t main -l -- Enter the dragon")
 	if i < 0 || j < i {
 		t.Fatalf("query flow wrong: %v", cmds)
 	}
-	if cmds[j+1] != "exec safeclaw-q tmux send-keys -t main Enter" || cmds[j+2] != "exec safeclaw-q tmux send-keys -t main Enter" {
+	if cmds[j+1] != "exec --user sclaw safeclaw-q tmux send-keys -t main Enter" || cmds[j+2] != "exec --user sclaw safeclaw-q tmux send-keys -t main Enter" {
 		t.Errorf("expected two Enters after query: %v", cmds[j:])
 	}
 }
@@ -637,7 +677,7 @@ func TestEnsureQueryLegacyUmask(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The tmux server started here is the one Claude Code runs in.
-	if !hasCall(r, "exec safeclaw-q bash -c umask 022\nif ! tmux has-session") {
+	if !hasCall(r, "exec --user sclaw safeclaw-q bash -c umask 022\nif ! tmux has-session") {
 		t.Errorf("legacy tmux session not started with umask 022: %v", r.Commands())
 	}
 }

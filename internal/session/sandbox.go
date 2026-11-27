@@ -130,6 +130,10 @@ var ErrIsSandbox = errors.New("is a sandbox: use the `safeclaw sandbox` commands
 // session.
 var ErrNotSandbox = errors.New("is an interactive session, not a sandbox")
 
+// ErrNotManaged is returned when a container's type label names neither
+// an interactive session nor a sandbox.
+var ErrNotManaged = errors.New("is not a safeclaw session or sandbox")
+
 // ErrNotFound is returned when a session container does not exist.
 var ErrNotFound = errors.New("not found")
 
@@ -195,6 +199,10 @@ type SandboxOptions struct {
 
 	// kept are the bind mounts carried over from a recreated sandbox.
 	kept []string
+	// image is the ID checkImage returned for Variant's image. Sandboxes
+	// run it rather than the tag, so the image whose labels were checked
+	// is the one that runs.
+	image string
 }
 
 // keep fills in what opts leaves unset from the sandbox it recreates.
@@ -281,6 +289,26 @@ func wrongType(name string, err error) error {
 	return fmt.Errorf("session %q %w", name, err)
 }
 
+// requireType refuses a container whose type is not want, naming what it
+// is instead.
+func requireType(name string, c docker.Container, want string) error {
+	return typeError(name, TypeOf(c), want)
+}
+
+func typeError(name, got, want string) error {
+	if got == want {
+		return nil
+	}
+	switch got {
+	case config.TypeSandbox:
+		return wrongType(name, ErrIsSandbox)
+	case config.TypeSession:
+		return wrongType(name, ErrNotSandbox)
+	default:
+		return wrongType(name, ErrNotManaged)
+	}
+}
+
 // EnsureSandbox creates or starts a headless sandbox container. Unlike
 // Ensure it writes no secrets or git config, starts no ttyd, tmux or Claude
 // Code, publishes no port, and runs the container without a network as the
@@ -301,10 +329,11 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 		if err != nil {
 			return nil, err
 		}
-		if err := m.checkImage(ctx, want); err != nil {
+		image, err := m.checkImage(ctx, want)
+		if err != nil {
 			return nil, err
 		}
-		opts.Variant = want
+		opts.Variant, opts.image = want, image
 		name, err := m.pickName(ctx, opts.Name)
 		if err != nil {
 			return nil, err
@@ -330,18 +359,21 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	if err != nil {
 		return nil, err
 	}
-	if existing != nil && TypeOf(*existing) != config.TypeSandbox {
-		return nil, wrongType(name, ErrNotSandbox)
+	if existing != nil {
+		if err := requireType(name, *existing, config.TypeSandbox); err != nil {
+			return nil, err
+		}
 	}
 
 	want, changed, err := m.pickVariant(opts.Variant, config.TypeSandbox, existing)
 	if err != nil {
 		return nil, err
 	}
-	if err := m.checkImage(ctx, want); err != nil {
+	image, err := m.checkImage(ctx, want)
+	if err != nil {
 		return nil, err
 	}
-	opts.Variant = want
+	opts.Variant, opts.image = want, image
 
 	if existing != nil && (len(opts.Volumes) > 0 || opts.Recreate || changed) {
 		m.printf("Recreating sandbox: %s\n", container)
@@ -427,10 +459,11 @@ func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, exe
 	if err != nil {
 		return nil, "", err
 	}
-	if err := m.checkImage(ctx, want); err != nil {
+	image, err := m.checkImage(ctx, want)
+	if err != nil {
 		return nil, "", err
 	}
-	opts.Variant = want
+	opts.Variant, opts.image = want, image
 	name, err := m.pickName(ctx, opts.Name)
 	if err != nil {
 		return nil, "", err
@@ -454,7 +487,7 @@ func SandboxRunArgs(container string, opts SandboxOptions) ([]string, error) {
 		return nil, err
 	}
 	args = append(args, shared...)
-	return append(args, variant.Image(opts.Variant), "sleep", "infinity"), nil
+	return append(args, "sleep", "infinity"), nil
 }
 
 // EphemeralRunArgs returns the `docker run` arguments that run cmd in a
@@ -469,12 +502,12 @@ func EphemeralRunArgs(container string, opts SandboxOptions, exec ExecOptions, c
 		return nil, err
 	}
 	args = append(args, shared...)
-	args = append(args, variant.Image(opts.Variant))
 	return append(args, exec.command(cmd)...), nil
 }
 
 // sandboxArgs returns the `docker run` flags every sandbox gets: its name,
-// label, isolation, limits, and optional recursively read-only volumes.
+// label, isolation, limits, and optional recursively read-only volumes,
+// followed by the checked image ID it runs.
 // /sandbox is a tmpfs of opts.Disk bytes owned by the sandbox user, since
 // docker volumes can't be size-limited on most storage drivers. The
 // container keeps no log, whatever the daemon's default driver: any sandbox
@@ -524,7 +557,10 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 		seen[b.Target] = fmt.Sprintf("volume %q", volume)
 		args = append(args, "--mount", b.Mount())
 	}
-	return args, nil
+	if !strings.HasPrefix(opts.image, "sha256:") {
+		return nil, errors.New("sandbox has no checked image ID to run")
+	}
+	return append(args, imageArgs(variant.Image(opts.Variant), opts.image)...), nil
 }
 
 func (m *Manager) createSandbox(ctx context.Context, container string, opts SandboxOptions) error {
@@ -644,12 +680,5 @@ func (m *Manager) RequireType(ctx context.Context, name, want string) error {
 	if err != nil {
 		return err
 	}
-	switch {
-	case s.Type == want:
-		return nil
-	case s.IsSandbox():
-		return wrongType(s.Name, ErrIsSandbox)
-	default:
-		return wrongType(s.Name, ErrNotSandbox)
-	}
+	return typeError(s.Name, s.Type, want)
 }

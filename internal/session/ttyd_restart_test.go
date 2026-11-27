@@ -106,7 +106,7 @@ func TestEnsureFailedPkillIsAnError(t *testing.T) {
 	if !errors.Is(err, ErrTTYDRestart) || !strings.Contains(err.Error(), "stopping the old ttyd failed") {
 		t.Fatalf("err = %v", err)
 	}
-	if hasCall(r, "exec -i safeclaw-work sh -c "+writeCredentialScript) || f.starts != 0 {
+	if hasCall(r, "exec -i --user sclaw safeclaw-work sh -c "+writeCredentialScript) || f.starts != 0 {
 		t.Errorf("went on after pkill failed: %v", r.Commands())
 	}
 	if c, err := m.Credential("work"); err != nil || c.String() != "safeclaw:old" {
@@ -121,7 +121,7 @@ func TestEnsureKillsStubbornTTYD(t *testing.T) {
 	if _, err := m.Ensure(context.Background(), Options{Name: "work", NoOpen: true}); err != nil {
 		t.Fatal(err)
 	}
-	if !hasCall(r, "exec safeclaw-work sh -c "+killTTYDScript+" sh -KILL") {
+	if !hasCall(r, "exec --user sclaw safeclaw-work sh -c "+killTTYDScript+" sh -KILL") {
 		t.Errorf("no SIGKILL: %v", r.Commands())
 	}
 	c, err := m.Credential("work")
@@ -141,7 +141,7 @@ func TestEnsureTTYDThatWontStop(t *testing.T) {
 	if !errors.Is(err, ErrTTYDRestart) || !strings.Contains(err.Error(), "did not stop (its process is still running)") || !strings.Contains(err.Error(), "safeclaw stop work") {
 		t.Fatalf("err = %v", err)
 	}
-	if f.starts != 0 || hasCall(r, "exec -i safeclaw-work sh -c "+writeCredentialScript) {
+	if f.starts != 0 || hasCall(r, "exec -i --user sclaw safeclaw-work sh -c "+writeCredentialScript) {
 		t.Errorf("went on with the old ttyd running: %v", r.Commands())
 	}
 	if want := 2 * (ttydStopPolls - 1) * ttydPoll; slept != want {
@@ -184,7 +184,7 @@ func TestStartTTYDCheckKeepsCredentialOffArgv(t *testing.T) {
 			t.Errorf("credential in argv: %q", c)
 		}
 	}
-	if call, ok := r.Find("exec -i safeclaw-work sh -c " + ttydAnswersScript); !ok || call.Stdin != `user = "`+f.cred+"\"\n" {
+	if call, ok := r.Find("exec -i --user sclaw safeclaw-work sh -c " + ttydAnswersScript); !ok || call.Stdin != `user = "`+f.cred+"\"\n" {
 		t.Errorf("check = %+v, %v", call, ok)
 	}
 }

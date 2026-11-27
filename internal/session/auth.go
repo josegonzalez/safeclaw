@@ -121,7 +121,8 @@ func ParseSetupToken(typescript []byte) (string, error) {
 // removed afterwards, whether the sign-in succeeds, fails, or ctx is
 // cancelled.
 func (m *Manager) SetupToken(ctx context.Context) (string, error) {
-	if err := m.checkImage(ctx, ""); err != nil {
+	image, err := m.checkImage(ctx, "")
+	if err != nil {
 		return "", err
 	}
 	cleanup := context.WithoutCancel(ctx)
@@ -138,8 +139,11 @@ func (m *Manager) SetupToken(ctx context.Context) (string, error) {
 	defer release()
 
 	name := authName()
-	args := append([]string{"-d", "--name", name, "--label", config.LabelAuth + "=" + owner}, hardenArgs...)
-	id, err := m.Docker.Run(ctx, append(args, config.ImageName, "sleep", "infinity")...)
+	args := []string{"-d", "--name", name, "--label", config.LabelAuth + "=" + owner}
+	args = append(args, userArgs...)
+	args = append(args, hardenArgs...)
+	args = append(args, imageArgs(config.ImageName, image)...)
+	id, err := m.Docker.Run(ctx, append(args, "sleep", "infinity")...)
 	if err != nil {
 		// A cancelled run may have created the container before docker
 		// printed its ID.
@@ -150,14 +154,14 @@ func (m *Manager) SetupToken(ctx context.Context) (string, error) {
 
 	// script records the session so the token can be read back after
 	// claude exits, while the terminal stays attached to claude.
-	if err := m.Docker.R.Passthrough(ctx, "exec", "-it", id, "script", "-qec", "claude setup-token", setupTokenLog); err != nil {
+	if err := m.Docker.R.Passthrough(ctx, "exec", "-it", "--user", config.SessionUser, id, "script", "-qec", "claude setup-token", setupTokenLog); err != nil {
 		return "", fmt.Errorf("claude setup-token: %w", err)
 	}
-	out, err := m.Docker.Exec(ctx, id, docker.ExecOptions{}, "cat", setupTokenLog)
+	out, err := m.Docker.Exec(ctx, id, asSclaw(docker.ExecOptions{}), "cat", setupTokenLog)
 	// Drop the recording, which holds the token, as soon as it is read, so
 	// it doesn't outlive this process if it is killed before the container
 	// is removed.
-	_, _ = m.Docker.Exec(cleanup, id, docker.ExecOptions{}, "rm", "-f", setupTokenLog)
+	_, _ = m.Docker.Exec(cleanup, id, asSclaw(docker.ExecOptions{}), "rm", "-f", setupTokenLog)
 	if err != nil {
 		return "", fmt.Errorf("read the setup-token output: %w", err)
 	}

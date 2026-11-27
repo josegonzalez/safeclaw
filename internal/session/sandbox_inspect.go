@@ -125,6 +125,16 @@ func (m *Manager) InspectSandbox(ctx context.Context, name string) (*SandboxInfo
 	return &info, nil
 }
 
+// imageOf returns the image name a container was created from. Containers
+// run from a checked image ID record its tag in a label, since docker
+// records only the ID; older ones were run by tag.
+func imageOf(c docker.Container) string {
+	if tag := c.Label(config.LabelImage); tag != "" {
+		return tag
+	}
+	return c.Config.Image
+}
+
 func sandboxInfo(name string, c docker.Container) SandboxInfo {
 	h := c.HostConfig
 	info := SandboxInfo{
@@ -136,7 +146,7 @@ func sandboxInfo(name string, c docker.Container) SandboxInfo {
 		Running:         c.State.Running,
 		OneOff:          h.AutoRemove,
 		Variant:         variantOf(c),
-		Image:           c.Config.Image,
+		Image:           imageOf(c),
 		ImageID:         c.Image,
 		NetworkMode:     h.NetworkMode,
 		Networks:        []string{},
