@@ -25,8 +25,13 @@ const (
 	TTYDPort = 7681
 	// ProjectsMount is where the per-session history directory is mounted.
 	ProjectsMount = "/home/sclaw/.claude/projects"
-	// EnvFile is the env file sourced by every bash invocation in the container.
-	EnvFile = "/home/sclaw/.env"
+	// EnvFile is the env file sourced by every bash invocation in the
+	// container. The image creates it root:sclaw 0640, and safeclaw rewrites
+	// its contents as root.
+	EnvFile = "/etc/safeclaw/env"
+	// LegacyEnvFile is the sclaw-owned env file sourced in containers from
+	// images that predate EnvFile.
+	LegacyEnvFile = "/home/sclaw/.env"
 	// LegacyWrapper is the ttyd wrapper script shipped by upstream images.
 	LegacyWrapper = "/home/sclaw/ttyd-wrapper.sh"
 	// TmuxSession is the tmux session name Claude Code runs in.

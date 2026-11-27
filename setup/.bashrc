@@ -1,5 +1,6 @@
-# Load env vars from .env file (written by run.sh)
-[ -f /home/sclaw/.env ] && . /home/sclaw/.env
+# Load env vars from the env file safeclaw writes. Interactive shells don't
+# read BASH_ENV, so the fixed path is sourced here.
+[ -f /etc/safeclaw/env ] && . /etc/safeclaw/env
 
 # Claude Code aliases
 alias c='claude'

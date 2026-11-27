@@ -74,6 +74,9 @@ type world struct {
 	containers  map[string]*fakeContainer
 	native      bool
 	prompt      bool
+	// rootEnv makes containers report the root-owned env file of current
+	// images, instead of only sclaw's ~/.env.
+	rootEnv bool
 	// attachOnStart makes start reconnect a container to bridge, as if
 	// docker restored its network.
 	attachOnStart bool
@@ -303,6 +306,12 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		if strings.Contains(cmd, "command -v safeclaw") && !w.native {
 			return nil, errors.New("exit 1")
 		}
+		if strings.Contains(cmd, "if [ -f /etc/safeclaw/env ]") {
+			if w.rootEnv {
+				return []byte("root\n"), nil
+			}
+			return []byte("user\n"), nil
+		}
 		if strings.Contains(cmd, "capture-pane") && w.prompt {
 			return []byte("────\n❯ \n"), nil
 		}
@@ -415,6 +424,94 @@ func TestEnsureReusesRunningContainer(t *testing.T) {
 	// Upstream image: falls back to the legacy wrapper script.
 	if !hasCall(r, `exec -d safeclaw-default sh -c umask 022; exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O -t titleFixed=SafeClaw - default -p 7681 /home/sclaw/ttyd-wrapper.sh`) {
 		t.Errorf("legacy wrapper not used: %v", r.Commands())
+	}
+}
+
+// TestEnsureWritesRootOwnedConfig checks that in current images the env file
+// and git identity are written as root, to the files sclaw can't change, and
+// that nothing is written to sclaw's ~/.env or ~/.gitconfig.
+func TestEnsureWritesRootOwnedConfig(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{}, native: true, rootEnv: true}
+	m, r := newTestManager(t, w)
+	_ = m.Secrets.Set(secrets.GitHubToken, "gh")
+	if _, err := m.Ensure(context.Background(), Options{Name: "work", NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	env, ok := r.Find("exec -i --user root safeclaw-work /bin/sh -c " + rootPath + "\numask 077 && cat > /etc/safeclaw/env")
+	if !ok {
+		t.Fatalf("env not written as root: %v", r.Commands())
+	}
+	if !strings.Contains(env.Stdin, "export GH_TOKEN='gh'\n") {
+		t.Errorf("env stdin = %q", env.Stdin)
+	}
+	git, ok := r.Find("exec --user root safeclaw-work /bin/sh -c umask 022\n" + rootPath + "\n. /etc/safeclaw/env\n")
+	if !ok {
+		t.Fatalf("git config not written as root: %v", r.Commands())
+	}
+	if !strings.Contains(git.String(), "git config --system user.name") || strings.Contains(git.String(), "--global") ||
+		!strings.Contains(git.String(), "git config --system credential.https://github.com.helper '!/usr/bin/gh auth git-credential'\n") {
+		t.Errorf("git config script = %q", git.String())
+	}
+	for _, c := range r.Commands() {
+		if strings.Contains(c, "/home/sclaw/.env") || strings.Contains(c, "bash -c") {
+			t.Errorf("wrote sclaw's config: %q", c)
+		}
+		if strings.Contains(c, "/bin/sh -c") && !strings.Contains(c, "--user root") {
+			t.Errorf("root script run as sclaw: %q", c)
+		}
+	}
+	// The layout is checked before anything is written.
+	cmds := r.Commands()
+	probe := slices.IndexFunc(cmds, func(c string) bool { return strings.Contains(c, "if [ -f /etc/safeclaw/env ]") })
+	write := slices.IndexFunc(cmds, func(c string) bool { return strings.Contains(c, "cat > /etc/safeclaw/env") })
+	if probe < 0 || probe > write || !strings.HasPrefix(cmds[probe], "exec --user root safeclaw-work /bin/sh -c ") {
+		t.Errorf("layout probe = %d, write = %d: %v", probe, write, cmds)
+	}
+}
+
+// TestEnsureWritesLegacyConfig checks that containers from older images,
+// which only source sclaw's ~/.env, keep getting it and ~/.gitconfig.
+func TestEnsureWritesLegacyConfig(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{
+		"safeclaw-old": {Running: true, Port: 7690, Image: "img"},
+	}, native: true}
+	m, r := newTestManager(t, w)
+	_ = m.Secrets.Set(secrets.GitHubToken, "gh")
+	if _, err := m.Ensure(context.Background(), Options{Name: "old", NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	env, ok := r.Find("exec -i safeclaw-old sh -c umask 077 && cat > /home/sclaw/.env && chmod 600 /home/sclaw/.env")
+	if !ok || !strings.Contains(env.Stdin, "export GH_TOKEN='gh'\n") {
+		t.Errorf("legacy env not written: %v", r.Commands())
+	}
+	git, ok := r.Find("exec safeclaw-old bash -c umask 022\n")
+	if !ok || !strings.Contains(git.String(), "git config --global user.name") || strings.Contains(git.String(), "credential") {
+		t.Errorf("legacy git config not written: %v", r.Commands())
+	}
+	if hasCall(r, "exec -i --user root") || hasCall(r, "exec --user root safeclaw-old /bin/sh -c umask 022") {
+		t.Errorf("wrote as root in a legacy container: %v", r.Commands())
+	}
+}
+
+// TestEnsureFailsOnEnvLayoutError checks that a failed layout check fails
+// the run instead of writing secrets to a file the container doesn't source.
+func TestEnsureFailsOnEnvLayoutError(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{
+		"safeclaw-x": {Running: true, Port: 7690, Image: "img"},
+	}, native: true}
+	m, r := newTestManager(t, w)
+	r.Handler = func(args []string, stdin string) ([]byte, error) {
+		if strings.Contains(strings.Join(args, " "), "if [ -f /etc/safeclaw/env ]") {
+			return []byte("garbage\n"), nil
+		}
+		return w.handle(args, stdin)
+	}
+	if _, err := m.Ensure(context.Background(), Options{Name: "x", NoOpen: true}); err == nil || !strings.Contains(err.Error(), "unexpected output") {
+		t.Errorf("err = %v", err)
+	}
+	if hasCall(r, "exec -i") {
+		t.Errorf("env written after a failed check: %v", r.Commands())
 	}
 }
 

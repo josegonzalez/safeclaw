@@ -465,7 +465,7 @@ func TestIntegrationSecrets(t *testing.T) {
 
 	dir := t.TempDir()
 	store := secrets.FileStore{Dir: filepath.Join(dir, ".secrets")}
-	for k, v := range map[string]string{secrets.ClaudeToken: "integration-dummy", "KEPT": "kept", "LEFT_OUT": "left-out"} {
+	for k, v := range map[string]string{secrets.ClaudeToken: "integration-dummy", "KEPT": "kept", secrets.GitHubToken: "integration-gh", "LEFT_OUT": "left-out"} {
 		if err := store.Set(k, v); err != nil {
 			t.Fatal(err)
 		}
@@ -493,7 +493,7 @@ func TestIntegrationSecrets(t *testing.T) {
 		return strings.TrimSpace(string(out))
 	}
 
-	set, err := OnlySecrets(secrets.ClaudeToken, "KEPT")
+	set, err := OnlySecrets(secrets.ClaudeToken, "KEPT", secrets.GitHubToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,6 +502,30 @@ func TestIntegrationSecrets(t *testing.T) {
 	}
 	if got := env(); got != "integration-dummy|kept|" {
 		t.Errorf("env = %q", got)
+	}
+
+	// The env file and git config are root-owned, and sclaw can't change or
+	// replace them. Interactive shells, which don't read BASH_ENV, still get
+	// the env through .bashrc.
+	for _, c := range []struct{ script, want string }{
+		{"stat -c '%U:%G %a' " + config.EnvFile, "root:sclaw 640"},
+		{"stat -c '%U:%G %a' /etc/gitconfig ~/.gitconfig ~/.config/git", "root:root 644\nroot:root 644\nroot:root 755"},
+		{"bash -ic 'echo $KEPT' 2>/dev/null", "kept"},
+		{"echo 'export CLAUDE_CONFIG_DIR=/tmp' >> " + config.EnvFile + " 2>/dev/null || echo refused", "refused"},
+		{"git config --global core.pager evil 2>/dev/null || echo refused", "refused"},
+		{"touch ~/.config/git/config 2>/dev/null || echo refused", "refused"},
+		{"mv ~/.gitconfig ~/.gitconfig.old 2>/dev/null || mv ~/.config/git ~/.config/old 2>/dev/null || echo refused", "refused"},
+		{"git init -q /tmp/repo && git -C /tmp/repo config user.name local && git -C /tmp/repo config user.name", "local"},
+		// With GH_TOKEN, git gets it for github.com through gh, from the
+		// system config. Nothing is pushed.
+		{"git config --show-origin --get credential.https://github.com.helper", "file:/etc/gitconfig\t!/usr/bin/gh auth git-credential"},
+		{"printf 'protocol=https\\nhost=github.com\\n\\n' | GIT_TERMINAL_PROMPT=0 git credential fill | grep '^password='", "password=integration-gh"},
+	} {
+		// bash, so the env file is sourced through BASH_ENV.
+		out, err := d.Exec(ctx, container, docker.ExecOptions{}, "bash", "-c", c.script)
+		if got := strings.TrimSpace(string(out)); err != nil || got != c.want {
+			t.Errorf("%s = %q, %v; want %q", c.script, got, err, c.want)
+		}
 	}
 
 	// Reusing the session keeps its set.

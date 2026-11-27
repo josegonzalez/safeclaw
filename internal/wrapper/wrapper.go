@@ -63,7 +63,7 @@ func EnsureSession(c Commander) error {
 		{"-f", "/dev/null", "new", "-d", "-s", s},
 		{"set", "-t", s, "status", "off"},
 		{"set", "-t", s, "mouse", "on"},
-		// Env vars are loaded via BASH_ENV -> .env.
+		// Env vars are loaded via BASH_ENV -> the env file.
 		{"send-keys", "-t", s, ClaudeCommand, "Enter"},
 	}
 	for _, args := range steps {

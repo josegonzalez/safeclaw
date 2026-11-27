@@ -32,8 +32,18 @@ import (
 // umask on every engine, and some run commands with 0000.
 const sessionUmask = "umask 022"
 
-// gitConfigScript sets the container's git identity from the GitHub account.
-const gitConfigScript = sessionUmask + `
+// rootShell runs a script as root by absolute path, so docker does not look
+// sh up in a PATH that, in older images, has a folder sclaw can write.
+var rootShell = []string{"/bin/sh", "-c"}
+
+// rootPath is the PATH for scripts run as root. It leaves out sclaw's
+// folders for the same reason.
+const rootPath = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// gitIdentity sets the container's git identity from the GitHub account, in
+// the given git config scope.
+func gitIdentity(scope string) string {
+	return `
 if gh auth status >/dev/null 2>&1; then
     USER_DATA=$(gh api user 2>/dev/null)
     if [ -n "$USER_DATA" ]; then
@@ -42,11 +52,29 @@ if gh auth status >/dev/null 2>&1; then
         EMAIL=$(echo "$USER_DATA" | jq -r ".email // empty")
         # Use noreply email if no public email
         [ -z "$EMAIL" ] && EMAIL="${LOGIN}@users.noreply.github.com"
-        git config --global user.name "$NAME"
-        git config --global user.email "$EMAIL"
+        git config ` + scope + ` user.name "$NAME"
+        git config ` + scope + ` user.email "$EMAIL"
     fi
 fi
 `
+}
+
+// gitCredentialHelper makes git use gh, and so GH_TOKEN, for GitHub over
+// https. With ~/.gitconfig root-owned, `gh auth setup-git` can't set it.
+const gitCredentialHelper = "!/usr/bin/gh auth git-credential"
+
+// gitConfigScript runs as root and writes the GitHub credential helper and
+// the git identity to the root-owned /etc/gitconfig, with GH_TOKEN from the
+// root-owned env file. Running as root, gh uses root's home and not sclaw's
+// gh config.
+var gitConfigScript = sessionUmask + "\n" + rootPath + "\n. " + config.EnvFile +
+	"\ngit config --system credential.https://github.com.helper '" + gitCredentialHelper + "'" +
+	gitIdentity("--system")
+
+// legacyGitConfigScript writes the git identity to sclaw's ~/.gitconfig in
+// containers from images without the root-owned env file. It runs as sclaw
+// under bash, which sources the env file through BASH_ENV.
+var legacyGitConfigScript = sessionUmask + gitIdentity("--global")
 
 // legacyTmuxScript starts the tmux session in containers built from the
 // upstream image, which do not ship the safeclaw binary.
@@ -59,8 +87,19 @@ if ! tmux has-session -t main 2>/dev/null; then
 fi
 `
 
-// writeEnvScript replaces the env file with stdin, readable only by its owner.
-const writeEnvScript = `umask 077 && cat > ` + config.EnvFile + ` && chmod 600 ` + config.EnvFile
+// envLayoutScript prints "root" when the image has the root-owned env file
+// and "user" when it only sources sclaw's ~/.env. It runs as root.
+const envLayoutScript = rootPath + "\nif [ -f " + config.EnvFile + " ]; then echo root; else echo user; fi"
+
+// writeEnvScript replaces the root-owned env file's contents with stdin. It
+// runs as root, which has no capabilities in a session and so can't chown,
+// so the file is rewritten in place to keep the root:sclaw 0640 the image
+// created it with.
+const writeEnvScript = rootPath + "\numask 077 && cat > " + config.EnvFile
+
+// legacyWriteEnvScript replaces sclaw's ~/.env with stdin, readable only by
+// sclaw, in containers from images without the root-owned env file.
+const legacyWriteEnvScript = `umask 077 && cat > ` + config.LegacyEnvFile + ` && chmod 600 ` + config.LegacyEnvFile
 
 var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 
@@ -665,7 +704,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	}
 	unlock()
 
-	written, err := m.writeEnv(ctx, container, set)
+	written, rootOwned, err := m.writeEnv(ctx, container, set)
 	if err != nil {
 		return nil, err
 	}
@@ -674,7 +713,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	if slices.ContainsFunc(written, func(s secrets.Secret) bool { return s.Name == secrets.GitHubToken }) {
-		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "bash", "-c", gitConfigScript)
+		m.writeGitConfig(ctx, container, rootOwned)
 	}
 
 	native := m.hasNativeWrapper(ctx, container)
@@ -908,16 +947,55 @@ func ExpandVolume(v string) (string, error) {
 	return host + ":" + rest, nil
 }
 
+// rootOwnedEnv reports whether the container's image has the root-owned env
+// file, rather than only sourcing sclaw's ~/.env like older images.
+func (m *Manager) rootOwnedEnv(ctx context.Context, container string) (bool, error) {
+	out, err := m.Docker.Exec(ctx, container, docker.ExecOptions{User: "root"}, append(slices.Clone(rootShell), envLayoutScript)...)
+	if err != nil {
+		return false, err
+	}
+	switch strings.TrimSpace(string(out)) {
+	case "root":
+		return true, nil
+	case "user":
+		return false, nil
+	}
+	return false, fmt.Errorf("checking the env file in %s: unexpected output %q", container, out)
+}
+
 // writeEnv replaces the container's env file with the secrets in the set and
 // returns the ones it wrote. Secrets left out of the set are not written, so
-// they are dropped from a container that had them.
-func (m *Manager) writeEnv(ctx context.Context, container string, set SecretSet) ([]secrets.Secret, error) {
+// they are dropped from a container that had them. In images with the
+// root-owned env file it is written as root, so the agent can't change it;
+// older images get sclaw's ~/.env. rootOwned says which was written.
+func (m *Manager) writeEnv(ctx context.Context, container string, set SecretSet) (written []secrets.Secret, rootOwned bool, err error) {
 	selected, err := m.selectSecrets(set)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	_, err = m.Docker.Exec(ctx, container, docker.ExecOptions{Stdin: strings.NewReader(secrets.RenderEnv(selected))}, "sh", "-c", writeEnvScript)
-	return selected, err
+	rootOwned, err = m.rootOwnedEnv(ctx, container)
+	if err != nil {
+		return nil, false, err
+	}
+	in := docker.ExecOptions{Stdin: strings.NewReader(secrets.RenderEnv(selected))}
+	if rootOwned {
+		in.User = "root"
+		_, err = m.Docker.Exec(ctx, container, in, append(slices.Clone(rootShell), writeEnvScript)...)
+	} else {
+		_, err = m.Docker.Exec(ctx, container, in, "sh", "-c", legacyWriteEnvScript)
+	}
+	return selected, rootOwned, err
+}
+
+// writeGitConfig sets the container's git identity from the GitHub account:
+// in the root-owned /etc/gitconfig as root, or in sclaw's ~/.gitconfig in
+// older images. Failures are ignored, as the session works without it.
+func (m *Manager) writeGitConfig(ctx context.Context, container string, rootOwned bool) {
+	if rootOwned {
+		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{User: "root"}, append(slices.Clone(rootShell), gitConfigScript)...)
+		return
+	}
+	_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "bash", "-c", legacyGitConfigScript)
 }
 
 func (m *Manager) hasNativeWrapper(ctx context.Context, container string) bool {
