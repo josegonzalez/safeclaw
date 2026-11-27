@@ -157,15 +157,54 @@ func do(h http.Handler, method, target string, form url.Values, hdr map[string]s
 	return rec
 }
 
-func TestIndexRendersSessionsAndFrames(t *testing.T) {
-	h := newTestServer(t, &fakeSessions{list: sampleSessions()})
+// pageFragments are what the page shell fetches once it loads.
+var pageFragments = []string{"/fragments/auth", "/fragments/sessions", "/fragments/frames", "/fragments/options"}
+
+// fullPage returns what the page shows once htmx has loaded its fragments:
+// the shell followed by each fragment.
+func fullPage(h http.Handler) string {
+	var b strings.Builder
+	b.WriteString(do(h, "GET", "/", nil, nil).Body.String())
+	for _, p := range pageFragments {
+		b.WriteString(do(h, "GET", p, nil, nil).Body.String())
+	}
+	return b.String()
+}
+
+// TestIndexIsAShell checks that the page a browser opens with only the
+// cookie shows no state, and fetches every part that does.
+func TestIndexIsAShell(t *testing.T) {
+	f := &fakeSessions{list: sampleSessions(), secretNames: []string{"GH_TOKEN"}, token: session.TokenStatus{State: session.TokenMissing}}
+	h := newTestServer(t, f)
 	rec := do(h, "GET", "/", nil, nil)
 	if rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
 	body := rec.Body.String()
+	for _, leak := range []string{"work", "/p:/home/sclaw/p", "GH_TOKEN", "No Claude Code token", "session-variant"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("shell shows %q", leak)
+		}
+	}
 	for _, want := range []string{
 		`hx-sse:connect="/events"`,
+		`<div id="auth-banner" hx-get="/fragments/auth" hx-trigger="load, sessions from:body" hx-swap="innerMorph"></div>`,
+		`<div id="sessions" hx-get="/fragments/sessions" hx-trigger="load, sessions from:body" hx-swap="innerMorph"></div>`,
+		`<div hx-get="/fragments/frames" hx-trigger="load" hx-swap="outerHTML"></div>`,
+		`<div hx-get="/fragments/options" hx-trigger="load" hx-swap="outerHTML"></div>`,
+		`<p id="login-needed" class="load-error" hidden>`,
+		`<dialog id="new-session-modal"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("shell missing %q", want)
+		}
+	}
+}
+
+func TestIndexRendersSessionsAndFrames(t *testing.T) {
+	h := newTestServer(t, &fakeSessions{list: sampleSessions()})
+	body := fullPage(h)
+	for _, want := range []string{
 		`<a href="/sessions/work/terminal" target="_blank" title="localhost:7681"><bdi>localhost:7681</bdi></a>`,
 		`<td class="volume" title="/p:/home/sclaw/p"><bdi>/p:/home/sclaw/p</bdi></td>`,
 		`hx-post="/sessions/work/stop"`,

@@ -1,3 +1,6 @@
+{{/* page is the shell a browser opens with only the cookie, so it renders
+     no state: everything below is fetched by htmx on load, with the second
+     secret app.js adds. */}}
 {{define "page"}}<!DOCTYPE html>
 <html>
 <head>
@@ -17,15 +20,13 @@
         <button class="new-btn" type="button" data-open-dialog="new-session-modal">+ new</button>
     </header>
 
-    <div id="auth-banner" hx-get="/fragments/auth" hx-trigger="sessions from:body" hx-swap="innerMorph">
-        {{template "auth-banner" .}}
-    </div>
+    <p id="login-needed" class="load-error" hidden>Not logged in. Open the URL <code>safeclaw dashboard</code> printed.</p>
 
-    <div id="sessions" hx-get="/fragments/sessions" hx-trigger="sessions from:body" hx-swap="innerMorph">
-        {{template "sessions" .}}
-    </div>
+    <div id="auth-banner" hx-get="/fragments/auth" hx-trigger="load, sessions from:body" hx-swap="innerMorph"></div>
 
-    {{template "frames" .}}
+    <div id="sessions" hx-get="/fragments/sessions" hx-trigger="load, sessions from:body" hx-swap="innerMorph"></div>
+
+    <div hx-get="/fragments/frames" hx-trigger="load" hx-swap="outerHTML"></div>
 
     <dialog id="new-session-modal" class="modal">
         <form hx-post="/sessions" hx-target="#create-error" hx-disable="find input, find button" autocomplete="off">
@@ -42,6 +43,33 @@
                 <label for="session-volume">volume mount</label>
                 <input type="text" id="session-volume" name="volume" placeholder="~/myproject:/home/sclaw/myproject">
             </div>
+            <div hx-get="/fragments/options" hx-trigger="load" hx-swap="outerHTML"></div>
+            <div class="modal-field">
+                <label for="session-query">initial query</label>
+                <input type="text" id="session-query" name="query" placeholder="Research topic X...">
+            </div>
+            <div class="modal-field-checkbox">
+                <input type="checkbox" id="session-open-tab" name="open_tab" value="1">
+                <label for="session-open-tab">open in new tab</label>
+            </div>
+            <div id="create-error" class="modal-error"></div>
+            <div class="modal-actions">
+                <button class="modal-cancel" type="button" data-close-dialog>cancel</button>
+                <button class="modal-submit" type="submit"><span class="idle">create</span><span class="busy">creating...</span></button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="session-info-modal" class="modal">
+        <div id="session-info"></div>
+    </dialog>
+</body>
+</html>
+{{end}}
+
+{{/* session-options are the new session form's variant and secrets
+     pickers. */}}
+{{define "session-options"}}
             <div class="modal-field">
                 <label for="session-variant">image variant</label>
                 <select id="session-variant" name="variant">
@@ -73,25 +101,4 @@
                 {{- end}}
                 {{- if .SecretErr}}<p class="modal-hint">could not read secrets: {{.SecretErr}}</p>{{end}}
             </div>
-            <div class="modal-field">
-                <label for="session-query">initial query</label>
-                <input type="text" id="session-query" name="query" placeholder="Research topic X...">
-            </div>
-            <div class="modal-field-checkbox">
-                <input type="checkbox" id="session-open-tab" name="open_tab" value="1">
-                <label for="session-open-tab">open in new tab</label>
-            </div>
-            <div id="create-error" class="modal-error"></div>
-            <div class="modal-actions">
-                <button class="modal-cancel" type="button" data-close-dialog>cancel</button>
-                <button class="modal-submit" type="submit"><span class="idle">create</span><span class="busy">creating...</span></button>
-            </div>
-        </form>
-    </dialog>
-
-    <dialog id="session-info-modal" class="modal">
-        <div id="session-info"></div>
-    </dialog>
-</body>
-</html>
 {{end}}

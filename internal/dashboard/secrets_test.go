@@ -21,7 +21,7 @@ func onlySecrets(t *testing.T, names ...string) session.SecretSet {
 
 func TestSecretsPicker(t *testing.T) {
 	h := newTestServer(t, &fakeSessions{secretNames: []string{"CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"}})
-	body := do(h, "GET", "/", nil, nil).Body.String()
+	body := fullPage(h)
 	for _, want := range []string{
 		`<select id="session-secrets" name="secrets">`,
 		`<option value="all">all secrets</option>`,
@@ -37,7 +37,7 @@ func TestSecretsPicker(t *testing.T) {
 
 	// Without stored secrets there is nothing to check.
 	h = newTestServer(t, &fakeSessions{secretErr: errors.New("permission denied")})
-	body = do(h, "GET", "/", nil, nil).Body.String()
+	body = fullPage(h)
 	if strings.Contains(body, `value="only"`) || strings.Contains(body, `class="secret-list"`) || !strings.Contains(body, "could not read secrets: permission denied") {
 		t.Errorf("picker without secrets is wrong")
 	}

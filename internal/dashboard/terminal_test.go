@@ -26,6 +26,7 @@ type fakeTTYD struct {
 	mu     sync.Mutex
 	hdr    http.Header
 	reqH   string
+	path   string
 	hello  map[string]any
 	dialed int
 }
@@ -38,6 +39,7 @@ func newFakeTTYD(t *testing.T) *fakeTTYD {
 		f.dialed++
 		f.hdr = r.Header.Clone()
 		f.reqH = r.Host
+		f.path = r.URL.RequestURI()
 		f.mu.Unlock()
 		if r.URL.Path != "/ws" {
 			http.NotFound(w, r)
@@ -126,12 +128,14 @@ func TestTerminalProxyAddsCredentialAndDropsDashboardAuth(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	browser := browserLogin(t, srv.Config.Handler)
+	tk := mintTicket(t, srv.Config.Handler, browser, "/sessions/work/terminal/ws")
 	h := http.Header{}
 	h.Set("Origin", srv.URL)
-	h.Set("Cookie", login(t, srv.Config.Handler)+"; other=1")
+	h.Set("Cookie", browser["Cookie"]+"; other=1")
 	// A browser may send basic credentials it cached for the host.
 	h.Set("Authorization", "Basic Zm9vOmJhcg==")
-	c, status, err := dialDashboard(ctx, srv, "/sessions/work/terminal/ws", h)
+	c, status, err := dialDashboard(ctx, srv, "/sessions/work/terminal/ws?ticket="+tk, h)
 	if err != nil {
 		t.Fatalf("dial: %v (%d)", err, status)
 	}
@@ -158,6 +162,9 @@ func TestTerminalProxyAddsCredentialAndDropsDashboardAuth(t *testing.T) {
 	if got := tty.hdr.Values("Cookie"); len(got) != 0 {
 		t.Errorf("upstream got the browser's cookies: %q", got)
 	}
+	if tty.path != "/ws" {
+		t.Errorf("upstream path %q, want /ws without the ticket", tty.path)
+	}
 	if got := tty.hdr.Get("Origin"); got != "http://"+tty.host || tty.reqH != tty.host {
 		t.Errorf("upstream Origin %q, Host %q, want both %s for ttyd -O", got, tty.reqH, tty.host)
 	}
@@ -173,6 +180,7 @@ func TestTerminalProxyNeedsDashboardAuth(t *testing.T) {
 	for name, hdr := range map[string]map[string]string{
 		"no auth":      {"Origin": srv.URL},
 		"wrong cookie": {"Origin": srv.URL, "Cookie": "safeclaw_dashboard_7680=nope"},
+		"cookie only":  {"Origin": srv.URL, "Cookie": login(t, srv.Config.Handler)},
 		"ttyd basic":   {"Origin": srv.URL, "Authorization": "Basic " + testCred.Token()},
 	} {
 		h := http.Header{}
@@ -206,11 +214,13 @@ func TestTerminalProxyRefusesOtherOrigins(t *testing.T) {
 	srv, tty, _ := newTerminalServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	browser := browserLogin(t, srv.Config.Handler)
 	for _, origin := range []string{"http://127.0.0.1:7681", "http://localhost:7680", "http://evil.example", "null"} {
+		tk := mintTicket(t, srv.Config.Handler, browser, "/sessions/work/terminal/ws")
 		h := http.Header{}
 		h.Set("Origin", origin)
-		h.Set("Cookie", login(t, srv.Config.Handler))
-		_, status, err := dialDashboard(ctx, srv, "/sessions/work/terminal/ws", h)
+		h.Set("Cookie", browser["Cookie"])
+		_, status, err := dialDashboard(ctx, srv, "/sessions/work/terminal/ws?ticket="+tk, h)
 		if err == nil || status != http.StatusForbidden {
 			t.Errorf("origin %s: err = %v, status = %d, want 403", origin, err, status)
 		}
