@@ -627,6 +627,18 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if !imageTTYD && (existing == nil || explicit || oldTTYD) {
 		return nil, oldTTYDError(name, want, oldTTYD && !explicit)
 	}
+	// A kept container whose ttyd takes its credential on its command line
+	// is recreated from the image, so the credential leaves ttyd's command
+	// line, which every local user can read on a native Linux docker host.
+	argvCredential := existing != nil && !readsCredentialFile(existing.Config.Labels)
+	movePublish := legacyPublish && imageTTYD
+	recreate := existing != nil && (explicit || movePublish || oldTTYD || argvCredential)
+	// So every ttyd started here, in a new container or a kept one, reads
+	// its credential from a file, and nothing is refused after the
+	// container it would replace is removed.
+	if !readsCredentialFile(imageLabels) && (existing == nil || recreate) {
+		return nil, argvCredentialError(name, want, recreate && !explicit)
+	}
 
 	if err := m.ensureTokens(opts.Interactive, set); err != nil {
 		return nil, err
@@ -652,17 +664,20 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	}
 	// A held session stays offline even if something reconnected it.
 	offline := existing != nil && (Offline(*existing) || len(m.holdsFor(name, *existing)) > 0)
-	movePublish := legacyPublish && imageTTYD
 	// restore recreates the removed container if its replacement can't be
 	// created, so a failed recreate never leaves the session without its
 	// container and the secret set recorded in its label.
 	var restore func() error
-	if existing != nil && (explicit || movePublish || oldTTYD) {
-		if offline && !explicit && movePublish {
-			return nil, fmt.Errorf("session %q %w: its terminal is published on %s, the dashboard's cookie host, and starting it recreates it on [%s]. Run `safeclaw net on %s` first", name, ErrOffline, legacyPublishHost, PublishHost, name)
-		}
+	if recreate {
 		if offline && !explicit {
-			return nil, fmt.Errorf("session %q %w: its ttyd refuses [%s] URLs, and starting it recreates it from the updated image. Run `safeclaw net on %s` first", name, ErrOffline, PublishHost, name)
+			why := "its ttyd takes its credential on its command line, and starting it recreates it from the updated image, whose ttyd reads it from a file"
+			switch {
+			case movePublish:
+				why = fmt.Sprintf("its terminal is published on %s, the dashboard's cookie host, and starting it recreates it on [%s]", legacyPublishHost, PublishHost)
+			case oldTTYD:
+				why = fmt.Sprintf("its ttyd refuses [%s] URLs, and starting it recreates it from the updated image", PublishHost)
+			}
+			return nil, fmt.Errorf("session %q %w: %s. Run `safeclaw net on %s` first", name, ErrOffline, why, name)
 		}
 		if offline {
 			return nil, fmt.Errorf("session %q %w: run `safeclaw net on %s` before changing its volume, variant, secrets, IPC namespace, auto memory, or history", name, ErrOffline, name)
@@ -694,8 +709,10 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			m.printf("Auto memory on requested. Removing existing container...\n")
 		case movePublish && !opts.FreshHistory:
 			m.printf("Session %s publishes its terminal on %s, the dashboard's cookie host, because it was created before terminals moved to [%s]. Removing existing container to recreate it there...\n", name, legacyPublishHost, PublishHost)
-		case !opts.FreshHistory:
+		case oldTTYD && !opts.FreshHistory:
 			m.printf("Session %s's ttyd refuses [%s] URLs because it was created from an older image. Removing existing container to recreate it from the updated one...\n", name, PublishHost)
+		case !opts.FreshHistory:
+			m.printf("Session %s's ttyd takes its credential on its command line because it was created from an older image. Removing existing container to recreate it from the updated one, whose ttyd reads it from a file...\n", name)
 		default:
 			m.printf("Fresh history requested. Removing existing container...\n")
 		}
@@ -740,7 +757,8 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		host = publishedHost(*existing)
 	}
 	// Only a kept legacy session is still published there: its image's
-	// ttyd refuses the [::1] URLs a recreated one would get.
+	// ttyd refuses the [::1] URLs a recreated one would get. Its own ttyd
+	// reads its credential from a file, or it was refused above.
 	if existing != nil && legacyPublish {
 		m.printf("Warning: session %s publishes its terminal on %s, the dashboard's cookie host, because it was created before terminals moved to [%s], and its image's ttyd refuses [%s] URLs. Update the image with %s, then run `safeclaw run -s %s` again to recreate it on [%s]\n", name, legacyPublishHost, PublishHost, PublishHost, updateImageCommands(want), name, PublishHost)
 	}
@@ -842,7 +860,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	// Every path here starts ttyd with a new credential: a new container,
 	// a stopped one started again, and a running one whose ttyd was killed
 	// above.
-	cred, err := m.startTTYD(ctx, name, container, native, ttydLabels)
+	cred, err := m.startTTYD(ctx, name, want, container, native, ttydLabels)
 	if err != nil {
 		return nil, err
 	}

@@ -44,11 +44,6 @@ var ErrNoTerminal = errors.New("has no running web terminal")
 // sessionUmask, which the wrapper, tmux, and Claude Code inherit.
 const startTTYDScript = sessionUmask + `; exec ttyd --credential-file ` + config.TTYDCredentialFile + ` "$@"`
 
-// legacyStartTTYDScript is startTTYDScript for images whose ttyd has no
-// --credential-file. The credential stays out of the docker exec command
-// line, but is in ttyd's.
-const legacyStartTTYDScript = sessionUmask + `; exec ttyd -c "$(cat ` + config.TTYDCredentialFile + `)" "$@"`
-
 // writeCredentialScript replaces the container's credential file with
 // stdin, readable only by its owner.
 const writeCredentialScript = `umask 077 && cat > ` + config.TTYDCredentialFile + ` && chmod 600 ` + config.TTYDCredentialFile
@@ -125,6 +120,14 @@ func acceptsBracketedHost(labels map[string]string) bool {
 	return labels[config.LabelBracketedHostTTYD] != ""
 }
 
+// readsCredentialFile reports whether a container's or image's labels mark
+// a ttyd that reads its credential from a file with --credential-file. One
+// without it takes the credential only with -c, on its command line, which
+// every local user can read on a native Linux docker host.
+func readsCredentialFile(labels map[string]string) bool {
+	return labels[config.LabelCredentialFileTTYD] != ""
+}
+
 // containerURLHost returns the host a container's terminal URLs name, the
 // address it is published on, or false when it has no safe URL: it is
 // published on PublishHost and its ttyd refuses [::1] URLs.
@@ -147,6 +150,23 @@ func updateImageCommands(name string) string {
 // ErrOldTTYD is wrapped by the errors for a session whose image's ttyd
 // refuses [::1] URLs; see acceptsBracketedHost.
 var ErrOldTTYD = errors.New("its image's ttyd refuses [::1] URLs")
+
+// ErrArgvCredential is wrapped by the errors for a session whose image's
+// ttyd takes its credential only on its command line; see
+// readsCredentialFile.
+var ErrArgvCredential = errors.New("its image's ttyd has no --credential-file")
+
+// argvCredentialError returns the error for session name, whose variant's
+// image has a ttyd without --credential-file. kept says the session's own
+// container is the one refused, so it is recreated once the image is
+// updated.
+func argvCredentialError(name, variant string, kept bool) error {
+	then := "then run it again"
+	if kept {
+		then = "then run `safeclaw run -s " + name + "` to recreate the session from it"
+	}
+	return fmt.Errorf("session %q: %w, so its credential would be on ttyd's command line, which other local users can read on a native Linux docker host. Update the image with %s, %s", name, ErrArgvCredential, updateImageCommands(variant), then)
+}
 
 func (m *Manager) ttydDir() string {
 	if m.TTYDDir != "" {
@@ -262,13 +282,17 @@ func writePrivate(path, content string) error {
 // another local user can bind it and answer an open tab's reconnect, which
 // carries the browser's cached credential. The credential goes to the
 // container on stdin, and ttyd reads it from a file, so it is on no command
-// line. labels are the container's, which it copied from its image: an
-// image without config.LabelCredentialFileTTYD has a ttyd that takes the
-// credential only with -c, on its command line, and the user is warned.
-// The image's ttyd is also patched to refuse framing on every response
-// (setup/ttyd), which needs no flag, so older images' ttyd still starts
-// with these arguments.
-func (m *Manager) startTTYD(ctx context.Context, name, container string, native bool, labels map[string]string) (Credential, error) {
+// line. labels are the container's, which it copied from its image, and
+// variant is the session's: a container without
+// config.LabelCredentialFileTTYD has a ttyd that takes the credential only
+// with -c, on its command line, so it is refused. Ensure recreates or
+// refuses such a container before changing anything, so it never gets
+// here. The image's ttyd is also patched to refuse framing on every
+// response (setup/ttyd), which needs no flag.
+func (m *Manager) startTTYD(ctx context.Context, name, variant, container string, native bool, labels map[string]string) (Credential, error) {
+	if !readsCredentialFile(labels) {
+		return Credential{}, argvCredentialError(name, variant, true)
+	}
 	cred, err := m.rotateCredential(name)
 	if err != nil {
 		return Credential{}, err
@@ -276,12 +300,7 @@ func (m *Manager) startTTYD(ctx context.Context, name, container string, native 
 	if _, err := m.Docker.Exec(ctx, container, docker.ExecOptions{Stdin: strings.NewReader(cred.String())}, "sh", "-c", writeCredentialScript); err != nil {
 		return Credential{}, err
 	}
-	script := startTTYDScript
-	if labels[config.LabelCredentialFileTTYD] == "" {
-		script = legacyStartTTYDScript
-		m.printf("Warning: session %s's ttyd takes its credential on its command line, which other local users can read on a Linux host, because its image's ttyd has no --credential-file. Update the image with `safeclaw pull` or `safeclaw build`, then recreate the session, for example with -v or `safeclaw rm`\n", name)
-	}
-	args := []string{"sh", "-c", script, "ttyd", "-W", "-O", "-t", "titleFixed=SafeClaw - " + name, "-p", strconv.Itoa(config.TTYDPort)}
+	args := []string{"sh", "-c", startTTYDScript, "ttyd", "-W", "-O", "-t", "titleFixed=SafeClaw - " + name, "-p", strconv.Itoa(config.TTYDPort)}
 	if native {
 		args = append(args, "safeclaw", "ttyd-wrapper")
 	} else {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -390,16 +391,37 @@ func TestLegacyPublishRecreatedOnPublishHost(t *testing.T) {
 	}
 }
 
-// With an image whose ttyd still refuses [::1] URLs, a legacy session is
-// kept where it is, since a [::1] URL would not reach its terminal, and run
-// says how to move it.
-func TestLegacyPublishOnOldTTYDWarns(t *testing.T) {
+// With an image whose ttyd still refuses [::1] URLs, a legacy session
+// cannot move there. Its image's ttyd also takes its credential only on
+// its command line, so it is refused until the image is updated, and
+// nothing is changed, stopped or started. A legacy container whose own
+// ttyd reads its credential from a file is kept where it is, and run says
+// how to move it.
+func TestLegacyPublishOnOldTTYDRefused(t *testing.T) {
 	w := legacyWorld(true)
 	m, r := newTestManager(t, w)
 	var out bytes.Buffer
 	m.Out = &out
 	ctx := context.Background()
-	for name, update := range map[string]string{"old": "`safeclaw pull --variant sandbox` or `safeclaw build --variant sandbox`", "any": "`safeclaw pull` or `safeclaw build`"} {
+	updates := map[string]string{"old": "`safeclaw pull --variant sandbox` or `safeclaw build --variant sandbox`", "any": "`safeclaw pull` or `safeclaw build`"}
+	for name, update := range updates {
+		r.Calls = nil
+		_, err := m.Ensure(ctx, Options{Name: name, NoOpen: true})
+		if !errors.Is(err, ErrArgvCredential) || !strings.Contains(err.Error(), "Update the image with "+update+", then run `safeclaw run -s "+name+"` to recreate the session from it") {
+			t.Errorf("%s: err = %v", name, err)
+		}
+		for _, c := range r.Commands() {
+			if !strings.HasPrefix(c, "image inspect") && !strings.HasPrefix(c, "container inspect") && !strings.HasPrefix(c, "ps") {
+				t.Errorf("%s: refused run ran %q", name, c)
+			}
+		}
+	}
+	if c := w.containers["safeclaw-old"]; c == nil || !c.Running || c.HostIP != "127.0.0.1" {
+		t.Errorf("old = %+v, want it kept", c)
+	}
+
+	for name, update := range updates {
+		w.containers["safeclaw-"+name].Labels[config.LabelCredentialFileTTYD] = "1"
 		out.Reset()
 		r.Calls = nil
 		res, err := m.Ensure(ctx, Options{Name: name, NoOpen: true})
@@ -488,7 +510,8 @@ func oldTTYDWorld() *world {
 // holds the port and another local user can listen. A new session from an
 // image whose ttyd refuses [::1] URLs, and a kept [::1] one made from such
 // an image, are refused until the image is updated, and nothing is changed.
-// A legacy session keeps the 127.0.0.1 URL it is published on.
+// A legacy session from such an image is refused too, but one an earlier
+// version started still lists the 127.0.0.1 URL it is published on.
 func TestOldTTYDSessionsRefused(t *testing.T) {
 	w := oldTTYDWorld()
 	m, r := newTestManager(t, w)
@@ -540,10 +563,11 @@ func TestOldTTYDSessionsRefused(t *testing.T) {
 		t.Errorf("variant: err = %v", err)
 	}
 
-	// The legacy session's URL names 127.0.0.1, where it is published.
-	res, err := m.Ensure(ctx, Options{Name: "old", NoOpen: true})
-	if err != nil || !strings.HasSuffix(res.URL, "@127.0.0.1:7692") {
-		t.Errorf("old: res = %+v, %v", res, err)
+	// The legacy session's image's ttyd has no --credential-file either, so
+	// it is refused too, and left running as it was.
+	r.Calls = nil
+	if _, err := m.Ensure(ctx, Options{Name: "old", NoOpen: true}); !errors.Is(err, ErrArgvCredential) || hasCall(r, "rm ") || hasCall(r, "exec ") {
+		t.Errorf("old: err = %v, commands = %v", err, r.Commands())
 	}
 
 	// A running [::1] session from the old image, started by an earlier
@@ -606,9 +630,9 @@ func TestOldTTYDSessionsRecreatedFromUpdatedImage(t *testing.T) {
 		if err != nil || mustURL(t, term) != res.URL {
 			t.Errorf("%s: terminal = %+v, %v", name, term, err)
 		}
-	}
-	if run, _ := r.Find("run "); !strings.Contains(run.String(), " -p [::1]:7691:7681 ") {
-		t.Errorf("run = %q", run.String())
+		if run, _ := r.Find("run "); !strings.Contains(run.String(), fmt.Sprintf(" -p [::1]:%d:7681 ", port)) {
+			t.Errorf("%s: run = %q", name, run.String())
+		}
 	}
 	if c := w.containers["safeclaw-work"]; c == nil || !slices.Contains(c.Mounts, "/proj:/home/sclaw/proj") {
 		t.Errorf("work = %+v, want its mount kept", c)
@@ -698,54 +722,118 @@ func TestCredentialSymlinkIsReplacedNotFollowed(t *testing.T) {
 	}
 }
 
-// A session whose image's ttyd has no --credential-file still starts, with
-// the credential on ttyd's command line, and run warns about it. A kept
-// container runs its own image's ttyd, so it is judged by its own labels,
-// not by the current image's.
-func TestTTYDWithoutCredentialFileFallsBackToArgv(t *testing.T) {
-	legacy := `exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O`
+// No ttyd gets its credential on its command line, which every local user
+// can read on a native Linux docker host. A new session from an image whose
+// ttyd has no --credential-file is refused. A kept container made from such
+// an image is recreated from the current image once that has it, on its
+// port and keeping its mounts and history, and refused until then, with
+// nothing changed.
+func TestTTYDNeverTakesCredentialOnArgv(t *testing.T) {
 	current := `exec ttyd --credential-file /home/sclaw/.ttyd-credential "$@" ttyd -W -O`
+	argvContainer := func(running bool) *fakeContainer {
+		return &fakeContainer{Running: running, Port: 7690, HostIP: "::1", Image: "img", OldTTYD: true, Labels: map[string]string{config.LabelBracketedHostTTYD: "1"}, Mounts: []string{"/proj:/home/sclaw/proj"}}
+	}
 	for _, tc := range []struct {
-		name     string
-		w        *world
-		fallback bool
+		name string
+		w    *world
+		// then is the end of the refusal, or "" when the session starts.
+		then     string
+		recreate bool
 	}{
-		{"new from old image", &world{image: "img", argvCredTTYD: true, containers: map[string]*fakeContainer{}, native: true}, true},
-		{"new from current image", &world{image: "img", containers: map[string]*fakeContainer{}, native: true}, false},
-		{"kept from old image", &world{image: "img", containers: map[string]*fakeContainer{
-			"safeclaw-work": {Running: true, Port: 7690, HostIP: "::1", Image: "img", OldTTYD: true, Labels: map[string]string{config.LabelBracketedHostTTYD: "1"}},
-		}, native: true}, true},
+		{"new from old image", &world{image: "img", argvCredTTYD: true, containers: map[string]*fakeContainer{}, native: true}, "then run it again", false},
+		{"new from current image", &world{image: "img", containers: map[string]*fakeContainer{}, native: true}, "", false},
+		{"kept from old image, current image updated", &world{image: "img", containers: map[string]*fakeContainer{"safeclaw-work": argvContainer(true)}, native: true}, "", true},
+		{"stopped from old image, current image updated", &world{image: "img", containers: map[string]*fakeContainer{"safeclaw-work": argvContainer(false)}, native: true}, "", true},
+		{"kept from old image, current image old", &world{image: "img", argvCredTTYD: true, containers: map[string]*fakeContainer{"safeclaw-work": argvContainer(true)}, native: true}, "then run `safeclaw run -s work` to recreate the session from it", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, r := newTestManager(t, tc.w)
 			var out bytes.Buffer
 			m.Out = &out
-			if _, err := m.Ensure(context.Background(), Options{Name: "work", NoOpen: true}); err != nil {
+			if err := os.MkdirAll(filepath.Join(m.SessionsDir, "work"), 0o700); err != nil {
 				t.Fatal(err)
+			}
+			res, err := m.Ensure(context.Background(), Options{Name: "work", NoOpen: true})
+			if tc.then != "" {
+				if !errors.Is(err, ErrArgvCredential) || !strings.Contains(err.Error(), "Update the image with `safeclaw pull` or `safeclaw build`, "+tc.then) {
+					t.Errorf("err = %v", err)
+				}
+				for _, c := range r.Commands() {
+					if !strings.HasPrefix(c, "image inspect") && !strings.HasPrefix(c, "container inspect") && !strings.HasPrefix(c, "ps") {
+						t.Errorf("refused run ran %q", c)
+					}
+				}
+				if c, ok := tc.w.containers["safeclaw-work"]; ok && !c.Running {
+					t.Errorf("container = %+v, want it kept running", c)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if recreated := hasCall(r, "rm -v -f safeclaw-work"); recreated != tc.recreate {
+				t.Errorf("recreated = %v, want %v: %v", recreated, tc.recreate, r.Commands())
+			}
+			if tc.recreate {
+				if res.Port != 7690 || !strings.Contains(out.String(), "takes its credential on its command line because it was created from an older image. Removing existing container") {
+					t.Errorf("port = %d, output = %s", res.Port, out.String())
+				}
+				c := tc.w.containers["safeclaw-work"]
+				if c == nil || !slices.Contains(c.Mounts, "/proj:/home/sclaw/proj") || !slices.Contains(c.Mounts, filepath.Join(m.SessionsDir, "work")+":/home/sclaw/.claude/projects") {
+					t.Errorf("work = %+v, want its mount and history kept", c)
+				}
 			}
 			cred, err := m.Credential("work")
 			if err != nil {
 				t.Fatal(err)
 			}
+			if res.URL != URLWithCredential(res.Port, cred) {
+				t.Errorf("url = %q", res.URL)
+			}
 			start, ok := r.Find("exec -d safeclaw-work sh -c ")
 			if !ok {
 				t.Fatalf("ttyd not started: %v", r.Commands())
 			}
-			want := current
-			if tc.fallback {
-				want = legacy
-			}
-			if got := strings.Join(start.Args, " "); !strings.Contains(got, want) {
-				t.Errorf("ttyd started with %q, want %q", got, want)
-			}
-			if warned := strings.Contains(out.String(), "takes its credential on its command line"); warned != tc.fallback {
-				t.Errorf("argv credential warning = %v, want %v: %s", warned, tc.fallback, out.String())
+			if got := strings.Join(start.Args, " "); !strings.Contains(got, current) {
+				t.Errorf("ttyd started with %q, want %q", got, current)
 			}
 			for _, c := range r.Commands() {
-				if strings.Contains(c, cred.Password) {
-					t.Errorf("credential leaked into a host command line: %q", c)
+				if strings.Contains(c, cred.Password) || strings.Contains(c, "ttyd -c") {
+					t.Errorf("credential on a command line: %q", c)
 				}
 			}
+
+			// Once recreated, a plain run keeps it.
+			r.Calls = nil
+			if _, err := m.Ensure(context.Background(), Options{Name: "work", NoOpen: true}); err != nil || hasCall(r, "rm ") || hasCall(r, "run ") {
+				t.Errorf("recreated again: %v %v", err, r.Commands())
+			}
 		})
+	}
+}
+
+// An offline session whose ttyd takes its credential on its command line is
+// not recreated, which would bring it back online; run refuses and says how
+// to let it move.
+func TestArgvCredentialSessionOfflineRefused(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{
+		"safeclaw-work": {Running: true, Port: 7690, HostIP: "::1", Image: "img", OldTTYD: true, Offline: true, Labels: map[string]string{config.LabelBracketedHostTTYD: "1"}},
+	}, native: true}
+	m, r := newTestManager(t, w)
+	_, err := m.Ensure(context.Background(), Options{Name: "work", NoOpen: true})
+	if !errors.Is(err, ErrOffline) || !strings.Contains(err.Error(), "takes its credential on its command line") || !strings.Contains(err.Error(), "safeclaw net on work") || hasCall(r, "rm ") || hasCall(r, "run ") || hasCall(r, "exec ") {
+		t.Errorf("err = %v, commands = %v", err, r.Commands())
+	}
+}
+
+// startTTYD refuses a container whose ttyd would take its credential on its
+// command line, before writing a credential anywhere.
+func TestStartTTYDRefusesArgvCredential(t *testing.T) {
+	m, r := newTestManager(t, &world{image: "img", containers: map[string]*fakeContainer{}, native: true})
+	if _, err := m.startTTYD(context.Background(), "work", "", "safeclaw-work", true, map[string]string{config.LabelBracketedHostTTYD: "1"}); !errors.Is(err, ErrArgvCredential) || len(r.Calls) != 0 {
+		t.Errorf("err = %v, commands = %v", err, r.Commands())
+	}
+	if _, err := m.Credential("work"); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("credential written: %v", err)
 	}
 }
