@@ -12,9 +12,9 @@
                 <td id="url-{{.Container}}" class="inactive">-</td>
                 {{- else}}
                 <td><a href="#" class="session-name" hx-get="{{path .Name "info"}}" hx-target="#session-info">{{.Name}}</a>{{template "variant-badge" .}}{{template "secrets-badge" .Secrets}}{{template "offline-badge" .}}</td>
-                <td id="url-{{.Container}}">{{if and .Active .IsOffline}}<span class="inactive" title="the web terminal is unreachable while the session is offline">offline</span>{{else if .Active}}<a href="{{terminal .Name}}" target="_blank" title="{{display .URL}}">{{display .URL}}</a>{{else}}{{template "action" (action .Name "start" "")}}{{end}}</td>
+                <td id="url-{{.Container}}">{{if and .Active .IsOffline}}<span class="inactive" title="the web terminal is unreachable while the session is offline">offline</span>{{else if .Active}}<a href="{{terminal .Name}}" target="_blank" title="{{display .URL}}"><bdi>{{display .URL}}</bdi></a>{{else}}{{template "action" (action .Name "start" "")}}{{end}}</td>
                 {{- end}}
-                <td class="volume" title="{{.Volume}}">{{.Volume}}</td>
+                <td class="volume" title="{{.Volume}}"><bdi>{{.Volume}}</bdi></td>
                 <td id="actions-{{.Container}}" class="actions">{{if not .IsSandbox}}{{template "net-action" (action .Name .Network "")}}{{end}}{{if .Active}}{{template "action" (action .Name "stop" "")}}{{else}}{{template "action" (action .Name "delete" "")}}{{end}}</td>
             </tr>
         {{- end}}

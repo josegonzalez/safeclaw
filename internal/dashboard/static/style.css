@@ -65,6 +65,12 @@ td a:hover { text-decoration: underline; }
     direction: rtl;
     text-align: left;
 }
+/* The cells above truncate from the left with direction: rtl; the text is
+   isolated and set left-to-right so IPv6 literals and paths keep their order. */
+.sessions td:nth-child(2) bdi, .volume bdi {
+    direction: ltr;
+    unicode-bidi: isolate;
+}
 .info-icon {
     display: inline-flex;
     align-items: center;
