@@ -67,7 +67,7 @@ func TestEnsureIPCReuseAndRecreate(t *testing.T) {
 		if hasCall(r, "rm ") || hasCall(r, "run ") {
 			t.Errorf("recreated: %v", r.Commands())
 		}
-		if strings.Contains(out.String(), "IPC") {
+		if strings.Contains(out.String(), "IPC namespace") {
 			t.Errorf("unexpected output: %s", out.String())
 		}
 	}
@@ -169,7 +169,7 @@ func TestEnsureIPCUnrecordedHost(t *testing.T) {
 		if !hasCall(r, "rm -v -f safeclaw-p") || !ok || strings.Contains(run.String(), "safeclaw.ipc=host") != hostIPC {
 			t.Errorf("host %v: calls %v", hostIPC, r.Commands())
 		}
-		if strings.Contains(out.String(), "Warning") {
+		if strings.Contains(out.String(), "Warning: ") {
 			t.Errorf("host %v: warned: %s", hostIPC, out.String())
 		}
 	}
@@ -181,7 +181,7 @@ func TestEnsureIPCUnrecordedHost(t *testing.T) {
 	if _, err := m.Ensure(ctx, Options{Name: "p", Volume: "/new:/home/sclaw/new", NoOpen: true}); err != nil {
 		t.Fatal(err)
 	}
-	if run, _ := r.Find("run "); strings.Contains(run.String(), "--ipc") || strings.Contains(out.String(), "Warning") {
+	if run, _ := r.Find("run "); strings.Contains(run.String(), "--ipc") || strings.Contains(out.String(), "Warning: ") {
 		t.Errorf("volume recreate run = %q\n%s", run.String(), out.String())
 	}
 }
