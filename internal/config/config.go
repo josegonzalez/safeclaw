@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -104,6 +105,17 @@ func NetworkDir() string {
 // into sandboxes across safeclaw processes.
 func CopyDir() string {
 	return filepath.Join(Dir(), "copy")
+}
+
+// DashboardDir returns the directory holding the dashboard's API tokens.
+func DashboardDir() string {
+	return filepath.Join(Dir(), "dashboard")
+}
+
+// DashboardTokenFile returns the file holding the API token of the
+// dashboard listening on port.
+func DashboardTokenFile(port int) string {
+	return filepath.Join(DashboardDir(), strconv.Itoa(port)+".token")
 }
 
 // ContainerName returns the container name for a session name. Names that

@@ -17,6 +17,18 @@ The user interacts with Claude Code through a browser, not a local terminal. Thi
 
 Containers created from the upstream image don't contain the `safeclaw` binary, so `run` falls back to their `/home/sclaw/ttyd-wrapper.sh`.
 
+## Dashboard access
+
+The dashboard listens on `127.0.0.1`, but that only keeps other machines out: code inside a session container can reach host loopback through the runtime's host gateway on some runtimes (observed on OrbStack via `host.docker.internal`), and any local process can connect too. Every route therefore needs a token that `safeclaw dashboard` makes with `crypto/rand` each time it starts:
+
+- The printed URL, `http://127.0.0.1:PORT/?token=...`, swaps the token for an HttpOnly, SameSite=Strict cookie named `safeclaw_dashboard_PORT` and redirects to the same URL without it, so the token leaves the address bar and history
+- API clients send `Authorization: Bearer TOKEN`, reading the token from `~/.config/safeclaw/dashboard/PORT.token` (honoring `XDG_CONFIG_HOME`). The directory is 0700 and the file 0600; it is replaced on start and removed on exit
+- Anything else, static files included, gets 401 before any session or docker call. Tokens are compared in constant time
+
+The cookie is only ever set for `127.0.0.1`, and the token URL on `localhost` or `::1` first redirects there. Cookies aren't scoped by port, and session terminals are served from inside their containers at `localhost:PORT`, so a cookie for `localhost` would be sent to every session's ttyd. Restarting the dashboard makes a new token, so open the newly printed URL again.
+
+The `Host` check (against DNS rebinding) and `http.CrossOriginProtection` (against other websites driving the dashboard from your browser) still apply on top of the token.
+
 ## Session lifecycle
 
 `safeclaw run` (and the dashboard's create and start) all go through the same code path:

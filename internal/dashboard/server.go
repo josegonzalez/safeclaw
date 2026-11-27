@@ -56,6 +56,12 @@ type Options struct {
 	Dev bool
 	// DevDir is the directory Dev reads from. Defaults to internal/dashboard.
 	DevDir string
+	// Token is the launch token every request must carry. Defaults to a
+	// random one.
+	Token string
+	// TokenFile is where ListenAndServe stores the token for API callers.
+	// Defaults to config.DashboardTokenFile(Port).
+	TokenFile string
 }
 
 // Server is the dashboard HTTP server.
@@ -67,6 +73,10 @@ type Server struct {
 	files    fs.FS
 	dev      bool
 	tmpl     *template.Template
+	// token is the launch token, kept in tokenFile while serving.
+	token     string
+	tokenFile string
+	access    *Access
 }
 
 var tips = []string{
@@ -97,6 +107,18 @@ func New(opts Options) (*Server, error) {
 	if s.port == 0 {
 		s.port = config.DashboardPort
 	}
+	s.token, s.tokenFile = opts.Token, opts.TokenFile
+	if s.token == "" {
+		tok, err := NewToken()
+		if err != nil {
+			return nil, fmt.Errorf("dashboard: generate token: %w", err)
+		}
+		s.token = tok
+	}
+	if s.tokenFile == "" {
+		s.tokenFile = config.DashboardTokenFile(s.port)
+	}
+	s.access = NewAccess(s.token, s.port, s.tokenFile)
 	if opts.Dev {
 		dir := opts.DevDir
 		if dir == "" {
@@ -151,8 +173,9 @@ func (s *Server) templates() (*template.Template, error) {
 	return s.tmpl, nil
 }
 
-// Handler returns the dashboard's HTTP handler, with cross-origin and Host
-// protections applied.
+// Handler returns the dashboard's HTTP handler, with Host, authentication,
+// and cross-origin protections applied. Every route, static files included,
+// needs the launch token.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -185,7 +208,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events", s.apiEvents)
 
 	cop := http.NewCrossOriginProtection()
-	return s.checkHost(cop.Handler(mux))
+	return s.checkHost(s.access.Middleware(cop.Handler(mux)))
 }
 
 // checkHost rejects requests whose Host is not a loopback name, which blocks
@@ -212,6 +235,11 @@ func (s *Server) ListenAndServe(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if err := writeTokenFile(s.tokenFile, s.token); err != nil {
+		_ = ln.Close()
+		return err
+	}
+	defer func() { _ = removeTokenFile(s.tokenFile, s.token) }()
 	if s.events != nil {
 		go s.hub.Run(ctx, s.events)
 	}
@@ -226,11 +254,17 @@ func (s *Server) ListenAndServe(ctx context.Context, out io.Writer) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
-	fmt.Fprintf(out, "Dashboard: http://localhost:%d\n", s.port)
+	fmt.Fprintf(out, "Dashboard: %s\n", s.LaunchURL())
+	fmt.Fprintf(out, "API token: %s\n", s.tokenFile)
 	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
+}
+
+// LaunchURL returns the URL that logs a browser in to the dashboard.
+func (s *Server) LaunchURL() string {
+	return fmt.Sprintf("http://%s/?%s=%s", net.JoinHostPort(cookieHost, strconv.Itoa(s.port)), tokenParam, s.token)
 }
 
 // view is the data the templates render.

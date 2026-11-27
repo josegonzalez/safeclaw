@@ -184,6 +184,7 @@ func newDashboardCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "dashboard",
 		Short: "Serve the web dashboard for managing sessions",
+		Long:  "Serve the web dashboard for managing sessions.\n\nEvery request needs the random token made at start. Open the printed URL once to log the browser in, or send `Authorization: Bearer` with the token from the printed file (" + config.DashboardTokenFile(config.DashboardPort) + " for the default port).",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			srv, err := dashboard.New(dashboard.Options{

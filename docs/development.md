@@ -76,7 +76,7 @@ safeclaw sandbox stop "$name"                             # and it is gone
 make dev
 ```
 
-This runs [air](https://github.com/air-verse/air), which rebuilds on Go changes and runs `safeclaw dashboard --dev`. In dev mode, templates and static files are read from `internal/dashboard` on every request, so HTML, CSS, and JS edits only need a browser refresh.
+This runs [air](https://github.com/air-verse/air), which rebuilds on Go changes and runs `safeclaw dashboard --dev`. In dev mode, templates and static files are read from `internal/dashboard` on every request, so HTML, CSS, and JS edits only need a browser refresh. Go changes restart the dashboard with a new token, so open the newly printed URL after each rebuild.
 
 ## Releasing
 

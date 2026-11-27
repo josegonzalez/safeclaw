@@ -117,13 +117,25 @@ func sampleSessions() []session.Session {
 	}
 }
 
+// testToken is the launch token of test servers.
+const testToken = "test-token"
+
+// newTestServer returns the handler of a server over f. Requests without
+// an Authorization header or cookie get the bearer token added; access_test
+// covers requests without one.
 func newTestServer(t *testing.T, f *fakeSessions) http.Handler {
 	t.Helper()
-	s, err := New(Options{Sessions: f})
+	s, err := New(Options{Sessions: f, Token: testToken, TokenFile: "unused"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s.Handler()
+	h := s.Handler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" && r.Header.Get("Cookie") == "" {
+			r.Header.Set("Authorization", "Bearer "+testToken)
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 func do(h http.Handler, method, target string, form url.Values, hdr map[string]string) *httptest.ResponseRecorder {
@@ -355,7 +367,7 @@ func TestHubAndEvents(t *testing.T) {
 			}
 		}
 	}
-	s, err := New(Options{Sessions: &fakeSessions{}, Events: src})
+	s, err := New(Options{Sessions: &fakeSessions{}, Events: src, Token: testToken, TokenFile: "unused"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +380,9 @@ func TestHubAndEvents(t *testing.T) {
 	t.Cleanup(srv.Close)
 	read := func(path string) *bufio.Reader {
 		u := strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)
-		resp, err := http.Get(u + path)
+		req, _ := http.NewRequest("GET", u+path, nil)
+		req.Header.Set("Authorization", "Bearer "+testToken)
+		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
 		}

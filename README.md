@@ -53,7 +53,7 @@ On first run, `safeclaw run` prompts you to set up authentication tokens, offeri
 safeclaw dashboard
 ```
 
-Opens at http://localhost:7680 with:
+Prints a URL like `http://127.0.0.1:7680/?token=...` to open. The token is made fresh each time the dashboard starts, and every page and API call needs it, so code in a session container can't drive the dashboard. Scripts can send it as `Authorization: Bearer` from `~/.config/safeclaw/dashboard/7680.token`; see [the dashboard docs](docs/dashboard.md#routes). The dashboard has:
 
 - Create new sessions with volume mounts, image variants, secrets, and initial queries
 - All sessions listed with start/stop/delete and offline/online controls
