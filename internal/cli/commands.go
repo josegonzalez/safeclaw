@@ -245,7 +245,7 @@ func newDashboardCommand() *cobra.Command {
 		},
 	}
 	cmd.Flags().IntVar(&port, "port", config.DashboardPort, "port to listen on (bound to 127.0.0.1)")
-	cmd.Flags().BoolVar(&dev, "dev", false, "serve templates and static files from ./internal/dashboard for live editing")
+	cmd.Flags().BoolVar(&dev, "dev", false, "serve templates and static files from ./internal/dashboard for live editing; it must be owned by you and not group- or world-writable, and symlinks out of it are refused")
 	return cmd
 }
 
