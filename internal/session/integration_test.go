@@ -382,3 +382,72 @@ func TestIntegrationSandboxVariant(t *testing.T) {
 	}
 	waitGone(t, d, res.Container)
 }
+
+// TestIntegrationSecrets checks that a session's env only has the secrets
+// chosen for it, and that a different set recreates it.
+func TestIntegrationSecrets(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+
+	dir := t.TempDir()
+	store := secrets.Store{Dir: filepath.Join(dir, ".secrets")}
+	for k, v := range map[string]string{secrets.ClaudeToken: "integration-dummy", "KEPT": "kept", "LEFT_OUT": "left-out"} {
+		if _, err := store.Set(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := &Manager{
+		Docker:      d,
+		Secrets:     store,
+		SessionsDir: filepath.Join(dir, "sessions"),
+		Out:         os.Stdout,
+		OpenBrowser: func(string) error { return nil },
+	}
+	name := fmt.Sprintf("itest-secrets-%d", rand.IntN(1_000_000))
+	container := config.ContainerName(name)
+	t.Cleanup(func() { _ = d.Remove(ctx, container, true) })
+
+	// env reads the variables a `docker exec bash` sees through BASH_ENV.
+	env := func() string {
+		t.Helper()
+		out, err := d.Exec(ctx, container, docker.ExecOptions{}, "bash", "-c", `echo "$CLAUDE_CODE_OAUTH_TOKEN|$KEPT|$LEFT_OUT"`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	set, err := OnlySecrets(secrets.ClaudeToken, "KEPT")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Ensure(ctx, Options{Name: name, Secrets: &set, NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := env(); got != "integration-dummy|kept|" {
+		t.Errorf("env = %q", got)
+	}
+
+	// Reusing the session keeps its set.
+	if _, err := m.Ensure(ctx, Options{Name: name, NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := env(); got != "integration-dummy|kept|" {
+		t.Errorf("env after reuse = %q", got)
+	}
+
+	none := NoSecrets()
+	if _, err := m.Ensure(ctx, Options{Name: name, Secrets: &none, NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := env(); got != "||" {
+		t.Errorf("env with no secrets = %q", got)
+	}
+	s, err := m.Get(ctx, name)
+	if err != nil || !s.Secrets.Equal(NoSecrets()) {
+		t.Errorf("session = %+v, %v", s, err)
+	}
+}

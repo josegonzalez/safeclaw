@@ -49,6 +49,27 @@
                 {{- if .VariantErr}}<p class="modal-hint">could not load variants: {{.VariantErr}}</p>{{end}}
             </div>
             <div class="modal-field">
+                <label for="session-secrets">secrets</label>
+                <select id="session-secrets" name="secrets">
+                    <option value="all">all secrets</option>
+                    <option value="none">no secrets</option>
+                    {{- if .SecretNames}}
+                    <option value="only">only checked</option>
+                    {{- end}}
+                </select>
+                {{- if .SecretNames}}
+                <div class="secret-list">
+                    {{- range $i, $name := .SecretNames}}
+                    <div class="modal-field-checkbox">
+                        <input type="checkbox" id="session-secret-{{$i}}" name="secret" value="{{$name}}">
+                        <label for="session-secret-{{$i}}">{{$name}}</label>
+                    </div>
+                    {{- end}}
+                </div>
+                {{- end}}
+                {{- if .SecretErr}}<p class="modal-hint">could not read secrets: {{.SecretErr}}</p>{{end}}
+            </div>
+            <div class="modal-field">
                 <label for="session-query">initial query</label>
                 <input type="text" id="session-query" name="query" placeholder="Research topic X...">
             </div>

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -264,6 +265,10 @@ type Options struct {
 	// default for a new one. A different variant recreates an existing
 	// container.
 	Variant string
+	// Secrets picks the secrets the session receives. Nil keeps an existing
+	// container's set, or gives a new one every secret. A different set
+	// recreates an existing container. Names it lists must exist.
+	Secrets *SecretSet
 	// Query is sent to Claude Code once it is ready.
 	Query string
 	// NoOpen skips opening the browser.
@@ -317,8 +322,23 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
-	if err := m.ensureTokens(opts.Interactive); err != nil {
+	set := AllSecrets()
+	if existing != nil {
+		set = secretsOf(*existing)
+	}
+	secretsChanged := false
+	if opts.Secrets != nil {
+		secretsChanged = existing != nil && !opts.Secrets.Equal(set)
+		set = *opts.Secrets
+	}
+
+	if err := m.ensureTokens(opts.Interactive, set); err != nil {
 		return nil, err
+	}
+	if opts.Secrets != nil {
+		if err := m.checkSecrets(set); err != nil {
+			return nil, err
+		}
 	}
 
 	port := 0
@@ -331,11 +351,16 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Volume != "" {
 		volumes = []string{opts.Volume}
 	}
-	if existing != nil && (opts.Volume != "" || changed) {
-		if opts.Volume != "" {
+	if existing != nil && (opts.Volume != "" || changed || secretsChanged) {
+		switch {
+		case opts.Volume != "":
 			m.printf("Volume mount requested. Removing existing container...\n")
-		} else {
+		case changed:
 			m.printf("Variant %s requested. Removing existing container...\n", variant.Label(want))
+		default:
+			m.printf("Secrets changed to %s. Removing existing container...\n", set)
+		}
+		if opts.Volume == "" {
 			volumes = existing.BindSpecs(config.ProjectsMount)
 		}
 		if err := m.Docker.Remove(ctx, container, true); err != nil {
@@ -365,16 +390,20 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		}
 	default:
 		m.printf("Creating container: %s\n", container)
-		if err := m.create(ctx, name, container, port, want, volumes); err != nil {
+		if err := m.create(ctx, name, container, port, want, set, volumes); err != nil {
 			return nil, err
 		}
 	}
 
-	if err := m.writeEnv(ctx, container); err != nil {
+	written, err := m.writeEnv(ctx, container, set)
+	if err != nil {
 		return nil, err
 	}
+	if !slices.ContainsFunc(written, func(s secrets.Secret) bool { return s.Name == secrets.ClaudeToken }) {
+		m.printf("Warning: this session does not receive %s, so Claude Code will not be logged in\n", secrets.ClaudeToken)
+	}
 
-	if m.Secrets.Has(secrets.GitHubToken) {
+	if slices.ContainsFunc(written, func(s secrets.Secret) bool { return s.Name == secrets.GitHubToken }) {
 		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "bash", "-c", gitConfigScript)
 	}
 
@@ -402,8 +431,11 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	return res, nil
 }
 
-func (m *Manager) ensureTokens(interactive bool) error {
-	if !m.Secrets.Has(secrets.ClaudeToken) {
+// ensureTokens makes sure the well-known tokens a session receives exist,
+// prompting for them in interactive runs. Tokens the set leaves out are
+// neither required nor prompted for.
+func (m *Manager) ensureTokens(interactive bool, set SecretSet) error {
+	if set.Includes(secrets.ClaudeToken) && !m.Secrets.Has(secrets.ClaudeToken) {
 		if !interactive || m.Prompter == nil {
 			return ErrNoClaudeToken
 		}
@@ -415,7 +447,7 @@ func (m *Manager) ensureTokens(interactive bool) error {
 			return err
 		}
 	}
-	if !m.Secrets.Has(secrets.GitHubToken) && interactive && m.Prompter != nil {
+	if set.Includes(secrets.GitHubToken) && !m.Secrets.Has(secrets.GitHubToken) && interactive && m.Prompter != nil {
 		tok, err := m.Prompter.GitHubToken()
 		if err != nil {
 			return err
@@ -453,7 +485,7 @@ func (m *Manager) allocatePort(ctx context.Context) (int, error) {
 	return 0, errors.New("no free port available")
 }
 
-func (m *Manager) create(ctx context.Context, name, container string, port int, variantName string, volumes []string) error {
+func (m *Manager) create(ctx context.Context, name, container string, port int, variantName string, set SecretSet, volumes []string) error {
 	dataDir := filepath.Join(m.SessionsDir, name)
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return err
@@ -465,6 +497,7 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 		"-v", dataDir + ":" + config.ProjectsMount,
 	}
 	args = append(args, variantArgs(variantName)...)
+	args = append(args, secretArgs(set)...)
 	for _, volume := range volumes {
 		v, err := ExpandVolume(volume)
 		if err != nil {
@@ -502,13 +535,16 @@ func ExpandVolume(v string) (string, error) {
 	return host + ":" + rest, nil
 }
 
-func (m *Manager) writeEnv(ctx context.Context, container string) error {
-	all, err := m.Secrets.All()
+// writeEnv replaces the container's env file with the secrets in the set and
+// returns the ones it wrote. Secrets left out of the set are not written, so
+// they are dropped from a container that had them.
+func (m *Manager) writeEnv(ctx context.Context, container string, set SecretSet) ([]secrets.Secret, error) {
+	selected, err := m.selectSecrets(set)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = m.Docker.Exec(ctx, container, docker.ExecOptions{Stdin: strings.NewReader(secrets.RenderEnv(all))}, "sh", "-c", writeEnvScript)
-	return err
+	_, err = m.Docker.Exec(ctx, container, docker.ExecOptions{Stdin: strings.NewReader(secrets.RenderEnv(selected))}, "sh", "-c", writeEnvScript)
+	return selected, err
 }
 
 func (m *Manager) hasNativeWrapper(ctx context.Context, container string) bool {
@@ -605,6 +641,8 @@ type Session struct {
 	// AutoRemove is set for one-off sandboxes, which docker removes when
 	// they stop.
 	AutoRemove bool `json:"autoRemove"`
+	// Secrets are the secrets the session receives. Sandboxes receive none.
+	Secrets SecretSet `json:"-"`
 }
 
 // IsOneOff reports whether the session is a one-off sandbox.
@@ -647,6 +685,7 @@ func (m *Manager) List(ctx context.Context) ([]Session, error) {
 			Type:       TypeOf(c),
 			Variant:    variantOf(c),
 			AutoRemove: c.HostConfig.AutoRemove,
+			Secrets:    sessionSecrets(c),
 		}
 		if mounts := c.BindMounts(config.ProjectsMount); len(mounts) > 0 {
 			s.Volume = strings.Join(mounts, ", ")

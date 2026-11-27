@@ -356,6 +356,22 @@ dialog.modal::backdrop {
     white-space: pre-wrap;
     word-break: break-word;
 }
+.secret-list {
+    display: none;
+    flex-direction: column;
+    margin-top: 10px;
+}
+.modal-field:has(option[value="only"]:checked) .secret-list {
+    display: flex;
+}
+.secret-list .modal-field-checkbox {
+    margin-bottom: 6px;
+}
+.secret-list .modal-field-checkbox label {
+    display: inline;
+    margin: 0;
+    font-size: 13px;
+}
 .modal-field-checkbox {
     display: flex;
     align-items: center;

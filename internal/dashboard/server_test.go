@@ -28,6 +28,13 @@ type fakeSessions struct {
 	// variants is returned by Variants; nil means the built-ins.
 	variants   *variant.Set
 	variantErr error
+	// secretNames is returned by SecretNames.
+	secretNames []string
+	secretErr   error
+}
+
+func (f *fakeSessions) SecretNames() ([]string, error) {
+	return f.secretNames, f.secretErr
 }
 
 func (f *fakeSessions) Variants() (*variant.Set, error) {

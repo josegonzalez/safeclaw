@@ -14,6 +14,8 @@ Sandboxes are listed in the table with a `sandbox` badge and only their stop or 
 
 The new session dialog has an image variant picker listing `base` and every [variant](architecture.md#image-variants). Its first option, `default`, sends no variant, so the session gets the configured default, named in the option. Sessions and sandboxes on a variant show a badge with its name. Variants are read from the config file on every page load; if the file is invalid, the picker shows only `default` along with the error.
 
+The dialog also has a secrets picker: `all secrets` (the default), `no secrets`, or `only checked` with a checkbox per stored secret. The checkboxes are only shown, with CSS `:has()`, while `only checked` is picked. Sessions that don't receive every secret show a `no secrets` or `N secrets` badge, with the names in its tooltip. Sandboxes never get one, since they never receive secrets. See [choosing secrets](architecture.md#choosing-secrets).
+
 Dashboard actions respond with `HX-Trigger: sessions`, so the page also refreshes right away without waiting for the docker event.
 
 ## Two-click confirm
@@ -27,7 +29,7 @@ Stop and delete need two clicks. The first POST returns a "stop?"/"delete?" butt
 | `GET /` | Full page |
 | `GET /fragments/sessions`, `GET /fragments/frames` | Table (or empty state) and frames grid |
 | `GET /events` | SSE stream of `sessions` events |
-| `POST /sessions` | Create a session (`name`, `volume`, `variant`, `query`, `open_tab`). Errors return 422 and render in the dialog |
+| `POST /sessions` | Create a session (`name`, `volume`, `variant`, `secrets` as `all`, `none`, or `only` with a `secret` field per name, `query`, `open_tab`). Errors return 422 and render in the dialog |
 | `GET /sessions/validate?name=` | Name hint shown while typing |
 | `GET /sessions/{name}/info` | Session info dialog with the `docker exec` attach command |
 | `GET /sessions/{name}/actions` | Normal action button, used to revert a confirm |
@@ -37,11 +39,11 @@ The JSON API from upstream is kept for scripting:
 
 | Route | Body | Response |
 |-------|------|----------|
-| `GET /api/sessions` | | `[{name, port, url, volume, active, type, variant, autoRemove}]`, `type` is `session` or `sandbox`, `variant` is the image variant (`""` for the base image), `autoRemove` is true for one-off sandboxes |
+| `GET /api/sessions` | | `[{name, port, url, volume, active, type, variant, autoRemove, secrets}]`, `type` is `session` or `sandbox`, `variant` is the image variant (`""` for the base image), `autoRemove` is true for one-off sandboxes, `secrets` is `null` for every secret or the list of names the session receives (`[]` for none) |
 | `POST /api/start` | `{"name"}` | `{success, url}`, or 409 for a sandbox |
 | `POST /api/stop` | `{"name"}` | `{success}` |
 | `POST /api/delete` | `{"name"}` | `{success}` |
-| `POST /api/create` | `{"name", "volume", "variant", "query"}` | `{success, url}` or `{success: false, error}`, with 409 for a sandbox name |
+| `POST /api/create` | `{"name", "volume", "variant", "secrets", "query"}` | `{success, url}` or `{success: false, error}`, with 409 for a sandbox name. `secrets` is `"all"`, `"none"`, or a list of names; leaving it out keeps an existing session's set, or gives a new one every secret |
 | `GET /api/events` | | SSE, `data: <docker action>` |
 
 ## Security

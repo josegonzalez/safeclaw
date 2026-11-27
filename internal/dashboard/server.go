@@ -35,6 +35,7 @@ type Sessions interface {
 	Stop(ctx context.Context, name string) error
 	Delete(ctx context.Context, name string, force bool) error
 	Variants() (*variant.Set, error)
+	SecretNames() ([]string, error)
 }
 
 // Options configures the dashboard.
@@ -114,7 +115,8 @@ func New(opts Options) (*Server, error) {
 
 func (s *Server) parseTemplates() (*template.Template, error) {
 	return template.New("").Funcs(template.FuncMap{
-		"tip": func() string { return tips[rand.IntN(len(tips))] },
+		"tip":  func() string { return tips[rand.IntN(len(tips))] },
+		"join": strings.Join,
 		"display": func(url string) string {
 			return strings.TrimPrefix(url, "http://")
 		},
@@ -228,6 +230,10 @@ type view struct {
 	DefaultVariant string
 	// VariantErr is set when the variants could not be loaded.
 	VariantErr string
+	// SecretNames lists the stored secrets for the new session form, and
+	// SecretErr is set when they could not be read.
+	SecretNames []string
+	SecretErr   string
 }
 
 func (s *Server) load(ctx context.Context) view {
@@ -241,6 +247,11 @@ func (s *Server) load(ctx context.Context) view {
 	} else {
 		v.Variants = append([]string{config.BaseVariant}, set.Names()...)
 		v.DefaultVariant = variant.Label(set.DefaultFor(config.TypeSession))
+	}
+	if names, err := s.sessions.SecretNames(); err != nil {
+		v.SecretErr = err.Error()
+	} else {
+		v.SecretNames = names
 	}
 	for _, x := range list {
 		if x.Active && x.URL != "" {
@@ -343,10 +354,16 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusUnprocessableEntity, "create-error", fmt.Sprintf("session %q already seems to exist", name))
 		return
 	}
+	set, err := formSecrets(r.PostForm.Get("secrets"), r.PostForm["secret"])
+	if err != nil {
+		s.render(w, http.StatusUnprocessableEntity, "create-error", err.Error())
+		return
+	}
 	res, err := s.sessions.Ensure(r.Context(), session.Options{
 		Name:    name,
 		Volume:  strings.TrimSpace(r.PostForm.Get("volume")),
 		Variant: strings.TrimSpace(r.PostForm.Get("variant")),
+		Secrets: &set,
 		Query:   strings.TrimSpace(r.PostForm.Get("query")),
 		NoOpen:  true,
 	})
@@ -360,6 +377,23 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	})
 	w.Header().Set("HX-Trigger", string(trigger))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// formSecrets returns the secret set the new session form picks: "all" (or
+// nothing) for every secret, "none", or "only" for the checked names.
+func formSecrets(mode string, checked []string) (session.SecretSet, error) {
+	switch mode {
+	case "", "all":
+		return session.AllSecrets(), nil
+	case "none":
+		return session.NoSecrets(), nil
+	case "only":
+		if len(checked) == 0 {
+			return session.SecretSet{}, errors.New("check at least one secret, or pick no secrets")
+		}
+		return session.OnlySecrets(checked...)
+	}
+	return session.SecretSet{}, fmt.Errorf("unknown secrets choice %q", mode)
 }
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {

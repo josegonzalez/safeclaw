@@ -70,6 +70,13 @@ func (c Container) Label(key string) string {
 	return c.Config.Labels[key]
 }
 
+// LookupLabel returns the value of a container label and whether it is set,
+// which tells an empty label apart from a missing one.
+func (c Container) LookupLabel(key string) (string, bool) {
+	v, ok := c.Config.Labels[key]
+	return v, ok
+}
+
 // HostPort returns the host port bound to the given container port, or 0.
 // It reads the configured bindings, so it works for stopped containers too.
 func (c Container) HostPort(containerPort int) int {

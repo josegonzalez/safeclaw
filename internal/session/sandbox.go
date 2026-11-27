@@ -417,6 +417,7 @@ func (m *Manager) Get(ctx context.Context, name string) (*Session, error) {
 		Type:       TypeOf(*c),
 		Variant:    variantOf(*c),
 		AutoRemove: c.HostConfig.AutoRemove,
+		Secrets:    sessionSecrets(*c),
 	}, nil
 }
 
