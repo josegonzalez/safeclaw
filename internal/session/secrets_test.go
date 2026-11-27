@@ -224,6 +224,31 @@ func TestEnsureMissingSecret(t *testing.T) {
 	}
 }
 
+// A symlinked entry in the secrets directory is not a secret, so naming it
+// fails the check instead of passing it and being skipped when .env is
+// written.
+func TestEnsureSymlinkedSecret(t *testing.T) {
+	ctx := context.Background()
+	w := &world{image: "img", containers: map[string]*fakeContainer{
+		"safeclaw-p": {Running: true, Port: 7705, Image: "img"},
+	}, native: true}
+	m, r := newTestManager(t, w)
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("outside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(m.Secrets.Location(), "LINKED")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.Ensure(ctx, Options{Name: "p", Secrets: only(t, secrets.ClaudeToken, "LINKED"), NoOpen: true})
+	if !errors.Is(err, ErrNoSecret) || !strings.Contains(err.Error(), "LINKED") {
+		t.Errorf("err = %v", err)
+	}
+	if hasCall(r, "rm ") || hasCall(r, "run ") || hasCall(r, "exec ") {
+		t.Errorf("acted on a symlinked secret: %v", r.Commands())
+	}
+}
+
 func TestEnsureSecretsReuseAndRecreate(t *testing.T) {
 	ctx := context.Background()
 	existing := func(labels map[string]string) *world {

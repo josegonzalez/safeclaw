@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
+	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/prompt"
 	"github.com/josegonzalez/safeclaw/internal/secrets"
 	"github.com/josegonzalez/safeclaw/internal/session"
@@ -60,7 +62,23 @@ func newAuthCommand() *cobra.Command {
 			"Tokens are valid for one year from when they are created.",
 	}
 	cmd.AddCommand(newAuthLoginCommand(), newAuthSetCommand(), newAuthStatusCommand(), newAuthLogoutCommand())
+	// A login killed before it cleaned up leaves its sign-in container, with
+	// the token's recording, behind. Every auth command removes those, not
+	// just the next login. login does it itself, right before starting its
+	// own container.
+	cmd.PersistentPreRun = func(c *cobra.Command, _ []string) {
+		if c.Name() != "login" {
+			removeStaleAuthContainers(c.Context())
+		}
+	}
 	return cmd
+}
+
+// removeStaleAuthContainers removes sign-in containers whose login is no
+// longer running. Tests replace it so they never run docker.
+var removeStaleAuthContainers = func(ctx context.Context) {
+	m := &session.Manager{Docker: docker.New()}
+	m.RemoveStaleAuthContainers(ctx)
 }
 
 func newAuthLoginCommand() *cobra.Command {

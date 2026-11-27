@@ -127,10 +127,20 @@ func (m *Manager) SecretNames() ([]string, error) {
 }
 
 // checkSecrets returns an error wrapping ErrNoSecret for the first name in
-// the set that is not in the secrets directory.
+// the set that is not in the secrets directory. It uses the store's list of
+// names, as selectSecrets does, so an entry the store doesn't treat as a
+// secret, such as a symlink in the file store, fails here instead of being
+// skipped later.
 func (m *Manager) checkSecrets(s SecretSet) error {
+	if len(s.Names) == 0 {
+		return nil
+	}
+	keys, err := m.Secrets.Keys()
+	if err != nil {
+		return err
+	}
 	for _, n := range s.Names {
-		if !m.Secrets.Has(n) {
+		if !slices.Contains(keys, n) {
 			return fmt.Errorf("%w: %s. Add it with `safeclaw env set %s`", ErrNoSecret, n, n)
 		}
 	}
