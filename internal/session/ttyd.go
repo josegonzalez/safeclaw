@@ -238,7 +238,9 @@ func writePrivate(path, content string) error {
 
 // startTTYD starts ttyd requiring the session's credential (-c) and
 // refusing WebSocket clients from other origins (-O). The credential goes
-// to the container on stdin, not on a command line.
+// to the container on stdin, not on a command line. The image's ttyd is
+// patched to refuse framing on every response (setup/ttyd), which needs no
+// flag, so older images' ttyd still starts with these arguments.
 func (m *Manager) startTTYD(ctx context.Context, name, container string, native bool) (Credential, error) {
 	cred, err := m.ensureCredential(name)
 	if err != nil {
