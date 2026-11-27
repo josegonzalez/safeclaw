@@ -44,6 +44,22 @@ type fakeSessions struct {
 	netOns   []session.NetOnOptions
 	netOffFn func(string, session.NetOffOptions) (*session.NetResult, error)
 	netOnFn  func(string, session.NetOnOptions) (*session.NetResult, error)
+	// legacy are containers left from mixed-case names, which ResolveName
+	// refuses the lowercase session for; resolved records its calls.
+	legacy   []string
+	resolved []string
+}
+
+func (f *fakeSessions) ResolveName(_ context.Context, name string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resolved = append(f.resolved, name)
+	for _, c := range f.legacy {
+		if strings.EqualFold(c, "safeclaw-"+name) {
+			return "", fmt.Errorf("session %q: %w: remove it with `docker rm -f %s` first", name, session.ErrLegacyName, c)
+		}
+	}
+	return name, nil
 }
 
 func (f *fakeSessions) SecretNames() ([]string, error) {

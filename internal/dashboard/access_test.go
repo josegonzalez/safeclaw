@@ -34,6 +34,11 @@ func (n noSessions) List(context.Context) ([]session.Session, error) {
 	return nil, nil
 }
 
+func (n noSessions) ResolveName(_ context.Context, name string) (string, error) {
+	n.fail("ResolveName")
+	return name, nil
+}
+
 func (n noSessions) Ensure(context.Context, session.Options) (*session.Result, error) {
 	n.fail("Ensure")
 	return &session.Result{}, nil

@@ -63,6 +63,12 @@ func (s *Server) handleTerminalSocket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "web terminals are unavailable", http.StatusNotFound)
 		return
 	}
+	// Refused like `safeclaw attach`, since the old container shares the
+	// session's ttyd credential.
+	if status, err := s.checkLegacy(r.Context(), name); err != nil {
+		http.Error(w, err.Error(), status)
+		return
+	}
 	t, err := s.terminals.Terminal(r.Context(), name)
 	starting := terminalStarting(err)
 	if err != nil && !starting {

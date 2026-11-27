@@ -249,7 +249,12 @@ func (s *Server) apiNetOff(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, apiNetResult{Holds: []apiHold{}, Error: err.Error()})
 		return
 	}
-	res, err := s.sessions.NetOff(r.Context(), config.SessionName(req.Name), session.NetOffOptions{Owner: req.Owner, Reason: req.Reason})
+	name := config.SessionName(req.Name)
+	if status, err := s.checkLegacy(r.Context(), name); err != nil {
+		writeJSONStatus(w, status, apiNetResult{Holds: []apiHold{}, Error: err.Error()})
+		return
+	}
+	res, err := s.sessions.NetOff(r.Context(), name, session.NetOffOptions{Owner: req.Owner, Reason: req.Reason})
 	writeNetResult(w, res, err)
 }
 
@@ -259,7 +264,12 @@ func (s *Server) apiNetOn(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, apiNetResult{Holds: []apiHold{}, Error: err.Error()})
 		return
 	}
-	res, err := s.sessions.NetOn(r.Context(), config.SessionName(req.Name), session.NetOnOptions{Owner: req.Owner, Force: req.Force})
+	name := config.SessionName(req.Name)
+	if status, err := s.checkLegacy(r.Context(), name); err != nil {
+		writeJSONStatus(w, status, apiNetResult{Holds: []apiHold{}, Error: err.Error()})
+		return
+	}
+	res, err := s.sessions.NetOn(r.Context(), name, session.NetOnOptions{Owner: req.Owner, Force: req.Force})
 	writeNetResult(w, res, err)
 }
 
