@@ -120,7 +120,9 @@ WORKDIR /home/sclaw
 
 ENV PATH="/home/sclaw/.local/bin:${PATH}"
 ENV DISABLE_AUTOUPDATER=1
-ENV BASH_ENV=/home/sclaw/.env
+# The env file safeclaw writes the session's secrets to, as root. It is
+# created root:sclaw 0640 below.
+ENV BASH_ENV=/etc/safeclaw/env
 
 # Auth: set these env vars for cloud deployment (no interactive login needed)
 # - CLAUDE_CODE_OAUTH_TOKEN: run `safeclaw auth login` (or `claude setup-token`) to generate
@@ -216,4 +218,21 @@ RUN cd /home/sclaw && \
     chmod -R u=rwX,go=rX .bashrc .profile .bash_profile .bash_logout CLAUDE.md CLAUDE.local.md AGENTS.md AGENTS.override.md bin .local/bin .local/share/claude && \
     chown root:sclaw .local .local/share && \
     chmod 1770 .local .local/share
+
+# Lock down the secrets env file and git config, which every shell and git
+# command loads. safeclaw writes both as root with `docker exec -u root`, but
+# sessions drop every capability, so root can't chown there: the env file is
+# created here as root:sclaw 0640 and only its contents are rewritten. The git
+# identity goes to the system config, /etc/gitconfig. An empty, root-owned
+# ~/.gitconfig and ~/.config/git keep the agent from adding a global config
+# with options such as core.fsmonitor or core.pager that run commands, and
+# ~/.config is root:sclaw 1770 like the home folder so other tools can still
+# keep their config there.
+RUN mkdir -p /etc/safeclaw && \
+    install -o root -g sclaw -m 640 /dev/null /etc/safeclaw/env && \
+    install -o root -g root -m 644 /dev/null /etc/gitconfig && \
+    cd /home/sclaw && \
+    install -o root -g root -m 644 /dev/null .gitconfig && \
+    install -d -o root -g sclaw -m 1770 .config && \
+    install -d -o root -g root -m 755 .config/git
 USER sclaw

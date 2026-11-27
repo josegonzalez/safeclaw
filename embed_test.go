@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/josegonzalez/safeclaw/internal/config"
 )
 
 func TestBuildContextHasEverythingTheDockerfileNeeds(t *testing.T) {
@@ -118,5 +120,38 @@ func TestDockerfileRootOwnsWhatClaudeCodeLoads(t *testing.T) {
 	}
 	if !strings.Contains(dockerfile, "COPY setup/managed-mcp.json /etc/claude-code/managed-mcp.json") {
 		t.Error("Dockerfile does not install setup/managed-mcp.json")
+	}
+}
+
+// TestDockerfileRootOwnsSecretsAndGitConfig checks that the env file every
+// bash sources, and the git config files git reads, are root-owned, with the
+// env file readable by sclaw and nobody else.
+func TestDockerfileRootOwnsSecretsAndGitConfig(t *testing.T) {
+	b, err := fs.ReadFile(BuildContext, "Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(b)
+	for _, want := range []string{
+		"ENV BASH_ENV=" + config.EnvFile + "\n",
+		"install -o root -g sclaw -m 640 /dev/null " + config.EnvFile,
+		"install -o root -g root -m 644 /dev/null /etc/gitconfig",
+		"install -o root -g root -m 644 /dev/null .gitconfig",
+		"install -d -o root -g sclaw -m 1770 .config",
+		"install -d -o root -g root -m 755 .config/git",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("Dockerfile is missing %q", want)
+		}
+	}
+	if strings.Contains(dockerfile, config.LegacyEnvFile) {
+		t.Errorf("Dockerfile still uses %s", config.LegacyEnvFile)
+	}
+	bashrc, err := fs.ReadFile(BuildContext, "setup/.bashrc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(bashrc), ". "+config.EnvFile+"\n") || strings.Contains(string(bashrc), config.LegacyEnvFile) {
+		t.Errorf("setup/.bashrc does not source %s:\n%s", config.EnvFile, bashrc)
 	}
 }
