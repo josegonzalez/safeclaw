@@ -75,6 +75,8 @@ type world struct {
 	// failing with leaveCreated leaves a stopped container behind, like a
 	// failed start.
 	runErrs []runErr
+	// failDisconnect fails that many disconnects from each named network.
+	failDisconnect map[string]int
 }
 
 type runErr struct {
@@ -236,6 +238,10 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		nets := c.networks()
 		if _, ok := nets[args[2]]; !ok {
 			return nil, errors.New("not connected")
+		}
+		if w.failDisconnect[args[2]] > 0 {
+			w.failDisconnect[args[2]]--
+			return nil, errors.New("disconnect failed")
 		}
 		delete(nets, args[2])
 	case args[0] == "network" && args[1] == "connect":

@@ -52,6 +52,10 @@ var ErrHeld = errors.New("is held offline")
 // have to be recreated.
 var ErrOffline = errors.New("is offline")
 
+// ErrStillOnline is wrapped by the error returned when `net off` records its
+// hold but a session could not be disconnected from every network.
+var ErrStillOnline = errors.New("is held offline but still attached")
+
 // Hold records one owner keeping a session offline.
 type Hold struct {
 	// Owner names who holds the session offline. "" is the unnamed hold
@@ -282,6 +286,14 @@ func (m *Manager) holdsFor(name string, c docker.Container) []Hold {
 	return st.Holds
 }
 
+// OfflineOrHeld reports whether a session is offline or held offline. A
+// held session counts as offline even while something keeps it attached,
+// such as a failed disconnect or a network docker restored. Sandboxes never
+// are.
+func (m *Manager) OfflineOrHeld(c docker.Container) bool {
+	return Offline(c) || len(m.holdsFor(config.SessionName(c.ShortName()), c)) > 0
+}
+
 // netTarget returns the interactive session a network change applies to,
 // refusing sandboxes and networks that cannot be disconnected.
 func (m *Manager) netTarget(ctx context.Context, name string) (string, *docker.Container, error) {
@@ -395,9 +407,14 @@ func (m *Manager) NetOff(ctx context.Context, name string, opts NetOffOptions) (
 	container := c.ShortName()
 	for _, n := range nets {
 		m.printf("Disconnecting %s from %s\n", container, n)
-		if err := m.Docker.NetworkDisconnect(ctx, n, container); err != nil {
-			return nil, err
-		}
+	}
+	// The hold stays even if a disconnect fails: rolling back would put the
+	// session back online while its owner expects it offline, and the hold
+	// keeps run, start, and build --recreate treating it as offline.
+	if left, err := m.disconnectAll(ctx, container, nets); err != nil {
+		res := &NetResult{Name: name, Holds: st.Holds}
+		m.printf("Session %s is held offline by %s, but is still attached to %s\n", name, strings.Join(HoldLabels(st.Holds), ", "), strings.Join(left, ", "))
+		return res, fmt.Errorf("session %q %w to %s: %w; run `safeclaw net off %s` again to retry", name, ErrStillOnline, strings.Join(left, ", "), err, name)
 	}
 	m.printf("Session %s is offline, held by %s\n", name, strings.Join(HoldLabels(st.Holds), ", "))
 	m.printf("Its web terminal is unreachable until: safeclaw net on %s\n", name)
@@ -479,18 +496,99 @@ func (m *Manager) NetOn(ctx context.Context, name string, opts NetOnOptions) (*N
 	return res, nil
 }
 
+// disconnectAll disconnects a container from nets, trying every network
+// even when one fails. Failed networks are retried once against a fresh
+// inspect, since one may have been disconnected meanwhile. It returns the
+// networks still attached along with the first error.
+func (m *Manager) disconnectAll(ctx context.Context, container string, nets []string) ([]string, error) {
+	var firstErr error
+	try := func(nets []string) []string {
+		var failed []string
+		for _, n := range nets {
+			if err := m.Docker.NetworkDisconnect(ctx, n, container); err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				failed = append(failed, n)
+			}
+		}
+		return failed
+	}
+	failed := try(nets)
+	if len(failed) == 0 {
+		return nil, nil
+	}
+	c, err := m.Docker.InspectOne(ctx, container)
+	if err != nil {
+		return failed, err
+	}
+	if c == nil {
+		return failed, firstErr
+	}
+	still := slices.DeleteFunc(failed, func(n string) bool {
+		_, ok := c.NetworkSettings.Networks[n]
+		return !ok
+	})
+	if len(still) == 0 {
+		return nil, nil
+	}
+	m.printf("Retrying the disconnect of %s from %s\n", container, strings.Join(still, ", "))
+	firstErr = nil
+	if left := try(still); len(left) > 0 {
+		return left, firstErr
+	}
+	return nil, nil
+}
+
 // keepOffline disconnects a container that should be offline from any
-// network docker attached, for example when it was started.
+// network attached to it, for example by docker when it was started, or
+// left by a `net off` whose disconnect failed.
 func (m *Manager) keepOffline(ctx context.Context, container string) error {
 	c, err := m.Docker.InspectOne(ctx, container)
 	if err != nil || c == nil {
 		return err
 	}
-	for _, n := range attached(*c) {
+	nets := attached(*c)
+	for _, n := range nets {
 		m.printf("Disconnecting %s from %s to keep it offline\n", container, n)
-		if err := m.Docker.NetworkDisconnect(ctx, n, container); err != nil {
-			return err
-		}
+	}
+	if left, err := m.disconnectAll(ctx, container, nets); err != nil {
+		return fmt.Errorf("keep %s offline: still attached to %s: %w", container, strings.Join(left, ", "), err)
 	}
 	return nil
+}
+
+// RemoveStale removes a session container that `build --recreate` found
+// running an older image, under the network lock. It refuses, with an error
+// wrapping ErrOffline, a session that is offline or held offline, since a
+// recreated container would come back online. A container that was removed
+// or replaced since c was listed is left alone, and removed reports false.
+func (m *Manager) RemoveStale(ctx context.Context, c docker.Container) (removed bool, err error) {
+	unlock, err := m.netLock()
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+
+	container := c.ShortName()
+	name := config.SessionName(container)
+	cur, err := m.Docker.InspectOne(ctx, container)
+	if err != nil || cur == nil || cur.ID != c.ID {
+		return false, err
+	}
+	if m.OfflineOrHeld(*cur) {
+		by := ""
+		if holds := m.holdsFor(name, *cur); len(holds) > 0 {
+			by = " by " + strings.Join(HoldLabels(holds), ", ")
+		}
+		return false, fmt.Errorf("session %q %w%s", name, ErrOffline, by)
+	}
+	if err := m.Docker.Remove(ctx, container, true); err != nil {
+		return false, err
+	}
+	// Any saved state belonged to the removed container.
+	if err := m.removeState(name); err != nil {
+		return true, err
+	}
+	return true, nil
 }
