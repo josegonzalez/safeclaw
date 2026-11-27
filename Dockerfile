@@ -153,6 +153,14 @@ RUN claude plugin marketplace add https://github.com/ykdojo/claude-code-tips.git
 # ~/.claude.json or a .mcp.json (which sclaw can write) are refused or ignored.
 COPY setup/managed-mcp.json /etc/claude-code/managed-mcp.json
 
+# Managed settings take precedence over every other settings file, the
+# --settings flag and the environment. safeclaw writes each session's own
+# managed settings, such as auto memory off for `run --no-memory`, to this
+# drop-in as root. Sessions drop every capability, so root can't chown
+# there: the file is created here root-owned, and only its contents are
+# rewritten.
+COPY setup/safeclaw-session.json /etc/claude-code/managed-settings.d/safeclaw-session.json
+
 # Skip onboarding so CLAUDE_CODE_OAUTH_TOKEN works in interactive mode
 # See: https://github.com/anthropics/claude-code/issues/8938
 # Newer Claude Code versions also ask to trust the home folder and to accept
@@ -197,7 +205,8 @@ RUN cd /home/sclaw/.claude && \
     chmod 755 scripts/context-bar.sh && \
     chown root:sclaw /home/sclaw /home/sclaw/.claude && \
     chmod 1770 /home/sclaw /home/sclaw/.claude && \
-    chmod 644 /etc/claude-code/managed-mcp.json
+    chmod 755 /etc/claude-code /etc/claude-code/managed-settings.d && \
+    chmod 644 /etc/claude-code/managed-mcp.json /etc/claude-code/managed-settings.d/safeclaw-session.json
 
 # Lock down the Claude Code install and the shell's startup files, so the
 # agent cannot replace the claude binary or what each shell runs. Claude Code's

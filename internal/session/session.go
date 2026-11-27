@@ -358,6 +358,54 @@ func ipcArgs(host bool) []string {
 	return []string{"--ipc=" + config.IPCHost, "--label", config.LabelIPC + "=" + config.IPCHost}
 }
 
+// noMemoryOf reports whether the user turned a container's auto memory off.
+// Containers without the label keep it on.
+func noMemoryOf(c docker.Container) bool {
+	return c.Label(config.LabelMemory) == config.MemoryOff
+}
+
+// memoryArgs returns the `docker run` label recording that a session's auto
+// memory is off, none when it is on.
+func memoryArgs(noMemory bool) []string {
+	if !noMemory {
+		return nil
+	}
+	return []string{"--label", config.LabelMemory + "=" + config.MemoryOff}
+}
+
+// memoryOffSettings turn Claude Code's auto memory off from managed
+// settings. The env var is set too, because one set to 0 in the
+// environment would otherwise turn it back on; managed env wins over it.
+const memoryOffSettings = `{"autoMemoryEnabled": false, "env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"}}` + "\n"
+
+// memoryOnSettings leave auto memory to Claude Code's default, on.
+const memoryOnSettings = "{}\n"
+
+// writeMemoryOffScript replaces the session settings file's contents with
+// stdin, as root. The image creates it root:root 0644; for older images
+// root creates it, which needs no capability since root owns /etc.
+const writeMemoryOffScript = rootPath + "\numask 022 && mkdir -p " + config.ManagedSettingsDir + " && cat > " + config.SessionSettingsFile
+
+// writeMemoryOnScript replaces the session settings file's contents with
+// stdin, as root, if the image has it. Older images without it already
+// leave auto memory on.
+const writeMemoryOnScript = rootPath + "\numask 022 && if [ -f " + config.SessionSettingsFile + " ]; then cat > " + config.SessionSettingsFile + "; fi"
+
+// writeMemorySetting writes the session's auto memory choice to the
+// root-owned managed settings file before Claude Code starts, so sclaw can't
+// turn it back on.
+func (m *Manager) writeMemorySetting(ctx context.Context, container string, noMemory bool) error {
+	settings, script := memoryOnSettings, writeMemoryOnScript
+	if noMemory {
+		settings, script = memoryOffSettings, writeMemoryOffScript
+	}
+	_, err := m.Docker.Exec(ctx, container, docker.ExecOptions{User: "root", Stdin: strings.NewReader(settings)}, append(slices.Clone(rootShell), script)...)
+	if err != nil {
+		return fmt.Errorf("writing the auto memory setting in %s: %w", container, err)
+	}
+	return nil
+}
+
 // hardenArgs are the `docker run` flags that take every capability from a
 // session and keep its processes from gaining privileges, for example from
 // setuid binaries. Sessions run everything as the unprivileged sclaw user,
@@ -450,6 +498,11 @@ type Options struct {
 	// existing container's choice, or gives a new one a private namespace.
 	// A different choice recreates an existing container.
 	HostIPC *bool
+	// NoMemory turns Claude Code's auto memory off for the session when
+	// true, through a root-owned managed settings file, and back on when
+	// false. Nil keeps an existing container's choice, or leaves it on for a
+	// new one. A different choice recreates an existing container.
+	NoMemory *bool
 	// FreshHistory moves the session's history directory aside, to
 	// NAME.old-TIMESTAMP next to it, so the new container starts with an
 	// empty one. It recreates an existing container.
@@ -542,6 +595,13 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		hostIPC = *opts.HostIPC
 	}
 
+	noMemory := existing != nil && noMemoryOf(*existing)
+	memoryChanged := false
+	if opts.NoMemory != nil {
+		memoryChanged = existing != nil && *opts.NoMemory != noMemory
+		noMemory = *opts.NoMemory
+	}
+
 	if err := m.ensureTokens(opts.Interactive, set); err != nil {
 		return nil, err
 	}
@@ -570,9 +630,9 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	// created, so a failed recreate never leaves the session without its
 	// container and the secret set recorded in its label.
 	var restore func() error
-	if existing != nil && (opts.Volume != "" || changed || secretsChanged || ipcChanged || opts.FreshHistory) {
+	if existing != nil && (opts.Volume != "" || changed || secretsChanged || ipcChanged || memoryChanged || opts.FreshHistory) {
 		if offline {
-			return nil, fmt.Errorf("session %q %w: run `safeclaw net on %s` before changing its volume, variant, secrets, IPC namespace, or history", name, ErrOffline, name)
+			return nil, fmt.Errorf("session %q %w: run `safeclaw net on %s` before changing its volume, variant, secrets, IPC namespace, auto memory, or history", name, ErrOffline, name)
 		}
 		oldVolumes := existing.BindSpecs(config.ProjectsMount)
 		if opts.Volume == "" {
@@ -595,12 +655,16 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			m.printf("Host IPC namespace requested. Removing existing container...\n")
 		case ipcChanged:
 			m.printf("Private IPC namespace requested. Removing existing container...\n")
+		case memoryChanged && noMemory:
+			m.printf("Auto memory off requested. Removing existing container...\n")
+		case memoryChanged:
+			m.printf("Auto memory on requested. Removing existing container...\n")
 		default:
 			m.printf("Fresh history requested. Removing existing container...\n")
 		}
 		// The restored container keeps the recorded IPC choice, so one that
 		// shared the host's without opting in comes back private.
-		oldVariant, oldSet, oldHostIPC := variantOf(*existing), secretsOf(*existing), hostIPCOf(*existing)
+		oldVariant, oldSet, oldHostIPC, oldNoMemory := variantOf(*existing), secretsOf(*existing), hostIPCOf(*existing), noMemoryOf(*existing)
 		if err := m.Docker.Remove(ctx, container, true); err != nil {
 			return nil, err
 		}
@@ -621,7 +685,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			if err := m.checkImage(ctx, oldVariant); err != nil {
 				return err
 			}
-			return m.create(ctx, name, container, port, oldVariant, oldSet, oldHostIPC, oldVolumes)
+			return m.create(ctx, name, container, port, oldVariant, oldSet, oldHostIPC, oldNoMemory, oldVolumes)
 		}
 	}
 
@@ -683,7 +747,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			m.warnHistory(name, restore != nil, opts.Secrets != nil, secretsChanged, oldSet, set)
 		}
 		m.printf("Creating container: %s\n", container)
-		if err := m.create(ctx, name, container, port, want, set, hostIPC, volumes); err != nil {
+		if err := m.create(ctx, name, container, port, want, set, hostIPC, noMemory, volumes); err != nil {
 			// The previous container gets its own history back.
 			if archived != "" {
 				if rerr := m.unarchiveHistory(name, archived); rerr != nil {
@@ -714,6 +778,12 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 
 	if slices.ContainsFunc(written, func(s secrets.Secret) bool { return s.Name == secrets.GitHubToken }) {
 		m.writeGitConfig(ctx, container, rootOwned)
+	}
+
+	// Claude Code reads the setting when it starts, which is after ttyd
+	// starts and the terminal connects, or when a query is sent.
+	if err := m.writeMemorySetting(ctx, container, noMemory); err != nil {
+		return nil, err
 	}
 
 	native := m.hasNativeWrapper(ctx, container)
@@ -877,7 +947,7 @@ func (m *Manager) unarchiveHistory(name, archived string) error {
 // nosuid or nodev option, but hardenArgs cover both, since setuid bits are
 // ignored with no-new-privileges and device nodes can't be made without
 // CAP_MKNOD.
-func (m *Manager) create(ctx context.Context, name, container string, port int, variantName string, set SecretSet, hostIPC bool, volumes []string) error {
+func (m *Manager) create(ctx context.Context, name, container string, port int, variantName string, set SecretSet, hostIPC, noMemory bool, volumes []string) error {
 	dataDir, err := m.historyDir(name)
 	if err != nil {
 		return err
@@ -893,6 +963,7 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 	args = append(args, "-v", dataDir+":"+config.ProjectsMount)
 	args = append(args, variantArgs(variantName)...)
 	args = append(args, secretArgs(set)...)
+	args = append(args, memoryArgs(noMemory)...)
 	for _, volume := range volumes {
 		v, err := ExpandVolume(volume)
 		if err != nil {

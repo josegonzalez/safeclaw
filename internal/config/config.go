@@ -29,6 +29,14 @@ const (
 	// container. The image creates it root:sclaw 0640, and safeclaw rewrites
 	// its contents as root.
 	EnvFile = "/etc/safeclaw/env"
+	// ManagedSettingsDir is Claude Code's drop-in folder for managed
+	// settings, which take precedence over every other settings file, the
+	// --settings flag, and the environment.
+	ManagedSettingsDir = "/etc/claude-code/managed-settings.d"
+	// SessionSettingsFile holds the managed settings safeclaw sets per
+	// session. The image creates it root-owned, and safeclaw rewrites its
+	// contents as root.
+	SessionSettingsFile = ManagedSettingsDir + "/safeclaw-session.json"
 	// LegacyEnvFile is the sclaw-owned env file sourced in containers from
 	// images that predate EnvFile.
 	LegacyEnvFile = "/home/sclaw/.env"
@@ -80,6 +88,13 @@ const (
 	// IPCHost is the LabelIPC value, and docker IpcMode, for the host's IPC
 	// namespace.
 	IPCHost = "host"
+
+	// LabelMemory is the container label that records an interactive
+	// session's Claude Code auto memory. MemoryOff means the user turned it
+	// off; containers without it keep it on.
+	LabelMemory = "safeclaw.memory"
+	// MemoryOff is the LabelMemory value for a session with auto memory off.
+	MemoryOff = "off"
 
 	// LabelAuth marks the short-lived container `safeclaw auth login` runs
 	// `claude setup-token` in, with the PID of the safeclaw process that

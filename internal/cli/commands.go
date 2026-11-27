@@ -72,7 +72,7 @@ type runFlags struct {
 	noOpen                          bool
 	secrets                         []string
 	noSecrets, allSecrets           bool
-	hostIPC, freshHistory           bool
+	hostIPC, freshHistory, noMemory bool
 }
 
 func (f *runFlags) register(cmd *cobra.Command) {
@@ -89,6 +89,16 @@ func (f *runFlags) register(cmd *cobra.Command) {
 	cmd.MarkFlagsMutuallyExclusive("secrets", "no-secrets", "all-secrets")
 	cmd.Flags().BoolVar(&f.freshHistory, "fresh-history", false, "move the session's history aside to NAME.old-TIMESTAMP and start with an empty one (recreates an existing container)")
 	cmd.Flags().BoolVar(&f.hostIPC, "host-ipc", false, "share the docker host's IPC namespace and /dev/shm with the session, or --host-ipc=false for a private one (new sessions get a private one; a different choice recreates an existing container)")
+	cmd.Flags().BoolVar(&f.noMemory, "no-memory", false, "turn Claude Code's auto memory off for the session, or --no-memory=false to turn it back on (new sessions keep it on; a different choice recreates an existing container)")
+}
+
+// noMemoryChoice returns the auto memory choice the flags ask for, nil to
+// keep the session's current one.
+func (f *runFlags) noMemoryChoice(cmd *cobra.Command) *bool {
+	if !cmd.Flags().Changed("no-memory") {
+		return nil
+	}
+	return &f.noMemory
 }
 
 // hostIPCChoice returns the IPC choice the flags ask for, nil to keep the
@@ -138,6 +148,7 @@ func (f *runFlags) options(cmd *cobra.Command, interactive bool) (session.Option
 		Variant:      f.variant,
 		Secrets:      set,
 		HostIPC:      f.hostIPCChoice(cmd),
+		NoMemory:     f.noMemoryChoice(cmd),
 		FreshHistory: f.freshHistory,
 		Query:        f.query,
 		NoOpen:       f.noOpen,
@@ -175,7 +186,8 @@ func newRunCommand() *cobra.Command {
   safeclaw run -s work
   safeclaw run -s myproject -v ~/myproject:/home/sclaw/myproject
   safeclaw run -s research -n -q "Research topic X"
-  safeclaw run -s chat --secrets CLAUDE_CODE_OAUTH_TOKEN`,
+  safeclaw run -s chat --secrets CLAUDE_CODE_OAUTH_TOKEN
+  safeclaw run -s triage --no-memory`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Without a terminal there is no one to prompt, so behave like `new`.

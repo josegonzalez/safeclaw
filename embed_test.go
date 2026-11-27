@@ -19,6 +19,7 @@ func TestBuildContextHasEverythingTheDockerfileNeeds(t *testing.T) {
 		"setup/CLAUDE.md",
 		"setup/settings.json",
 		"setup/managed-mcp.json",
+		"setup/safeclaw-session.json",
 		"setup/skills/gdoc/SKILL.md",
 		"cmd/safeclaw/main.go",
 		"internal/cli/root.go",
@@ -120,6 +121,33 @@ func TestDockerfileRootOwnsWhatClaudeCodeLoads(t *testing.T) {
 	}
 	if !strings.Contains(dockerfile, "COPY setup/managed-mcp.json /etc/claude-code/managed-mcp.json") {
 		t.Error("Dockerfile does not install setup/managed-mcp.json")
+	}
+}
+
+// TestDockerfileRootOwnsSessionSettings checks that the managed settings
+// file safeclaw writes each session's settings to is created root-owned and
+// read-only for sclaw, and starts out setting nothing.
+func TestDockerfileRootOwnsSessionSettings(t *testing.T) {
+	b, err := fs.ReadFile(BuildContext, "Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(b)
+	for _, want := range []string{
+		"COPY setup/safeclaw-session.json " + config.SessionSettingsFile + "\n",
+		"chmod 755 /etc/claude-code " + config.ManagedSettingsDir + " ",
+		"chmod 644 /etc/claude-code/managed-mcp.json " + config.SessionSettingsFile + "\n",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("Dockerfile is missing %q", want)
+		}
+	}
+	settings, err := fs.ReadFile(BuildContext, "setup/safeclaw-session.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(settings)) != "{}" {
+		t.Errorf("setup/safeclaw-session.json sets something: %s", settings)
 	}
 }
 
