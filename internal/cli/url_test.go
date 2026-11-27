@@ -32,6 +32,10 @@ func urlContainers(args []string, _ string) ([]byte, error) {
 	case "safeclaw-work":
 		c = map[string]any{"State": state(true), "Config": map[string]any{"Labels": map[string]string{config.LabelBracketedHostTTYD: "1"}}, "HostConfig": map[string]any{"PortBindings": bindings, "NetworkMode": "bridge"},
 			"NetworkSettings": map[string]any{"Networks": map[string]any{"bridge": map[string]any{}}}}
+	case "safeclaw-oldttyd":
+		// Published on [::1] from an image whose ttyd refuses [::1] URLs.
+		c = map[string]any{"State": state(true), "HostConfig": map[string]any{"PortBindings": bindings, "NetworkMode": "bridge"},
+			"NetworkSettings": map[string]any{"Networks": map[string]any{"bridge": map[string]any{}}}}
 	case "safeclaw-stopped":
 		c = map[string]any{"State": state(false), "HostConfig": map[string]any{"PortBindings": bindings, "NetworkMode": "bridge"}}
 	case "safeclaw-box":
@@ -94,6 +98,17 @@ func TestURLCommand(t *testing.T) {
 			t.Errorf("url %s = %q, %v, want an error saying %q", name, out, err, why)
 		}
 	}
+	// A session whose ttyd refuses [::1] URLs gets no localhost URL, which
+	// a browser could send to another local user's listener on 127.0.0.1.
+	if err := os.WriteFile(filepath.Join(ttyd, "oldttyd"), []byte("safeclaw:pw\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opened = nil
+	out, err = run(t, NewRootCommand(), "url", "oldttyd", "--open")
+	if !errors.Is(err, session.ErrOldTTYD) || out != "" || len(opened) != 0 {
+		t.Errorf("url oldttyd --open = %q, %v, opened %q", out, err, opened)
+	}
+
 	if _, err := run(t, NewRootCommand(), "url"); err == nil {
 		t.Error("url accepted no name")
 	}
