@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,15 @@ func TestIntegrationLifecycle(t *testing.T) {
 	if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", res.Port)); err == nil {
 		_ = resp.Body.Close()
 		t.Errorf("session terminal answered on 127.0.0.1: %d", resp.StatusCode)
+	}
+	// ttyd reads the credential from its file, so it is not in ttyd's
+	// command line, which every local user can read.
+	cred, err := m.Credential(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := d.Exec(ctx, res.Container, docker.ExecOptions{}, "sh", "-c", `tr '\0' ' ' < /proc/$(pgrep -o -x ttyd)/cmdline`); err != nil || !strings.Contains(string(out), "--credential-file") || strings.Contains(string(out), cred.Password) {
+		t.Errorf("ttyd command line = %q, %v; want --credential-file and no credential", out, err)
 	}
 	// ttyd and the tmux server Claude Code runs in have umask 022,
 	// whatever umask docker exec gives them.
@@ -896,5 +906,62 @@ func TestIntegrationSetupTokenRecording(t *testing.T) {
 	got, err := ParseSetupToken(out)
 	if err != nil || got != tok {
 		t.Errorf("parsed %q, %v from %q", got, err, out)
+	}
+}
+
+// TestIntegrationTTYDCredentialNotInArgv starts the image's ttyd the way
+// startTTYD does, in a throwaway container with no network and a dummy
+// credential, and checks that neither ps nor /proc/PID/cmdline shows the
+// credential, that ttyd doesn't log it, and that basic auth still works.
+func TestIntegrationTTYDCredentialNotInArgv(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+	id, err := d.Run(ctx, "-d", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", config.ImageName, "sleep", "infinity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Remove(context.Background(), id, true) })
+
+	cred := Credential{User: config.TTYDUser, Password: "integration-dummy-password"}
+	if _, err := d.Exec(ctx, id, docker.ExecOptions{Stdin: strings.NewReader(cred.String())}, "sh", "-c", writeCredentialScript); err != nil {
+		t.Fatal(err)
+	}
+	const log = "/tmp/ttyd-itest.log"
+	if _, err := d.Exec(ctx, id, docker.ExecOptions{Detach: true}, "sh", "-c", startTTYDScript+" 2>"+log, "ttyd", "-W", "-O", "-p", strconv.Itoa(config.TTYDPort), "sleep", "infinity"); err != nil {
+		t.Fatal(err)
+	}
+	status := func(auth bool) string {
+		u := ""
+		if auth {
+			u = `-u "$(cat ` + config.TTYDCredentialFile + `)"`
+		}
+		script := `for i in $(seq 50); do c=$(curl -s -o /dev/null -w '%{http_code}' ` + u + ` http://127.0.0.1:` + strconv.Itoa(config.TTYDPort) + `/); [ "$c" != 000 ] && break; sleep 0.2; done; echo "$c"`
+		out, err := d.Exec(ctx, id, docker.ExecOptions{}, "sh", "-c", script)
+		if err != nil {
+			t.Errorf("curl: %v", err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if got := status(false); got != "401" {
+		t.Errorf("GET without the credential = %s, want 401", got)
+	}
+	if got := status(true); got != "200" {
+		t.Errorf("GET with the credential = %s, want 200", got)
+	}
+
+	out, err := d.Exec(ctx, id, docker.ExecOptions{}, "sh", "-c", `pid=$(pgrep -o -x ttyd) && ps -o args= -p "$pid" && tr '\0' ' ' < /proc/$pid/cmdline && echo && cat `+log)
+	if err != nil {
+		t.Fatalf("read ttyd's command line: %q, %v", out, err)
+	}
+	if !strings.Contains(string(out), "ttyd --credential-file "+config.TTYDCredentialFile) {
+		t.Errorf("ttyd not started with --credential-file: %q", out)
+	}
+	for _, secret := range []string{cred.Password, cred.Token()} {
+		if strings.Contains(string(out), secret) {
+			t.Errorf("ttyd's command line or log shows the credential: %q", out)
+		}
 	}
 }

@@ -72,12 +72,15 @@ type world struct {
 	images map[string]string
 	// imageLabels maps image names to their labels.
 	imageLabels map[string]map[string]string
-	// oldTTYD leaves off the label images whose ttyd accepts a bracketed
-	// IPv6 Host carry.
-	oldTTYD    bool
-	containers map[string]*fakeContainer
-	native     bool
-	prompt     bool
+	// oldTTYD leaves off the labels images whose ttyd accepts a bracketed
+	// IPv6 Host and reads its credential from a file carry.
+	oldTTYD bool
+	// argvCredTTYD leaves off only the label images whose ttyd reads its
+	// credential from a file carry.
+	argvCredTTYD bool
+	containers   map[string]*fakeContainer
+	native       bool
+	prompt       bool
 	// rootEnv makes containers report the root-owned env file of current
 	// images, instead of only sclaw's ~/.env.
 	rootEnv bool
@@ -154,6 +157,9 @@ func (w *world) inspectJSON(names []string) []byte {
 				labels = map[string]string{}
 			}
 			labels[config.LabelBracketedHostTTYD] = "1"
+			if !w.argvCredTTYD {
+				labels[config.LabelCredentialFileTTYD] = "1"
+			}
 		}
 		out = append(out, map[string]any{
 			"Id":              id,
@@ -178,6 +184,9 @@ func (w *world) labelsOf(image string) map[string]string {
 	}
 	if !w.oldTTYD {
 		labels[config.LabelBracketedHostTTYD] = "1"
+		if !w.argvCredTTYD {
+			labels[config.LabelCredentialFileTTYD] = "1"
+		}
 	}
 	return labels
 }
@@ -418,7 +427,7 @@ func TestEnsureCreatesContainer(t *testing.T) {
 			t.Errorf("secret leaked into argv: %q", c)
 		}
 	}
-	if !hasCall(r, `exec -d safeclaw-work sh -c umask 022; exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O -t titleFixed=SafeClaw - work -p 7681 safeclaw ttyd-wrapper`) {
+	if !hasCall(r, `exec -d safeclaw-work sh -c umask 022; exec ttyd --credential-file /home/sclaw/.ttyd-credential "$@" ttyd -W -O -t titleFixed=SafeClaw - work -p 7681 safeclaw ttyd-wrapper`) {
 		t.Errorf("ttyd not started natively: %v", r.Commands())
 	}
 	if hasCall(r, "exec safeclaw-work bash -c") {
@@ -448,7 +457,7 @@ func TestEnsureReusesRunningContainer(t *testing.T) {
 		t.Error("should not create or start")
 	}
 	// Upstream image: falls back to the legacy wrapper script.
-	if !hasCall(r, `exec -d safeclaw-default sh -c umask 022; exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O -t titleFixed=SafeClaw - default -p 7681 /home/sclaw/ttyd-wrapper.sh`) {
+	if !hasCall(r, `exec -d safeclaw-default sh -c umask 022; exec ttyd --credential-file /home/sclaw/.ttyd-credential "$@" ttyd -W -O -t titleFixed=SafeClaw - default -p 7681 /home/sclaw/ttyd-wrapper.sh`) {
 		t.Errorf("legacy wrapper not used: %v", r.Commands())
 	}
 }

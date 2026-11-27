@@ -81,6 +81,11 @@ const (
 	// [::1]:PORT in its origin check. It is outside LabelPrefix because the
 	// image sets it. Containers without it get localhost URLs.
 	LabelBracketedHostTTYD = "io.github.josegonzalez.safeclaw.ttyd-bracketed-host"
+	// LabelCredentialFileTTYD is the image label, copied onto its
+	// containers, marking an image whose ttyd reads its credential from a
+	// file with --credential-file. Containers without it get the credential
+	// on ttyd's command line.
+	LabelCredentialFileTTYD = "io.github.josegonzalez.safeclaw.ttyd-credential-file"
 
 	// LabelSecrets is the container label that records which secrets an
 	// interactive session receives, as comma-separated names. Containers

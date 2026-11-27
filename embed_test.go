@@ -125,8 +125,10 @@ func TestDockerfilePinsClaudeCodeTipsByCommit(t *testing.T) {
 
 // TestDockerfileBuildsPatchedTTYD checks that ttyd is built from a pinned
 // commit with the patches that let its origin check accept a bracketed IPv6
-// Host and make it refuse framing, rather than installed from apt, and that
-// the image carries the label safeclaw reads to name [::1] in session URLs.
+// Host, make it refuse framing and let it read its credential from a file,
+// rather than installed from apt, and that the image carries the labels
+// safeclaw reads to name [::1] in session URLs and to start ttyd with
+// --credential-file.
 func TestDockerfileBuildsPatchedTTYD(t *testing.T) {
 	b, err := fs.ReadFile(BuildContext, "Dockerfile")
 	if err != nil {
@@ -143,8 +145,11 @@ func TestDockerfileBuildsPatchedTTYD(t *testing.T) {
 		"git apply /tmp/bracketed-ipv6-origin.patch",
 		"COPY setup/ttyd/refuse-framing.patch /tmp/refuse-framing.patch\n",
 		"git apply /tmp/refuse-framing.patch",
+		"COPY setup/ttyd/credential-file.patch /tmp/credential-file.patch\n",
+		"git apply /tmp/credential-file.patch",
 		"COPY --from=ttyd /out/ttyd /usr/local/bin/ttyd\n",
 		"LABEL " + config.LabelBracketedHostTTYD + `="1"` + "\n",
+		"LABEL " + config.LabelCredentialFileTTYD + `="1"` + "\n",
 	} {
 		if !strings.Contains(dockerfile, want) {
 			t.Errorf("Dockerfile is missing %q", want)
@@ -179,6 +184,24 @@ func TestDockerfileBuildsPatchedTTYD(t *testing.T) {
 	// and -I), /token, the base-path redirect, and the 401.
 	if n := strings.Count(string(framing), "add_frame_headers(wsi, &p, end)"); n != 5 {
 		t.Errorf("refuse-framing patch adds the headers to %d responses, want 5", n)
+	}
+	credFile, err := fs.ReadFile(BuildContext, "setup/ttyd/credential-file.patch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"+++ b/src/server.c",
+		`{"credential-file", required_argument, NULL, OPT_CREDENTIAL_FILE}`,
+		"read_credential_file(optarg)",
+		// ttyd no longer logs the encoded credential at startup.
+		`-  if (server->credential != NULL) lwsl_notice("  credential: %s\n", server->credential);`,
+	} {
+		if !strings.Contains(string(credFile), want) {
+			t.Errorf("credential-file patch is missing %q:\n%s", want, credFile)
+		}
+	}
+	if regexp.MustCompile(`(?m)^\+.*lwsl_\w+\([^\n]*server->credential`).Match(credFile) {
+		t.Errorf("credential-file patch logs the credential:\n%s", credFile)
 	}
 }
 
