@@ -17,6 +17,10 @@ The user interacts with Claude Code through a browser, not a local terminal. Thi
 
 Containers created from the upstream image don't contain the `safeclaw` binary, so `run` falls back to their `/home/sclaw/ttyd-wrapper.sh`.
 
+### Umask
+
+Some Docker versions start `docker exec` processes with a umask of `0000` instead of the container's, and safeclaw starts everything in a session with `docker exec`. So ttyd is started under `umask 022`, and `safeclaw ttyd-wrapper` sets it again before it runs tmux, which covers `run -q` starting the tmux session without ttyd. The tmux server, every shell in it, and Claude Code inherit it, so files they create, including in the history mount on the host, are not world-writable. `safeclaw attach` only runs a tmux client, so its shells come from the same server. The legacy tmux script and the git config script run under `umask 022` too, and `/home/sclaw/.env` and the terminal credential are written under `umask 077`. A running session picks this up on its next `run`, which restarts ttyd and tmux.
+
 ### Terminal credential
 
 The published port is not private to the session's owner: other session containers can reach it through the runtime's host gateway or the default bridge, and so can any local process or a browser page allowed to open a WebSocket to loopback. So ttyd runs with `-c` and `-O`:

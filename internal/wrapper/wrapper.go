@@ -13,12 +13,20 @@ import (
 // ClaudeCommand is typed into the new tmux session.
 const ClaudeCommand = "claude --dangerously-skip-permissions"
 
+// Umask is set before tmux runs, so the tmux server, its shells, and
+// Claude Code create files that are not world-writable. `docker exec` does
+// not inherit the container's umask on every engine, and some run commands
+// with 0000.
+const Umask = 0o022
+
 // Commander runs and execs processes.
 type Commander interface {
 	// Run runs a command and returns its error.
 	Run(name string, args ...string) error
 	// Exec replaces the current process.
 	Exec(name string, args ...string) error
+	// Umask sets the process's file mode creation mask.
+	Umask(mask int)
 }
 
 // OSCommander uses os/exec and syscall.Exec.
@@ -37,6 +45,11 @@ func (OSCommander) Exec(name string, args ...string) error {
 		return err
 	}
 	return syscall.Exec(path, append([]string{name}, args...), os.Environ())
+}
+
+// Umask implements Commander.
+func (OSCommander) Umask(mask int) {
+	syscall.Umask(mask)
 }
 
 // EnsureSession creates the tmux session and starts Claude Code in it, unless
@@ -61,9 +74,10 @@ func EnsureSession(c Commander) error {
 	return nil
 }
 
-// Run ensures the session exists and, if attach is true, replaces the
-// current process with `tmux attach`.
+// Run sets the umask, ensures the session exists and, if attach is true,
+// replaces the current process with `tmux attach`.
 func Run(c Commander, attach bool) error {
+	c.Umask(Umask)
 	if err := EnsureSession(c); err != nil {
 		return err
 	}

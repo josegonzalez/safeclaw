@@ -35,8 +35,9 @@ const legacyPublishHost = "127.0.0.1"
 var ErrNoTerminal = errors.New("has no running web terminal")
 
 // startTTYDScript starts ttyd with the credential written to
-// config.TTYDCredentialFile, so it never appears in a host command line.
-const startTTYDScript = `exec ttyd -c "$(cat ` + config.TTYDCredentialFile + `)" "$@"`
+// config.TTYDCredentialFile, so it never appears in a host command line,
+// and with sessionUmask, which the wrapper, tmux, and Claude Code inherit.
+const startTTYDScript = sessionUmask + `; exec ttyd -c "$(cat ` + config.TTYDCredentialFile + `)" "$@"`
 
 // writeCredentialScript replaces the container's credential file with
 // stdin, readable only by its owner.

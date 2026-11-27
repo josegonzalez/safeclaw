@@ -68,6 +68,17 @@ func TestIntegrationLifecycle(t *testing.T) {
 		_ = resp.Body.Close()
 		t.Errorf("session terminal answered on 127.0.0.1: %d", resp.StatusCode)
 	}
+	// ttyd and the tmux server Claude Code runs in have umask 022,
+	// whatever umask docker exec gives them.
+	if _, err := d.Exec(ctx, res.Container, docker.ExecOptions{}, "safeclaw", "ttyd-wrapper", "--no-attach"); err != nil {
+		t.Fatal(err)
+	}
+	for _, proc := range []string{"ttyd", "tmux -f /dev/null new"} {
+		out, err := d.Exec(ctx, res.Container, docker.ExecOptions{}, "sh", "-c", `grep Umask /proc/$(pgrep -o -f "^$1")/status`, "sh", proc)
+		if err != nil || !strings.Contains(string(out), "0022") {
+			t.Errorf("%s umask = %q, %v, want 0022", proc, out, err)
+		}
+	}
 
 	if err := m.Stop(ctx, name); err != nil {
 		t.Fatal(err)
