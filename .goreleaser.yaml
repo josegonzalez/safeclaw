@@ -4,7 +4,8 @@ project_name: safeclaw
 
 before:
   hooks:
-    - go mod tidy
+    # Fails if go.mod or go.sum are not tidy, without changing them.
+    - go mod tidy -diff
     - sh -c 'mkdir -p completions && for sh in bash zsh fish; do go run ./cmd/safeclaw completion "$sh" > "completions/safeclaw.$sh"; done'
 
 builds:

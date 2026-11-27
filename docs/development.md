@@ -86,10 +86,12 @@ Run the Release workflow from the Actions tab (or `gh workflow run release.yml -
 - bumps the latest `v*` tag and pushes the new tag on that commit, only once the tests pass, so a failed run leaves no tag behind. Runs are queued, so concurrent dispatches don't pick the same version
 - runs goreleaser to publish darwin/linux amd64/arm64 archives with completions. The `safeclaw` formula in `josegonzalez/homebrew-repo` is bumped by that repo's daily `update-formulas.yml` workflow, which opens a PR when a new release appears
 - builds the image natively on amd64 and arm64 runners and pushes a multi-arch manifest to `ghcr.io/josegonzalez/safeclaw` tagged with the version and `latest`
-- builds each built-in variant on top of that image from `safeclaw variant dockerfile NAME`, with an empty config directory so only the built-in definition applies, and pushes it tagged `<version>-NAME` and `NAME`
+- builds each built-in variant on top of that image, by the manifest's digest rather than its tag, from `safeclaw variant dockerfile NAME`, with an empty config directory so only the built-in definition applies, and pushes it tagged `<version>-NAME` and `NAME`
+
+Each job gets only the token permissions it needs: the tag and release jobs can write repository contents, and the image, manifest, and variant jobs can write packages. goreleaser fails with `go mod tidy -diff` if `go.mod` or `go.sum` are not tidy, instead of rewriting them during the release.
 
 `make release-snapshot` runs goreleaser locally without publishing.
 
 ## Updating pinned versions
 
-Built-in variants and their packages are defined in `internal/variant/variant.go` (`Builtins`). Image versions are `ARG`s at the top of the `Dockerfile`'s runtime stage (`CLAUDE_CODE_VERSION`, `PLAYWRIGHT_MCP_VERSION`, `CLAUDE_CODE_TIPS_VERSION`, `NODE_VERSION`, `NODE_LIEF_VERSION`). Update the README's "What's included" section to match. Go dependencies are updated with `go get -u ./... && go mod tidy`. htmx is vendored from the `htmx.org` npm package's `dist/` directory.
+Built-in variants and their packages are defined in `internal/variant/variant.go` (`Builtins`). Image versions are `ARG`s at the top of the `Dockerfile`'s runtime stage (`CLAUDE_CODE_VERSION`, `PLAYWRIGHT_MCP_VERSION`, `CLAUDE_CODE_TIPS_VERSION`, `NODE_VERSION`, `NODE_LIEF_VERSION`). Update the README's "What's included" section to match. Go dependencies are updated with `go get -u ./... && go mod tidy`. GitHub Actions in `.github/workflows` are pinned by commit SHA with the version in a trailing comment, and dependabot updates both. The goreleaser version (`version:` on the goreleaser step in `release.yml`) and the golangci-lint version in `ci.yml` are pinned exactly and are not updated by dependabot, so bump them by hand. htmx is vendored from the `htmx.org` npm package's `dist/` directory.
