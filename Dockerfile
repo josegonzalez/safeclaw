@@ -27,7 +27,10 @@ ARG NODE_VERSION=26
 ARG PLAYWRIGHT_MCP_VERSION=0.0.86
 ARG CLAUDE_CODE_VERSION=2.1.332
 ARG NODE_LIEF_VERSION=1.3.2
-ARG CLAUDE_CODE_TIPS_VERSION=v0.26.39
+# claude-code-tips is pinned by commit (tag v0.26.39), not by tag, so a moved
+# tag can't change what the build fetches
+ARG CLAUDE_CODE_TIPS_COMMIT=ed25f97beae8fa1755c6ba90cc670944316e21ae
+ARG CONTEXT_BAR_SHA256=3b7644b94eaa82c5df46bbf34ffa61d5b2bc4f12976576d966676cfc2c61761f
 ARG YT_DLP_VERSION=2026.11.23
 ARG YT_DLP_SHA256=e8665ed64d6b9172773e812f891fb707a0cb1ee8d9ef4fc1acb00cabee4c5256
 
@@ -134,18 +137,21 @@ COPY --chown=sclaw:sclaw setup/CLAUDE.md /home/sclaw/.claude/CLAUDE.md
 COPY --chown=sclaw:sclaw setup/settings.json /home/sclaw/.claude/settings.json
 
 # Install scripts (context bar status line), from the same claude-code-tips
-# release as the dx plugin
+# commit as the dx plugin
 RUN mkdir -p /home/sclaw/.claude/scripts && \
     curl -fsSLo /home/sclaw/.claude/scripts/context-bar.sh \
-      https://raw.githubusercontent.com/ykdojo/claude-code-tips/${CLAUDE_CODE_TIPS_VERSION}/scripts/context-bar.sh && \
+      https://raw.githubusercontent.com/ykdojo/claude-code-tips/${CLAUDE_CODE_TIPS_COMMIT}/scripts/context-bar.sh && \
+    echo "${CONTEXT_BAR_SHA256}  /home/sclaw/.claude/scripts/context-bar.sh" | sha256sum -c - && \
     chmod +x /home/sclaw/.claude/scripts/context-bar.sh
 
 RUN curl -fsSL https://claude.ai/install.sh | bash -s -- ${CLAUDE_CODE_VERSION}
 
 # === SETUP Claude Code ===
 
-# Install DX plugin
-RUN claude plugin marketplace add https://github.com/ykdojo/claude-code-tips.git#${CLAUDE_CODE_TIPS_VERSION} && \
+# Install DX plugin. The marketplace is checked out at the pinned commit, and
+# dx's source is that same checkout ("./" in its marketplace.json).
+RUN claude plugin marketplace add https://github.com/ykdojo/claude-code-tips.git#${CLAUDE_CODE_TIPS_COMMIT} && \
+    test "$(git -C /home/sclaw/.claude/plugins/marketplaces/ykdojo rev-parse HEAD)" = "${CLAUDE_CODE_TIPS_COMMIT}" && \
     claude plugin install dx@ykdojo
 
 # The Playwright MCP server is the only MCP server. Claude Code's managed MCP
