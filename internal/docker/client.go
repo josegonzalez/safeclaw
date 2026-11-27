@@ -55,6 +55,13 @@ type Container struct {
 	Image  string `json:"Image"`
 	Config struct {
 		Labels map[string]string `json:"Labels"`
+		// Image is the image name the container was created from.
+		Image string `json:"Image"`
+		// User is the --user the container runs as, "" for the image's.
+		User string `json:"User"`
+		// Env are the container's NAME=value environment variables,
+		// including the image's.
+		Env []string `json:"Env"`
 	} `json:"Config"`
 	State struct {
 		Status  string `json:"Status"`
@@ -84,6 +91,15 @@ type Container struct {
 		// SecurityOpt are the --security-opt options, e.g.
 		// "no-new-privileges".
 		SecurityOpt []string `json:"SecurityOpt"`
+		// CapAdd are the capabilities added with --cap-add.
+		CapAdd []string `json:"CapAdd"`
+		// Privileged is set for containers run with --privileged.
+		Privileged bool `json:"Privileged"`
+		// ReadonlyRootfs is set for containers run with --read-only.
+		ReadonlyRootfs bool `json:"ReadonlyRootfs"`
+		// PidMode is the PID namespace, "" for the container's own or
+		// "host".
+		PidMode string `json:"PidMode"`
 	} `json:"HostConfig"`
 	NetworkSettings struct {
 		// Networks are the networks the container is connected to, by name.

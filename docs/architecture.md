@@ -140,6 +140,33 @@ The sandbox side also controls what those commands write to stderr, and part of 
 
 `cp-out NAME DIR HOST_DIR --only GLOB` keeps only the regular files directly in DIR whose names match one of the (repeatable) `--only` globs. Symbolic links, hard links, directories, devices, and anything in a subdirectory are dropped, and a name that appears twice is an error. GNU sparse entries are dropped too, since the tar reader would expand them to their logical size, so a tiny stream can't fill the host disk even with `--max-size 0`; the image's tar never writes them, since it isn't given `--sparse`. Since the names come from the untrusted side, a kept file whose name is not valid UTF-8, contains anything `unicode.IsPrint` rejects (control characters such as newlines and terminal escapes, format characters such as bidi overrides, and spaces other than a plain space), or starts with `-` refuses the whole copy, with an error naming it quoted. As in a shell, a name starting with `.` only matches a glob that starts with `.` too, so `--only '*'` never brings back hidden files such as `.envrc` - ask for them with a glob such as `.envrc` or `.*`. HOST_DIR must exist. Files are written to a temporary directory inside it with mode 644 (less the umask), and nothing is moved into place until the whole stream has arrived, stays within `--max-size` (default `1g`, `0` for no limit) and `--max-files` (default `1000`, `0` for no limit; empty files are free against `--max-size`, so this is what stops a sandbox from planting any number of them), and none of the names already exist. Without `--force` each file is moved with a rename that refuses to replace, so a file created in the meantime is never overwritten. `--force` replaces existing files, and a symlink itself rather than its target, but never a directory. Each host path written is printed, quoted like cp-in's when it is not printable.
 
+### Inspecting and verifying
+
+`safeclaw sandbox inspect NAME` and `safeclaw sandbox verify NAME` let a script confirm that a container really is an isolated sandbox, and whether it is running, without relying on the `safeclaw-` prefix, the labels, or `docker inspect` templates. Neither changes the sandbox. Both refuse interactive sessions and missing names.
+
+`inspect` prints the sandbox's docker configuration as JSON and runs nothing inside it. `schema` is the version of the output: fields may be added within a version, but are never renamed, removed, or given a new meaning without a new one. Lists are never `null`.
+
+| Field | Meaning |
+|---|---|
+| `schema` | `1` |
+| `name`, `container`, `id` | The sandbox name, its container name, and the container ID |
+| `status`, `running` | docker's status (`running`, `exited`, ...) and whether it is running |
+| `one_off` | Whether docker removes it when it stops |
+| `variant` | Its image variant, `base` for the base image |
+| `image`, `image_id` | The image name it was created from and that image's ID |
+| `network_mode`, `networks` | docker's network mode (`none`) and the networks it is attached to |
+| `user` | The user it runs as (`sandbox`) |
+| `read_only_root`, `privileged` | `--read-only` and `--privileged` |
+| `cap_drop`, `cap_add` | The capabilities dropped and added |
+| `no_new_privileges` | Whether `no-new-privileges` is set |
+| `ipc_mode`, `pid_mode` | docker's IPC and PID namespace modes |
+| `limits` | `memory_bytes`, `cpus`, `pids`, and `disk_bytes` (the size of `/sandbox`), each `0` for none |
+| `tmpfs` | Each tmpfs as `path`, `options`, and `size_bytes`, sorted by path |
+| `mounts` | Each bind mount or volume as `type`, `source`, `destination`, and `read_only` |
+| `labels` | Its `safeclaw.*` labels |
+
+`verify` checks the guarantees above, first from the docker configuration: `network` (mode `none`, attached to nothing else), `user` (`sandbox`), `capabilities` (`ALL` dropped, none added, not privileged), `no-new-privileges`, `read-only-root`, `mounts-read-only`, `no-secrets` (no env var named after a stored secret, `CLAUDE_CODE_OAUTH_TOKEN`, or `GH_TOKEN`), `namespaces` (no host IPC or PID namespace), `limits` (memory, CPU, and process limits set), `disk` (a sized `/sandbox` tmpfs, mode 0700 and owned by uid 2000), and `tmp` (a sized `/tmp` tmpfs). Then `running`, and, for a running sandbox, a read-only probe run with `docker exec --user sandbox` that checks what the sandbox user actually gets: `live-user` (uid 2000), `live-home` (`/home/sclaw` can't be read or entered), `live-network` (only `lo`), `live-capabilities` (every capability set in `/proc/self/status` empty and `NoNewPrivs` on), `live-read-only-root` and `live-mounts` (`/` and each mount are `ro` in `/proc/self/mounts`), and `live-disk` (`/sandbox` is a tmpfs no larger than `--disk`). A stopped sandbox fails `running`, and its live checks are skipped, which also fails the verify. Each check is printed as `ok`, `FAIL`, or `SKIP` with what was found, and the command exits 1 with an error naming the failed checks. `--json` prints the report as `{"schema", "name", "container", "ok", "checks": [{"name", "ok", "skipped", "detail"}]}` instead, still exiting 1 when `ok` is false. Check names are stable within a schema version, and `detail` is for people, not parsing.
+
 ### One-off sandboxes
 
 A one-off sandbox lives for exactly one job, so callers sharing the host need no locking, no detection of a sandbox recreated under the same name, and no per-job cleanup. If something removes one mid-job, the job is simply run again. One-off sandboxes are created with docker's `--rm`, so docker itself removes the container when it stops, and they get the same isolation, limits, and read-only `-v` as any other sandbox. Without `-s` they get a random `tmp-<8 hex>` name, and a name any container already has is refused rather than reused.
