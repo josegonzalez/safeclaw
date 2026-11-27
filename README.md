@@ -106,6 +106,13 @@ safeclaw sandbox cp-out "$name" /sandbox/out ./results --only '*.pdf'
 safeclaw sandbox stop "$name"
 ```
 
+Scripts that drive a sandbox can check it before handing it untrusted files, without relying on container names, labels, or `docker inspect`:
+
+```bash
+safeclaw sandbox inspect triage   # its isolation settings, limits, and mounts as JSON
+safeclaw sandbox verify triage    # checks each isolation guarantee, exits non-zero naming any that fail
+```
+
 ## Taking a session offline
 
 While an interactive session handles something untrusted, take it offline. `safeclaw net off` saves the session's networks and disconnects it from them, and `safeclaw net on` reconnects it to exactly those networks. Its web terminal is unreachable while it is offline, and it stays offline across restarts.
@@ -261,6 +268,8 @@ The choice is remembered for the session like its secrets, and changing it recre
 | `safeclaw sandbox cp-in NAME FILE...` | Copy regular host files into a running sandbox as `N-name`, owned by the sandbox user, refusing links and other file types. `--to` picks a directory under `/sandbox` (default `/sandbox/in`). |
 | `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, sparse files, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given, `--max-size` (default `1g`) caps the total, and `--max-files` (default `1000`) caps the number of files. |
 | `safeclaw sandbox ls` | List sandboxes |
+| `safeclaw sandbox inspect NAME` | Print a sandbox's status, variant, network, user, capabilities, read-only root, limits including `--disk`, mounts, and safeclaw labels as JSON with a versioned schema |
+| `safeclaw sandbox verify NAME` | Check a sandbox's configuration and, when it is running, what the sandbox user sees inside it against the sandbox's isolation guarantees, exiting non-zero and naming the failed checks. `--json` prints the report as JSON. |
 | `safeclaw sandbox stop NAME` | Stop a sandbox, emptying its `/sandbox` |
 | `safeclaw sandbox rm NAME` | Delete a sandbox |
 | `safeclaw variant ls` | List image variants, whether their images exist, and which session types default to them |

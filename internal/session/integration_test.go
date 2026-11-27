@@ -246,6 +246,17 @@ func TestIntegrationSandbox(t *testing.T) {
 		t.Errorf("/sandbox size after a restart = %q, %v", out, err)
 	}
 
+	// A real sandbox passes every verify check, and inspect reports its
+	// --disk.
+	info, err := m.InspectSandbox(ctx, name)
+	if err != nil || info.Limits.DiskBytes != 8<<20 || !info.Running || len(info.Mounts) != 1 || !info.Mounts[0].ReadOnly {
+		t.Errorf("inspect = %+v, %v", info, err)
+	}
+	report, err := m.VerifySandbox(ctx, name)
+	if err != nil || !report.OK {
+		t.Errorf("verify = %+v, %v", report, err)
+	}
+
 	if err := m.Delete(ctx, name, true); err != nil {
 		t.Fatal(err)
 	}
