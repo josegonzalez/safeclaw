@@ -1,6 +1,6 @@
 # Dashboard
 
-`safeclaw dashboard` serves the dashboard at http://localhost:7680 (bound to `127.0.0.1`, `--port` to change).
+`safeclaw dashboard` serves the dashboard on `127.0.0.1:7680` (`--port` to change) and prints a URL carrying a random token, such as `http://127.0.0.1:7680/?token=...`. Opening it logs the browser in with a cookie; every route, static files included, returns 401 without it. See [dashboard access](architecture.md#dashboard-access).
 
 ## How it works
 
@@ -41,7 +41,12 @@ Stop and delete need two clicks. The first POST returns a "stop?"/"delete?" butt
 | `POST /sessions/{name}/start`, `/stop`, `/delete` | Session actions |
 | `POST /sessions/{name}/offline`, `/online` | Take a session offline with the unnamed hold, or release it (`force=1` releases every hold) |
 
-The JSON API from upstream is kept for scripting:
+The JSON API from upstream is kept for scripting. Send the token from `~/.config/safeclaw/dashboard/PORT.token` as a bearer token:
+
+```bash
+curl -H "Authorization: Bearer $(cat ~/.config/safeclaw/dashboard/7680.token)" http://localhost:7680/api/sessions
+```
+
 
 | Route | Body | Response |
 |-------|------|----------|
@@ -56,4 +61,4 @@ The JSON API from upstream is kept for scripting:
 
 ## Security
 
-Every request must use a loopback `Host` (`localhost`, `127.0.0.1`, `::1`), which blocks DNS rebinding. State-changing requests go through Go's `http.CrossOriginProtection`, so other websites can't drive the dashboard from your browser.
+Every request must use a loopback `Host` (`localhost`, `127.0.0.1`, `::1`), which blocks DNS rebinding, and carry the launch token in the `safeclaw_dashboard_PORT` cookie or an `Authorization: Bearer` header, which keeps out code in session containers and other local processes. A `GET` with the token in its `token` query parameter sets the cookie and redirects to the same URL without it. State-changing requests also go through Go's `http.CrossOriginProtection`, so other websites can't drive the dashboard from your browser. The auth check is `Access.Middleware` in `internal/dashboard/access.go`, so routes added later get it by being on the same handler.
