@@ -127,7 +127,7 @@ func TestTerminalProxyAddsCredentialAndDropsDashboardAuth(t *testing.T) {
 
 	h := http.Header{}
 	h.Set("Origin", srv.URL)
-	h.Set("Cookie", "safeclaw_dashboard_7680="+testToken+"; other=1")
+	h.Set("Cookie", login(t, srv.Config.Handler)+"; other=1")
 	// A browser may send basic credentials it cached for the host.
 	h.Set("Authorization", "Basic Zm9vOmJhcg==")
 	c, status, err := dialDashboard(ctx, srv, "/sessions/work/terminal/ws", h)
@@ -208,7 +208,7 @@ func TestTerminalProxyRefusesOtherOrigins(t *testing.T) {
 	for _, origin := range []string{"http://127.0.0.1:7681", "http://localhost:7680", "http://evil.example", "null"} {
 		h := http.Header{}
 		h.Set("Origin", origin)
-		h.Set("Cookie", "safeclaw_dashboard_7680="+testToken)
+		h.Set("Cookie", login(t, srv.Config.Handler))
 		_, status, err := dialDashboard(ctx, srv, "/sessions/work/terminal/ws", h)
 		if err == nil || status != http.StatusForbidden {
 			t.Errorf("origin %s: err = %v, status = %d, want 403", origin, err, status)
