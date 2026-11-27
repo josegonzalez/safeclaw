@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -343,5 +345,157 @@ func TestSecretNames(t *testing.T) {
 	names, err := m.SecretNames()
 	if err != nil || !slices.Equal(names, []string{"A", secrets.ClaudeToken}) {
 		t.Errorf("SecretNames = %v, %v", names, err)
+	}
+}
+
+// A recreate that can't complete keeps the session's container, so its
+// remembered secret set is never lost.
+func TestEnsureFailedRecreateKeepsSecrets(t *testing.T) {
+	ctx := context.Background()
+	runFailed := errors.New("docker run failed")
+	restoreFailed := errors.New("restore failed")
+	existing := func() *world {
+		return &world{image: "img", images: map[string]string{"safeclaw": "img", "safeclaw:sandbox": "sb"}, containers: map[string]*fakeContainer{
+			"safeclaw-work": {Running: true, Port: 7690, Image: "sb",
+				Labels: map[string]string{"safeclaw.secrets": secrets.ClaudeToken, "safeclaw.variant": "sandbox"},
+				Mounts: []string{"/hist:/home/sclaw/.claude/projects", "/host/old:/home/sclaw/old:ro"}},
+		}, native: true}
+	}
+	// kept checks the container is the old session's, or a copy of it,
+	// and that a plain rerun still writes only the remembered secrets.
+	kept := func(t *testing.T, w *world, m *Manager, r *dockertest.Runner) {
+		t.Helper()
+		c := w.containers["safeclaw-work"]
+		if c == nil {
+			t.Fatalf("container gone: %v", r.Commands())
+		}
+		if c.Labels["safeclaw.secrets"] != secrets.ClaudeToken || c.Labels["safeclaw.variant"] != "sandbox" || c.Port != 7690 ||
+			!slices.Contains(c.Mounts, "/host/old:/home/sclaw/old:ro") || !c.Running {
+			t.Errorf("container not kept: %+v", c)
+		}
+		r.Calls = nil
+		if _, err := m.Ensure(ctx, Options{Name: "work", NoOpen: true}); err != nil {
+			t.Fatal(err)
+		}
+		if hasCall(r, "run ") {
+			t.Errorf("plain rerun recreated: %v", r.Commands())
+		}
+		if env := envCall(t, r, "safeclaw-work"); env != "export CLAUDE_CODE_OAUTH_TOKEN='tok'\n" {
+			t.Errorf("env = %q", env)
+		}
+	}
+	rms := func(r *dockertest.Runner) int {
+		n := 0
+		for _, c := range r.Commands() {
+			if strings.HasPrefix(c, "rm ") {
+				n++
+			}
+		}
+		return n
+	}
+
+	for _, tc := range []struct {
+		name string
+		opts Options
+	}{
+		{"volume", Options{Name: "work", Volume: "/host/proj"}},
+		{"volume and secrets", Options{Name: "work", Volume: ":/x", Secrets: ptr(NoSecrets())}},
+	} {
+		t.Run("rejected "+tc.name, func(t *testing.T) {
+			w := existing()
+			m, r := newTestManager(t, w)
+			_ = m.Secrets.Set("EXCLUDED_SECRET", "dummy-excluded-value")
+			tc.opts.NoOpen = true
+			if _, err := m.Ensure(ctx, tc.opts); err == nil || !strings.Contains(err.Error(), "invalid volume") {
+				t.Fatalf("err = %v", err)
+			}
+			if hasCall(r, "rm ") || hasCall(r, "run ") {
+				t.Errorf("acted on a rejected volume: %v", r.Commands())
+			}
+			kept(t, w, m, r)
+		})
+	}
+
+	// Kept mounts are checked too, when no -v is given.
+	t.Run("rejected kept mount", func(t *testing.T) {
+		w := existing()
+		c := w.containers["safeclaw-work"]
+		c.Mounts = append(c.Mounts, ":/broken")
+		m, r := newTestManager(t, w)
+		if _, err := m.Ensure(ctx, Options{Name: "work", Secrets: ptr(NoSecrets()), NoOpen: true}); err == nil {
+			t.Fatal("recreated with a broken mount")
+		}
+		if hasCall(r, "rm ") || hasCall(r, "run ") {
+			t.Errorf("acted on a rejected volume: %v", r.Commands())
+		}
+	})
+
+	for _, tc := range []struct {
+		name         string
+		leaveCreated bool
+		rms          int
+	}{
+		{"create", false, 1},
+		{"start", true, 2},
+	} {
+		t.Run("failed "+tc.name, func(t *testing.T) {
+			w := existing()
+			w.runErrs = []runErr{{err: runFailed, leaveCreated: tc.leaveCreated}}
+			m, r := newTestManager(t, w)
+			_ = m.Secrets.Set("EXCLUDED_SECRET", "dummy-excluded-value")
+			_, err := m.Ensure(ctx, Options{Name: "work", Volume: "/host/proj:/home/sclaw/proj", NoOpen: true})
+			if !errors.Is(err, runFailed) {
+				t.Fatalf("err = %v", err)
+			}
+			if n := rms(r); n != tc.rms {
+				t.Errorf("%d removes, want %d: %v", n, tc.rms, r.Commands())
+			}
+			kept(t, w, m, r)
+		})
+	}
+
+	t.Run("failed restore", func(t *testing.T) {
+		w := existing()
+		w.runErrs = []runErr{{err: runFailed}, {err: restoreFailed}}
+		m, _ := newTestManager(t, w)
+		_, err := m.Ensure(ctx, Options{Name: "work", Volume: "/host/proj:/home/sclaw/proj", NoOpen: true})
+		if !errors.Is(err, runFailed) || !errors.Is(err, restoreFailed) {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+// A session created again over an earlier one's history is warned that it
+// receives every secret.
+func TestEnsureWarnsUnrememberedSecrets(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name    string
+		history bool
+		set     *SecretSet
+		warn    bool
+	}{
+		{"new", false, nil, false},
+		{"history", true, nil, true},
+		{"history with all", true, ptr(AllSecrets()), false},
+		{"history with none", true, ptr(NoSecrets()), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &world{image: "img", containers: map[string]*fakeContainer{}, native: true}
+			m, _ := newTestManager(t, w)
+			if tc.history {
+				if err := os.MkdirAll(filepath.Join(m.SessionsDir, "work"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var out bytes.Buffer
+			m.Out = &out
+			if _, err := m.Ensure(ctx, Options{Name: "work", Secrets: tc.set, NoOpen: true}); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(out.String(), "no secret selection is remembered"); got != tc.warn {
+				t.Errorf("warned = %v: %s", got, out.String())
+			}
+		})
 	}
 }
