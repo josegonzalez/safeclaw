@@ -3,7 +3,10 @@ package termtext
 import (
 	"bytes"
 	"io"
+	"net/netip"
+	"net/url"
 	"strconv"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -16,6 +19,9 @@ import (
 //     110, 111, 112), which drops OSC 52 clipboard writes and reads among
 //     others. An allowed OSC is held back until it ends, and is dropped
 //     if it is longer than 8 KiB or holds a control character.
+//   - Hyperlinks to anything but http and https URLs on hosts other than
+//     localhost and loopback addresses. Such a link is replaced by the
+//     sequence that ends a link, so its text is kept as plain text.
 //   - DCS, SOS, PM, and APC strings, whole, which covers tmux passthrough
 //     (ESC P tmux; ...) and terminal-specific commands carried in them.
 //   - CSI t window operations other than the size reports and the title
@@ -307,12 +313,140 @@ func (f *Filter) numberAllowed() bool {
 
 // endOSC passes on the OSC held in seq, ended by term, if it is allowed
 // and its text is valid UTF-8 with no C1 controls.
+// A hyperlink whose target isn't allowed is replaced by the empty
+// hyperlink that ends one, so its text is shown as plain text rather than
+// as part of a link opened earlier.
 func (f *Filter) endOSC(term []byte) {
 	if (f.oscAllowed || f.numberAllowed()) && plainText(f.seq[2:]) {
-		f.out.Write(f.seq)
+		if isHyperlink(f.seq[2:]) && !allowedHyperlink(f.seq[2:]) {
+			f.out.WriteString("\x1b]8;;")
+		} else {
+			f.out.Write(f.seq)
+		}
 		f.out.Write(term)
 	}
 	f.reset()
+}
+
+// isHyperlink reports whether the OSC text b is an OSC 8 hyperlink.
+func isHyperlink(b []byte) bool {
+	return len(b) > 0 && b[0] == '8' && (len(b) == 1 || b[1] == ';')
+}
+
+// allowedHyperlink reports whether the OSC 8 text b, 8;params;URI, may be
+// passed on. The empty URI that ends a link always may. Otherwise the URI
+// must be printable ASCII with no spaces or backslashes, as OSC 8 URIs are
+// percent-encoded, and an http or https URL with a host that isn't a
+// loopback or unspecified address. That mirrors the dashboard terminal's
+// link handler: the host terminal hands a clicked link to the OS, which
+// may open other schemes, such as file: into a directory the session can
+// write, in another app, and a loopback target can reach the dashboard,
+// whose cookie is sent to its host on any port, or a session's terminal.
+func allowedHyperlink(b []byte) bool {
+	parts := bytes.SplitN(b, []byte{';'}, 3)
+	if len(parts) != 3 {
+		return false
+	}
+	uri := string(parts[2])
+	if uri == "" {
+		return true
+	}
+	for i := range len(uri) {
+		if c := uri[i]; c <= ' ' || c >= 0x7f || c == '\\' {
+			return false
+		}
+	}
+	u, err := url.Parse(uri)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" {
+		return false
+	}
+	return allowedLinkHost(u.Hostname())
+}
+
+// allowedLinkHost reports whether a link may target host, which is
+// refused when it is empty or not a plain DNS name or IP address, or
+// when a browser would read it as localhost, a name under .localhost, a
+// loopback address, or the unspecified address. Numeric hosts are read as
+// browsers read them, so 127.1 and 0x7f000001 are loopback too.
+func allowedLinkHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if strings.Contains(host, ":") {
+		addr, err := netip.ParseAddr(host)
+		if err != nil || addr.Zone() != "" {
+			return false
+		}
+		addr = addr.Unmap()
+		return !addr.IsLoopback() && !addr.IsUnspecified()
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if strings.ContainsFunc(host, func(r rune) bool {
+		return (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '_' && r != '.'
+	}) {
+		return false
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	if !numericLabel(labels[len(labels)-1]) {
+		return true
+	}
+	addr, ok := parseURLIPv4(labels)
+	return ok && !addr.IsLoopback() && !addr.IsUnspecified()
+}
+
+// numericLabel reports whether a host label makes a browser parse the
+// host as an IPv4 address: decimal digits, or 0x and hex digits.
+func numericLabel(s string) bool {
+	if s == "" {
+		return false
+	}
+	if t, ok := strings.CutPrefix(s, "0x"); ok {
+		_, err := strconv.ParseUint("0"+t, 16, 64)
+		return err == nil
+	}
+	_, err := strconv.ParseUint(s, 10, 64)
+	return err == nil
+}
+
+// parseURLIPv4 parses the labels of a numeric host as the WHATWG URL
+// standard does, where each of up to four parts is decimal, octal with a
+// leading 0, or hex with 0x, and the last part fills the remaining bytes.
+// It reports false for a host browsers refuse as an invalid IPv4 address.
+func parseURLIPv4(labels []string) (netip.Addr, bool) {
+	if len(labels) > 4 {
+		return netip.Addr{}, false
+	}
+	nums := make([]uint64, len(labels))
+	for i, l := range labels {
+		base := 10
+		switch {
+		case strings.HasPrefix(l, "0x"):
+			l, base = "0"+l[2:], 16
+		case len(l) > 1 && l[0] == '0':
+			l, base = l[1:], 8
+		}
+		n, err := strconv.ParseUint(l, base, 32)
+		if err != nil {
+			return netip.Addr{}, false
+		}
+		nums[i] = n
+	}
+	last := len(nums) - 1
+	var v uint64
+	for i, n := range nums[:last] {
+		if n > 0xff {
+			return netip.Addr{}, false
+		}
+		v |= n << (8 * (3 - i))
+	}
+	if nums[last] >= 1<<(8*(4-last)) {
+		return netip.Addr{}, false
+	}
+	v |= nums[last]
+	return netip.AddrFrom4([4]byte{byte(v >> 24), byte(v >> 16), byte(v >> 8), byte(v)}), true
 }
 
 // plainText reports whether b is valid UTF-8 without C1 controls. C0
