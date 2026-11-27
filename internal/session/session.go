@@ -89,7 +89,7 @@ func (m *Manager) checkImage(ctx context.Context, name string) error {
 }
 
 // ErrNoClaudeToken is returned by non-interactive runs without a Claude token.
-var ErrNoClaudeToken = errors.New("no Claude Code token found. Run `safeclaw run` first to set up authentication")
+var ErrNoClaudeToken = errors.New("no Claude Code token found. Run `safeclaw auth login` to create one, or pipe one to `safeclaw auth set`")
 
 // ValidateName checks that a session name makes a valid container name.
 func ValidateName(name string) error {
@@ -137,6 +137,9 @@ type Manager struct {
 	// PortFree reports whether a host port can be bound. Defaults to a
 	// net.Listen probe.
 	PortFree func(port int) bool
+	// ProcessAlive reports whether a host PID is running. Defaults to a
+	// signal 0 probe.
+	ProcessAlive func(pid string) bool
 	// Sleep defaults to time.Sleep.
 	Sleep func(time.Duration)
 	// OpenBrowser defaults to open/xdg-open.
@@ -155,7 +158,7 @@ type Manager struct {
 func NewManager(out io.Writer) *Manager {
 	return &Manager{
 		Docker:      docker.New(),
-		Secrets:     secrets.Store{Dir: config.SecretsDir()},
+		Secrets:     secrets.Open(config.SecretsDir(), config.SecretsLockPath(), os.Stderr),
 		SessionsDir: config.SessionsDir(),
 		NetworkDir:  config.NetworkDir(),
 		CopyDir:     config.CopyDir(),
@@ -354,6 +357,9 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if err := m.ensureTokens(opts.Interactive, set); err != nil {
 		return nil, err
 	}
+	if set.Includes(secrets.ClaudeToken) {
+		m.warnToken()
+	}
 	if opts.Secrets != nil {
 		if err := m.checkSecrets(set); err != nil {
 			return nil, err
@@ -481,7 +487,7 @@ func (m *Manager) ensureTokens(interactive bool, set SecretSet) error {
 		if err != nil {
 			return err
 		}
-		if _, err := m.Secrets.Set(secrets.ClaudeToken, tok); err != nil {
+		if err := m.Secrets.Set(secrets.ClaudeToken, tok); err != nil {
 			return err
 		}
 	}
@@ -491,7 +497,7 @@ func (m *Manager) ensureTokens(interactive bool, set SecretSet) error {
 			return err
 		}
 		if tok != "" {
-			if _, err := m.Secrets.Set(secrets.GitHubToken, tok); err != nil {
+			if err := m.Secrets.Set(secrets.GitHubToken, tok); err != nil {
 				return err
 			}
 		}

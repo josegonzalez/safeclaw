@@ -112,7 +112,7 @@ ENV DISABLE_AUTOUPDATER=1
 ENV BASH_ENV=/home/sclaw/.env
 
 # Auth: set these env vars for cloud deployment (no interactive login needed)
-# - CLAUDE_CODE_OAUTH_TOKEN: run `claude setup-token` locally to generate
+# - CLAUDE_CODE_OAUTH_TOKEN: run `safeclaw auth login` (or `claude setup-token`) to generate
 # - GH_TOKEN: run `gh auth token` locally to print current token
 
 # Bake Claude config into image

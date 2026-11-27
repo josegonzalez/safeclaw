@@ -33,8 +33,8 @@ func TestIntegrationLifecycle(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	store := secrets.Store{Dir: filepath.Join(dir, ".secrets")}
-	if _, err := store.Set(secrets.ClaudeToken, "integration-dummy"); err != nil {
+	store := secrets.FileStore{Dir: filepath.Join(dir, ".secrets")}
+	if err := store.Set(secrets.ClaudeToken, "integration-dummy"); err != nil {
 		t.Fatal(err)
 	}
 	m := &Manager{
@@ -112,7 +112,7 @@ func TestIntegrationSandbox(t *testing.T) {
 	}
 	m := &Manager{
 		Docker:      d,
-		Secrets:     secrets.Store{Dir: filepath.Join(dir, ".secrets")},
+		Secrets:     secrets.FileStore{Dir: filepath.Join(dir, ".secrets")},
 		SessionsDir: filepath.Join(dir, "sessions"),
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
@@ -222,7 +222,7 @@ func TestIntegrationSandboxRemove(t *testing.T) {
 	dir := t.TempDir()
 	m := &Manager{
 		Docker:      d,
-		Secrets:     secrets.Store{Dir: filepath.Join(dir, ".secrets")},
+		Secrets:     secrets.FileStore{Dir: filepath.Join(dir, ".secrets")},
 		SessionsDir: filepath.Join(dir, "sessions"),
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
@@ -396,9 +396,9 @@ func TestIntegrationSecrets(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	store := secrets.Store{Dir: filepath.Join(dir, ".secrets")}
+	store := secrets.FileStore{Dir: filepath.Join(dir, ".secrets")}
 	for k, v := range map[string]string{secrets.ClaudeToken: "integration-dummy", "KEPT": "kept", "LEFT_OUT": "left-out"} {
-		if _, err := store.Set(k, v); err != nil {
+		if err := store.Set(k, v); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -466,8 +466,8 @@ func TestIntegrationNetwork(t *testing.T) {
 		t.Skip("safeclaw image not built; run `safeclaw build` first")
 	}
 	dir := t.TempDir()
-	store := secrets.Store{Dir: filepath.Join(dir, ".secrets")}
-	if _, err := store.Set(secrets.ClaudeToken, "integration-dummy"); err != nil {
+	store := secrets.FileStore{Dir: filepath.Join(dir, ".secrets")}
+	if err := store.Set(secrets.ClaudeToken, "integration-dummy"); err != nil {
 		t.Fatal(err)
 	}
 	m := &Manager{
@@ -537,7 +537,7 @@ func TestIntegrationSandboxCopy(t *testing.T) {
 	dir := t.TempDir()
 	m := &Manager{
 		Docker:      d,
-		Secrets:     secrets.Store{Dir: filepath.Join(dir, ".secrets")},
+		Secrets:     secrets.FileStore{Dir: filepath.Join(dir, ".secrets")},
 		SessionsDir: filepath.Join(dir, "sessions"),
 		NetworkDir:  filepath.Join(dir, "network"),
 		CopyDir:     filepath.Join(dir, "copy"),
@@ -646,5 +646,39 @@ func TestIntegrationSandboxCopy(t *testing.T) {
 	}
 	if _, err := m.CopyIn(ctx, name, []string{a}, ""); !errors.Is(err, ErrNotRunning) {
 		t.Errorf("stopped: err = %v, want ErrNotRunning", err)
+	}
+}
+
+// TestIntegrationSetupTokenRecording checks that the image has what
+// `safeclaw auth login` needs, and that a token printed under script, the
+// way SetupToken records `claude setup-token`, is read back. The real
+// sign-in needs a person, so a printed fake token stands in for it.
+func TestIntegrationSetupTokenRecording(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+	id, err := d.Run(ctx, "-d", "--label", config.LabelAuth+"=integration", config.ImageName, "sleep", "infinity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Remove(context.Background(), id, true) })
+
+	if out, err := d.Exec(ctx, id, docker.ExecOptions{}, "bash", "-c", "command -v claude script"); err != nil || strings.Count(string(out), "\n") != 2 {
+		t.Fatalf("image lacks claude or script: %q, %v", out, err)
+	}
+	const tok = "sk-ant-oat01-integration_Test-0123456789"
+	cmd := `printf '\033[1m%s\033[0m\n' ` + tok
+	if _, err := d.Exec(ctx, id, docker.ExecOptions{Stdin: strings.NewReader("")}, "script", "-qec", cmd, setupTokenLog); err != nil {
+		t.Fatal(err)
+	}
+	out, err := d.Exec(ctx, id, docker.ExecOptions{}, "cat", setupTokenLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseSetupToken(out)
+	if err != nil || got != tok {
+		t.Errorf("parsed %q, %v from %q", got, err, out)
 	}
 }

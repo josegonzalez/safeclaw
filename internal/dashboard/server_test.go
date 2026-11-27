@@ -31,6 +31,10 @@ type fakeSessions struct {
 	// secretNames is returned by SecretNames.
 	secretNames []string
 	secretErr   error
+	// token is returned by ClaudeTokenStatus; the zero value is a valid
+	// token.
+	token    session.TokenStatus
+	tokenErr error
 	// netOffs and netOns record network calls, answered by the optional
 	// netOffFn and netOnFn.
 	netOffs  []session.NetOffOptions
@@ -41,6 +45,13 @@ type fakeSessions struct {
 
 func (f *fakeSessions) SecretNames() ([]string, error) {
 	return f.secretNames, f.secretErr
+}
+
+func (f *fakeSessions) ClaudeTokenStatus(time.Time) (session.TokenStatus, error) {
+	if f.token.State == "" {
+		return session.TokenStatus{State: session.TokenValid}, f.tokenErr
+	}
+	return f.token, f.tokenErr
 }
 
 func (f *fakeSessions) Variants() (*variant.Set, error) {

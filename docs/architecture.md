@@ -98,7 +98,13 @@ Containers on a variant carry the `safeclaw.variant=NAME` label; containers with
 
 ## Authentication
 
-All secrets are stored on the host in `~/.config/safeclaw/.secrets/`. Each file becomes an environment variable (filename = env var name).
+All secrets are stored on the host, and each becomes an environment variable of the same name.
+
+### Where secrets are stored
+
+Secrets are kept in the system keychain with [go-keyring](https://github.com/zalando/go-keyring): the macOS keychain, Secret Service on Linux, or the Windows credential manager. Each secret is an item under the `safeclaw` service, with the env var name as its account. The keychain can't list items or say when they were written, so a reserved `.index` item holds each secret's name and the time it was set. `~/.config/safeclaw/secrets.lock` is locked while the index changes, so the CLI and dashboard don't lose each other's writes. On macOS, values are passed to `security` on stdin, not in its arguments.
+
+If the keychain can't be read, such as on a Linux server without Secret Service, secrets fall back to files in `~/.config/safeclaw/.secrets/` (one 0600 file per secret, named after it, with its modification time as the set time), with a warning. When the keychain is available, files left there by earlier versions are moved into it with their modification times, deleted, and the directory removed once empty. Files whose names aren't valid env var names are left in place.
 
 ### How env vars are passed
 
@@ -114,13 +120,17 @@ Because every bash process in a session can read `.env`, each session can be lim
 
 The choice is recorded in the `safeclaw.secrets` container label as comma-separated names, so the container itself can't change it. Containers without the label, including ones created before it existed, get every secret, and an empty label means none. Without a flag, `run` and the dashboard's start keep the container's set; a different one recreates the container, since labels can't change.
 
-`.env` is replaced on every run, so secrets left out of the set are removed from it. Names given on a run must exist in the secrets directory (after prompting for the Claude and GitHub tokens, if the session receives them). A remembered name that has since been deleted is skipped with a warning, so the session still starts. Tokens the session doesn't receive are neither required nor prompted for. Without `CLAUDE_CODE_OAUTH_TOKEN`, a warning says Claude Code won't be logged in.
+`.env` is replaced on every run, so secrets left out of the set are removed from it. Names given on a run must be stored secrets (after prompting for the Claude and GitHub tokens, if the session receives them). A remembered name that has since been deleted is skipped with a warning, so the session still starts. Tokens the session doesn't receive are neither required nor prompted for. Without `CLAUDE_CODE_OAUTH_TOKEN`, a warning says Claude Code won't be logged in.
 
 Sandboxes never receive secrets, whatever their labels say.
 
 ### Claude Code
 
-The token from `claude setup-token` is stored as `CLAUDE_CODE_OAUTH_TOKEN`. The Dockerfile sets `hasCompletedOnboarding: true` in `.claude.json` to skip the onboarding flow. Without this, interactive mode ignores the token and shows the login screen ([known issue](https://github.com/anthropics/claude-code/issues/8938)). It also pre-accepts the home folder trust prompt and the bypass permissions prompt, which newer Claude Code versions show on every start.
+The token from `claude setup-token` is stored as `CLAUDE_CODE_OAUTH_TOKEN`. `safeclaw auth login` creates it without Claude Code on the host: it starts a container from the base image with no secrets, mounts, or ports, labeled `safeclaw.auth` with the PID of the safeclaw process, and runs `claude setup-token` there under `script`, attached to the terminal. The sign-in can't call back to the host, so Claude Code prints a URL and asks for the code shown after signing in. Once it exits, the recording is read back, terminal escapes are stripped, the last `sk-ant-oat01-` token is stored, and the container is removed. A login killed before cleaning up leaves its container behind; the next login removes containers whose PID is no longer running. `safeclaw auth set` and `safeclaw env set NAME` read a value from stdin (or a hidden prompt on a terminal), so values never appear in process arguments.
+
+Tokens are valid for a year, and the token doesn't say when it was made, so the expiry is estimated from when it was stored. `auth status`, `run` (for sessions that receive the token), and a dashboard banner warn in the last 30 days, and once it has expired. `run` only prompts for missing tokens when stdin is a terminal; otherwise it fails like `new`, with an error naming `safeclaw auth login` and `safeclaw auth set`.
+
+The Dockerfile sets `hasCompletedOnboarding: true` in `.claude.json` to skip the onboarding flow. Without this, interactive mode ignores the token and shows the login screen ([known issue](https://github.com/anthropics/claude-code/issues/8938)). It also pre-accepts the home folder trust prompt and the bypass permissions prompt, which newer Claude Code versions show on every start.
 
 Known limitation: the token from `setup-token` has limited scopes (`user:inference` only), so `/usage` doesn't work and the status bar shows "Claude API" instead of the subscription name ([#11985](https://github.com/anthropics/claude-code/issues/11985)). Chat works fine.
 

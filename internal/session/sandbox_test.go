@@ -26,7 +26,7 @@ func TestEnsureSandboxCreates(t *testing.T) {
 	m, r := newTestManager(t, w)
 	// A sandbox must not need, or receive, any secret.
 	_ = m.Secrets.Delete(secrets.ClaudeToken)
-	_, _ = m.Secrets.Set(secrets.GitHubToken, "gh-secret")
+	_ = m.Secrets.Set(secrets.GitHubToken, "gh-secret")
 
 	res, err := m.EnsureSandbox(context.Background(), SandboxOptions{Name: "box"})
 	if err != nil {

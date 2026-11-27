@@ -131,7 +131,7 @@ func (m *Manager) SecretNames() ([]string, error) {
 func (m *Manager) checkSecrets(s SecretSet) error {
 	for _, n := range s.Names {
 		if !m.Secrets.Has(n) {
-			return fmt.Errorf("%w: %s. Add it with `safeclaw env`", ErrNoSecret, n)
+			return fmt.Errorf("%w: %s. Add it with `safeclaw env set %s`", ErrNoSecret, n, n)
 		}
 	}
 	return nil

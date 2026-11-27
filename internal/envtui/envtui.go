@@ -64,7 +64,7 @@ func manageKeys(store secrets.Store, out io.Writer) error {
 	const back = "\x00back"
 	opts = append(opts, huh.NewOption("← Back", back))
 
-	fmt.Fprintf(out, "\nKeys from %s/\n\n", store.Dir)
+	fmt.Fprintf(out, "\nKeys from %s\n\n", store.Location())
 
 	var key string
 	if err := huh.NewSelect[string]().Title("Select key to delete:").Options(opts...).Value(&key).Run(); err != nil {
@@ -106,11 +106,10 @@ func addKey(store secrets.Store, out io.Writer) error {
 		return err
 	}
 
-	path, err := store.Set(name, value)
-	if err != nil {
+	if err := store.Set(name, value); err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "\nSaved to %s\n", path)
+	fmt.Fprintf(out, "\nSaved %s to %s\n", name, store.Location())
 	fmt.Fprint(out, "Restart SafeClaw to use: safeclaw run\n\n")
 	return nil
 }

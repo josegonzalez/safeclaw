@@ -246,8 +246,8 @@ func newTestManager(t *testing.T, w *world) (*Manager, *dockertest.Runner) {
 	t.Helper()
 	r := &dockertest.Runner{Handler: w.handle}
 	dir := t.TempDir()
-	store := secrets.Store{Dir: filepath.Join(dir, ".secrets")}
-	if _, err := store.Set(secrets.ClaudeToken, "tok"); err != nil {
+	store := secrets.FileStore{Dir: filepath.Join(dir, ".secrets")}
+	if err := store.Set(secrets.ClaudeToken, "tok"); err != nil {
 		t.Fatal(err)
 	}
 	m := &Manager{
@@ -275,7 +275,7 @@ func TestEnsureCreatesContainer(t *testing.T) {
 		"safeclaw-b": {Running: true, Port: 7682, Image: "sha256:new"},
 	}, native: true}
 	m, r := newTestManager(t, w)
-	_, _ = m.Secrets.Set("WEIRD", "it's")
+	_ = m.Secrets.Set("WEIRD", "it's")
 
 	res, err := m.Ensure(context.Background(), Options{Name: "work", NoOpen: true})
 	if err != nil {
@@ -322,7 +322,7 @@ func TestEnsureReusesRunningContainer(t *testing.T) {
 		"safeclaw-default": {Running: true, Port: 7690, Image: "img"},
 	}}
 	m, r := newTestManager(t, w)
-	_, _ = m.Secrets.Set(secrets.GitHubToken, "gh")
+	_ = m.Secrets.Set(secrets.GitHubToken, "gh")
 	res, err := m.Ensure(context.Background(), Options{NoOpen: true})
 	if err != nil {
 		t.Fatal(err)

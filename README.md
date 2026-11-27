@@ -45,7 +45,7 @@ safeclaw run -s work        # safeclaw-work on the next available port
 safeclaw run -s research    # safeclaw-research on the next available port
 ```
 
-On first run, `safeclaw run` prompts you to set up authentication tokens. It then starts a web terminal at http://localhost:7681 and opens it in your browser.
+On first run, `safeclaw run` prompts you to set up authentication tokens, offering to sign in to Claude Code for you. It then starts a web terminal at http://localhost:7681 and opens it in your browser.
 
 ## Dashboard
 
@@ -175,14 +175,23 @@ Image variants and their defaults are configured in `~/.config/safeclaw/config.y
 
 ## Authentication
 
-Tokens are stored in `~/.config/safeclaw/.secrets/` and injected as env vars on each run. The filename becomes the env var name.
+Tokens and other secrets are stored in the system keychain (the macOS keychain, Secret Service on Linux, or the Windows credential manager) under the `safeclaw` service, and injected as env vars on each run. Each secret's name is the env var name. Where no keychain is available, such as a Linux server without Secret Service, they are stored as files in `~/.config/safeclaw/.secrets/` instead, with a warning. Secrets left in that directory by earlier versions are moved into the keychain the next time safeclaw runs.
 
-| File | How to generate |
-|------|-----------------|
-| `CLAUDE_CODE_OAUTH_TOKEN` | `claude setup-token` (valid 1 year) |
+| Secret | How to generate |
+|--------|-----------------|
+| `CLAUDE_CODE_OAUTH_TOKEN` | `safeclaw auth login`, or `claude setup-token` (valid 1 year) |
 | `GH_TOKEN` | `gh auth token` or create a PAT at github.com/settings/tokens |
 
-You can add any additional secrets with `safeclaw env` or by creating files in the `.secrets/` directory.
+`safeclaw auth login` runs `claude setup-token` in a short-lived container, so Claude Code doesn't need to be installed on the host. Open the URL it prints, sign in, and paste the code back. To store a token without a terminal, pipe it in:
+
+```bash
+printf '%s' "$TOKEN" | safeclaw auth set
+gh auth token | safeclaw env set GH_TOKEN
+```
+
+`safeclaw auth status` shows when the token was set and when it expires, and exits non-zero when there is none or it has expired. It, `safeclaw run`, and the dashboard warn in the last 30 days of the token's year. You can add any other secret with `safeclaw env set NAME` or the `safeclaw env` menu.
+
+Without a terminal, `safeclaw run` doesn't prompt, so it fails like `safeclaw new` when the Claude token is missing.
 
 ### Choosing which secrets a session receives
 
@@ -205,7 +214,14 @@ The choice is remembered for the session, so rerunning `safeclaw run -s chat` or
 | `safeclaw run` | Start/reuse a container, inject auth, start ttyd. `-s name` for named sessions, `-v` for volumes, `--variant` for an image variant, `--secrets`, `--no-secrets`, or `--all-secrets` to choose the secrets it receives, `-n` to skip opening the browser, `-q "question"` to start with a query. |
 | `safeclaw new` | Same as `run` but never prompts (used by the dashboard) |
 | `safeclaw dashboard` | Web dashboard for managing sessions |
-| `safeclaw env` | Manage environment variables (list, add, delete) |
+| `safeclaw auth login` | Sign in with `claude setup-token` in a container and store the token |
+| `safeclaw auth set` | Store a Claude Code token from stdin (hidden prompt on a terminal) |
+| `safeclaw auth status` | Show when the token was set and expires. Exits non-zero when it is missing or expired. |
+| `safeclaw auth logout` | Delete the stored Claude Code token |
+| `safeclaw env` | Manage secrets in an interactive menu (list, add, delete) |
+| `safeclaw env set NAME` | Store a secret from stdin (hidden prompt on a terminal) |
+| `safeclaw env ls` | List secret names |
+| `safeclaw env rm NAME` | Delete a secret |
 | `safeclaw ls` | List sessions and sandboxes |
 | `safeclaw stop NAME` | Stop a session |
 | `safeclaw rm NAME` | Delete a session container (history is kept) |
