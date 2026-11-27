@@ -652,6 +652,16 @@ func TestIntegrationSandboxCopy(t *testing.T) {
 	if paths, err := m.CopyIn(ctx, name, []string{a}, "jobs/1"); err != nil || !slices.Equal(paths, []string{"/sandbox/jobs/1/1-report.txt"}) {
 		t.Errorf("--to = %v, %v", paths, err)
 	}
+	// The directories cp-in creates get umask 022, whatever umask docker
+	// exec gives it.
+	for _, p := range []string{"/sandbox/in", "/sandbox/jobs", "/sandbox/jobs/1"} {
+		if out, err := run("stat", "-c", "%u:%g %a", p); err != nil || out != "2000:2000 755" {
+			t.Errorf("%s owner and mode = %q, %v", p, out, err)
+		}
+	}
+	if out, err := run("stat", "-c", "%a", "/sandbox/jobs/1/1-report.txt"); err != nil || out != "644" {
+		t.Errorf("--to file mode = %q, %v", out, err)
+	}
 
 	// Results with a match, a non-match, a link out of the sandbox, a
 	// directory, and a nested match.

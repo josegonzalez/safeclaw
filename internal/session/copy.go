@@ -76,6 +76,13 @@ var ErrUnsafeName = errors.New("is not a safe file name: names must be printable
 // and write what the sandbox user can.
 var copyExec = docker.ExecOptions{User: config.SandboxUser, Workdir: config.SandboxDir}
 
+// copyCommand wraps a copy command with SandboxCommand, so the directories
+// and files it creates get a umask of 022 whatever umask docker exec gives
+// it.
+func copyCommand(cmd ...string) []string {
+	return SandboxCommand(cmd)
+}
+
 // copyTarget returns the short name of the running sandbox a copy applies
 // to, refusing interactive sessions and stopped sandboxes.
 func (m *Manager) copyTarget(ctx context.Context, name string) (string, error) {
@@ -248,10 +255,10 @@ func (m *Manager) CopyIn(ctx context.Context, name string, files []string, dest 
 	}
 	defer unlock()
 	container := config.ContainerName(name)
-	if _, err := m.Docker.Exec(ctx, container, copyExec, mkdirBin, "-p", "--", dest); err != nil {
+	if _, err := m.Docker.Exec(ctx, container, copyExec, copyCommand(mkdirBin, "-p", "--", dest)...); err != nil {
 		return nil, err
 	}
-	listing, err := m.Docker.Exec(ctx, container, copyExec, lsBin, "-1A", "--", dest)
+	listing, err := m.Docker.Exec(ctx, container, copyExec, copyCommand(lsBin, "-1A", "--", dest)...)
 	if err != nil {
 		return nil, err
 	}
@@ -272,7 +279,7 @@ func (m *Manager) CopyIn(ctx context.Context, name string, files []string, dest 
 	}()
 	opts := copyExec
 	opts.Stdin = pr
-	_, execErr := m.Docker.Exec(ctx, container, opts, tarBin, "-x", "-f", "-", "-k", "-C", dest)
+	_, execErr := m.Docker.Exec(ctx, container, opts, copyCommand(tarBin, "-x", "-f", "-", "-k", "-C", dest)...)
 	// Unblock the writer if docker exited before reading everything.
 	_ = pr.CloseWithError(errCopyDone)
 	if err := <-done; err != nil && !errors.Is(err, errCopyDone) {
@@ -341,7 +348,7 @@ func (m *Manager) CopyOut(ctx context.Context, name, src, hostDir string, opts C
 	// The exclude only saves sending nested files; extractTop drops them
 	// anyway.
 	out, wait, err := m.Docker.ExecStream(ctx, config.ContainerName(name), copyExec,
-		tarBin, "-c", "-f", "-", "--exclude=./*/*", "-C", src, ".")
+		copyCommand(tarBin, "-c", "-f", "-", "--exclude=./*/*", "-C", src, ".")...)
 	if err != nil {
 		return nil, err
 	}
