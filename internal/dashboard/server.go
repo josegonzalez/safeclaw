@@ -19,6 +19,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
@@ -255,8 +256,9 @@ func allowSameOriginFraming(w http.ResponseWriter, csp string) {
 // checkHost rejects requests whose Host is not one of the names the
 // dashboard advertises, which blocks DNS rebinding: 127.0.0.1, which the
 // printed URL uses, and localhost, which the API examples use and which is
-// redirected to 127.0.0.1 before a browser gets the cookie. The listener is
-// 127.0.0.1 only, so nothing reaches it as ::1.
+// redirected to 127.0.0.1 before a browser gets the cookie. A request that
+// reaches the [::1] listener through localhost is handled the same way, and
+// ::1 itself is refused.
 func (s *Server) checkHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
@@ -272,15 +274,35 @@ func (s *Server) checkHost(next http.Handler) http.Handler {
 	})
 }
 
-// ListenAndServe serves until ctx is done.
+// ListenAndServe serves until ctx is done. It holds the port on both
+// loopback addresses, since localhost resolves to [::1] as well as
+// 127.0.0.1 and many clients try [::1] first: another local user holding
+// [::1]:PORT would get the launch token sent to localhost. Startup fails
+// when something else holds it; a host without IPv6 loopback, where nothing
+// can, gets a warning and 127.0.0.1 only.
 func (s *Server) ListenAndServe(ctx context.Context, out io.Writer) error {
-	addr := "127.0.0.1:" + strconv.Itoa(s.port)
-	ln, err := net.Listen("tcp", addr)
+	port := strconv.Itoa(s.port)
+	ln, err := net.Listen("tcp", net.JoinHostPort(cookieHost, port))
 	if err != nil {
 		return err
 	}
+	lns := []net.Listener{ln}
+	closeAll := func() {
+		for _, l := range lns {
+			_ = l.Close()
+		}
+	}
+	switch ln6, err := net.Listen("tcp", net.JoinHostPort("::1", port)); {
+	case err == nil:
+		lns = append(lns, ln6)
+	case noIPv6Loopback(err):
+		fmt.Fprintf(out, "Warning: listening on 127.0.0.1 only, since IPv6 loopback is unavailable (%v)\n", err)
+	default:
+		closeAll()
+		return fmt.Errorf("dashboard must also hold [::1]:%s so localhost reaches only it: %w", port, err)
+	}
 	if err := writeTokenFile(s.tokenFile, s.token); err != nil {
-		_ = ln.Close()
+		closeAll()
 		return err
 	}
 	defer func() { _ = removeTokenFile(s.tokenFile, s.token) }()
@@ -300,10 +322,24 @@ func (s *Server) ListenAndServe(ctx context.Context, out io.Writer) error {
 	}()
 	fmt.Fprintf(out, "Dashboard: %s\n", s.LaunchURL())
 	fmt.Fprintf(out, "API token: %s\n", s.tokenFile)
-	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
-		return err
+	errc := make(chan error, len(lns))
+	for _, l := range lns {
+		go func() { errc <- srv.Serve(l) }()
 	}
-	return nil
+	var serveErr error
+	for range lns {
+		if err := <-errc; !errors.Is(err, http.ErrServerClosed) && serveErr == nil {
+			serveErr = err
+			_ = srv.Close()
+		}
+	}
+	return serveErr
+}
+
+// noIPv6Loopback reports whether err from listening on [::1] means the host
+// has no IPv6 loopback, as opposed to the port being taken.
+func noIPv6Loopback(err error) bool {
+	return errors.Is(err, syscall.EADDRNOTAVAIL) || errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EPROTONOSUPPORT)
 }
 
 // LaunchURL returns the URL that logs a browser in to the dashboard.
