@@ -87,6 +87,10 @@ func TestSandboxExecArgs(t *testing.T) {
 		{[]string{"--variant", "base"}, []string{"box", "ls"}, "--variant can only be used with --ephemeral"},
 		{[]string{"--ephemeral", "--variant", "base"}, []string{"ls"}, ""},
 		{[]string{"-i", "-t"}, []string{"box", "ls"}, ""},
+		{[]string{"--escape-controls", "-i"}, []string{"box", "ls"}, ""},
+		{[]string{"--ephemeral", "--escape-controls"}, []string{"ls"}, ""},
+		{[]string{"--escape-controls", "-t"}, []string{"box", "ls"}, "--escape-controls can't be used with -t"},
+		{[]string{"--ephemeral", "--escape-controls", "-it"}, []string{"ls"}, "--escape-controls can't be used with -t"},
 	}
 	for _, tc := range cases {
 		cmd := newSandboxExecCommand()

@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -22,6 +23,10 @@ func Execute() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := NewRootCommand().ExecuteContext(ctx); err != nil {
+		var exit exitCodeError
+		if errors.As(err, &exit) {
+			return exit.code
+		}
 		printError(os.Stderr, err)
 		return 1
 	}
