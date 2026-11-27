@@ -58,12 +58,16 @@ The `Host` check (against DNS rebinding) and `http.CrossOriginProtection` (again
 
 `safeclaw run` (and the dashboard's create and start) all go through the same code path:
 
-1. Pick the [image variant](#image-variants) and check its image exists, pick the [secrets](#choosing-secrets) the session receives, then check that the Claude token is present if the session receives it (prompting for it only in `run`) and that every listed secret exists
+1. Pick the [image variant](#image-variants) and check its image exists and carries no [safeclaw labels](#labels) of its own, pick the [secrets](#choosing-secrets) the session receives, then check that the Claude token is present if the session receives it (prompting for it only in `run`) and that every listed secret exists
 2. Reuse the container's existing port, or pick the lowest port no `safeclaw-*` container reserves and nothing on the host is listening on, on `[::1]` or `127.0.0.1`
 3. Create, start, or refresh the container. With `-v`, a `--variant` other than the container's, a different set of secrets, or a different [`--host-ipc`](#ipc-namespace) choice, an existing container is recreated, keeping its port and whichever of its mount, variant, secrets, and IPC choice were not given again. Every volume is checked before the old container is removed, and if the new one can't be created, the old one is created again with its port, mounts, variant, secrets, and IPC choice, so a failed recreate never loses the session's secret set. A running container has ttyd and tmux restarted so new env vars take effect. An [offline](#offline-sessions) session is never recreated, and starting it keeps it offline
 4. Write `/home/sclaw/.env` from the secrets the session receives
 5. Configure git from the GitHub account if the session receives `GH_TOKEN`
 6. Start ttyd with the session's [terminal credential](#terminal-credential), and with `-q`, wait for Claude Code's input prompt before sending the query
+
+### Labels
+
+safeclaw records what it decided about a container in `safeclaw.*` labels: its type (`safeclaw.type`), [variant](#image-variants), [secrets](#choosing-secrets), [IPC namespace](#ipc-namespace), and whether it is a [sign-in container](#claude-code) (`safeclaw.auth`). Docker copies an image's labels onto every container made from it, so before creating a session, sandbox, or sign-in container, and before reusing a session or sandbox, safeclaw refuses an image that carries any `safeclaw.*` label other than the `safeclaw.variant` label naming its own variant. The error names the label, and the image has to be rebuilt without it. Every `safeclaw.*` label on a container safeclaw creates is then one safeclaw wrote, so an image can't make a session look like a sandbox, change its secrets or IPC choice, or get it removed as a stale sign-in container. Every session is labeled `safeclaw.type=session` and every sandbox `safeclaw.type=sandbox`; containers without the label, created by versions that left it off sessions, are interactive sessions.
 
 ### IPC namespace
 
@@ -73,7 +77,7 @@ A session gets docker's default private IPC namespace and its own `/dev/shm`, so
 
 ## Sandboxes
 
-`safeclaw sandbox run -s NAME` creates a headless container for opening untrusted files with `docker exec`, for example extracting text from PDFs, archives, or emails that have not been checked. It shares the `safeclaw-NAME` namespace with interactive sessions and is marked with the `safeclaw.type=sandbox` label. Containers without the label are interactive sessions.
+`safeclaw sandbox run -s NAME` creates a headless container for opening untrusted files with `docker exec`, for example extracting text from PDFs, archives, or emails that have not been checked. It shares the `safeclaw-NAME` namespace with interactive sessions and is marked with the `safeclaw.type=sandbox` label, where interactive sessions get `safeclaw.type=session` (see [labels](#labels)).
 
 A sandbox is created with none of what an interactive session gets: no secrets are written and no Claude token is needed, there is no git configuration, no ttyd, tmux, or Claude Code, no published port, no option to share the host's IPC namespace, and no history mount. Instead it runs with:
 
@@ -177,7 +181,7 @@ Sandboxes never receive secrets, whatever their labels say.
 
 ### Claude Code
 
-The token from `claude setup-token` is stored as `CLAUDE_CODE_OAUTH_TOKEN`. `safeclaw auth login` creates it without Claude Code on the host: it starts a container from the base image with no secrets, mounts, or ports, labeled `safeclaw.auth` with the PID of the safeclaw process, and runs `claude setup-token` there under `script`, attached to the terminal. The sign-in can't call back to the host, so Claude Code prints a URL and asks for the code shown after signing in. Once it exits, the recording is read back and deleted from the container right away, terminal escapes are stripped, the last `sk-ant-oat01-` token is stored, and the container is removed. A login killed before cleaning up leaves its container behind; every `safeclaw auth` command removes containers whose PID is no longer running, with one `docker ps`. `safeclaw auth set` and `safeclaw env set NAME` read a value from stdin (or a hidden prompt on a terminal), so values never appear in process arguments.
+The token from `claude setup-token` is stored as `CLAUDE_CODE_OAUTH_TOKEN`. `safeclaw auth login` creates it without Claude Code on the host: it starts a container from the base image with no secrets, mounts, or ports, named `safeclaw.auth.` and a random suffix and labeled `safeclaw.auth` with the PID of the safeclaw process, and runs `claude setup-token` there under `script`, attached to the terminal. The sign-in can't call back to the host, so Claude Code prints a URL and asks for the code shown after signing in. Once it exits, the recording is read back and deleted from the container right away, terminal escapes are stripped, the last `sk-ant-oat01-` token is stored, and the container is removed. A login killed before cleaning up leaves its container behind; every `safeclaw auth` command removes containers with both the name and the label whose PID is no longer running, with one `docker ps`. Sign-in containers left by versions that didn't name them are not removed, and can be removed with `docker rm`. `safeclaw auth set` and `safeclaw env set NAME` read a value from stdin (or a hidden prompt on a terminal), so values never appear in process arguments.
 
 Tokens are valid for a year, and the token doesn't say when it was made, so the expiry is estimated from when it was stored. `auth status`, `run` (for sessions that receive the token), and a dashboard banner warn in the last 30 days, and once it has expired. `run` only prompts for missing tokens when stdin is a terminal; otherwise it fails like `new`, with an error naming `safeclaw auth login` and `safeclaw auth set`.
 

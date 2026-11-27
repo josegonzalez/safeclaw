@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -62,10 +63,12 @@ type world struct {
 	// image is the ID every image name resolves to, unless images is set.
 	image string
 	// images maps image names to IDs. Names it lacks do not exist.
-	images     map[string]string
-	containers map[string]*fakeContainer
-	native     bool
-	prompt     bool
+	images map[string]string
+	// imageLabels maps image names to their labels.
+	imageLabels map[string]map[string]string
+	containers  map[string]*fakeContainer
+	native      bool
+	prompt      bool
 	// attachOnStart makes start reconnect a container to bridge, as if
 	// docker restored its network.
 	attachOnStart bool
@@ -151,7 +154,8 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		if id == "" {
 			return nil, dockertest.NotFound(args)
 		}
-		return []byte(id + "\n"), nil
+		b, _ := json.Marshal(map[string]any{"Id": id, "Config": map[string]any{"Labels": w.imageLabels[args[len(args)-1]]}})
+		return append(b, '\n'), nil
 	case args[0] == "ps":
 		var names []string
 		for n := range w.containers {
@@ -174,10 +178,15 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		var memory, cpus, pids int64
 		ipc := ""
 		mode := ""
-		labels := map[string]string{}
 		image := ""
 		if i := slices.Index(args, "sleep"); i > 0 {
 			image = args[i-1]
+		}
+		// Like docker, containers start with their image's labels, which
+		// --label overrides.
+		labels := maps.Clone(w.imageLabels[image])
+		if labels == nil {
+			labels = map[string]string{}
 		}
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
@@ -335,7 +344,7 @@ func TestEnsureCreatesContainer(t *testing.T) {
 	if !ok {
 		t.Fatal("no docker run")
 	}
-	want := "run -d --name safeclaw-work -p [::1]:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects safeclaw sleep infinity"
+	want := "run -d --name safeclaw-work --label safeclaw.type=session -p [::1]:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects safeclaw sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}

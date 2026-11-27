@@ -75,7 +75,8 @@ func (s SecretSet) String() string {
 
 // secretsOf returns the secrets a session container receives. Containers
 // without the label, such as ones created before it existed, get every
-// secret; an empty label means none.
+// secret; an empty label means none. Images carrying the label are refused
+// (see checkImageLabels), so it is never inherited from one.
 func secretsOf(c docker.Container) SecretSet {
 	v, ok := c.LookupLabel(config.LabelSecrets)
 	if !ok {
