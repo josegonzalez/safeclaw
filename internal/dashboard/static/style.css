@@ -370,6 +370,14 @@ dialog.modal::backdrop {
 .modal-field {
     margin-bottom: 16px;
 }
+.modal-subtitle:has(+ .hold-list) {
+    margin-bottom: 6px;
+}
+.hold-list {
+    margin: 0 0 20px 18px;
+    font-size: 13px;
+    color: #c9c5c0;
+}
 .modal-field label {
     display: block;
     font-size: 12px;

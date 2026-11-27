@@ -1,17 +1,41 @@
 {{/* Action buttons. The first click on stop/delete returns the confirm
-     state, which reverts to the normal button after 3 seconds. */}}
+     state, which reverts to the normal button after 3 seconds. URLs and
+     hx-vals come from path, revert, and vals, which escape the name and
+     marshal the JSON, rather than being printed into the attribute. */}}
 {{define "action"}}
 {{- $cls := printf "%s-btn" .Kind}}{{if eq .Variant "link"}}{{$cls = printf "link-btn frame-%s" .Kind}}{{end}}
-{{- $revert := printf "/sessions/%s/actions?kind=%s&variant=%s" .Name .Kind .Variant}}
+{{- $revert := revert .Name .Kind .Variant}}
 {{- if .Failed -}}
 <button type="button" class="{{$cls}}" title="{{.Failed}}" disabled>failed<span hx-get="{{$revert}}" hx-trigger="load delay:3s" hx-target="closest button" hx-swap="outerHTML"></span></button>
-{{- else if .Force -}}
-<button type="button" class="{{$cls}}" title="{{.Title}}" hx-post="/sessions/{{.Name}}/{{.Kind}}" hx-vals='{"force": "1", "variant": "{{.Variant}}"}' hx-swap="outerHTML" hx-disable="this"><span class="idle">force {{.Kind}}?</span><span class="busy">{{busy .Kind}}</span><span hx-get="{{$revert}}" hx-trigger="load delay:3s" hx-target="closest button" hx-swap="outerHTML"></span></button>
 {{- else if .Confirm -}}
-<button type="button" class="{{$cls}}" hx-post="/sessions/{{.Name}}/{{.Kind}}" hx-vals='{"confirm": "1", "variant": "{{.Variant}}"}' hx-swap="outerHTML" hx-disable="this"><span class="idle">{{.Kind}}?</span><span class="busy">{{busy .Kind}}</span><span hx-get="{{$revert}}" hx-trigger="load delay:3s" hx-target="closest button" hx-swap="outerHTML"></span></button>
+<button type="button" class="{{$cls}}" hx-post="{{path .Name .Kind}}" hx-vals='{{vals "confirm" "1" "variant" .Variant}}' hx-swap="outerHTML" hx-disable="this"><span class="idle">{{.Kind}}?</span><span class="busy">{{busy .Kind}}</span><span hx-get="{{$revert}}" hx-trigger="load delay:3s" hx-target="closest button" hx-swap="outerHTML"></span></button>
 {{- else -}}
-<button type="button" class="{{$cls}}" hx-post="/sessions/{{.Name}}/{{.Kind}}" hx-vals='{"variant": "{{.Variant}}"}' hx-swap="outerHTML" hx-disable="this"><span class="idle">{{.Kind}}</span><span class="busy">{{busy .Kind}}</span></button>
+<button type="button" class="{{$cls}}" hx-post="{{path .Name .Kind}}" hx-vals='{{vals "variant" .Variant}}' hx-swap="outerHTML" hx-disable="this"><span class="idle">{{.Kind}}</span><span class="busy">{{busy .Kind}}</span></button>
 {{- end}}
+{{end}}
+
+{{/* force-online is the dialog an online click opens while other owners
+     still hold the session offline. The session's name has to be typed
+     before the force button is enabled, and the server checks it too. */}}
+{{define "force-online"}}
+<h2 id="session-info-title">{{.Name}}</h2>
+<p class="modal-subtitle">still held offline by</p>
+<ul class="hold-list">
+    {{- range .Holds}}
+    <li>{{.Label}}{{with .Reason}} ({{.}}){{end}}</li>
+    {{- end}}
+</ul>
+<form hx-post="{{path .Name "online"}}" hx-vals='{{vals "force" "1"}}' hx-target="#force-online-error" hx-disable="find input, find button" autocomplete="off">
+    <div class="modal-field">
+        <label for="force-online-name">type <code>{{.Name}}</code> to release every hold</label>
+        <input type="text" id="force-online-name" name="confirm_name" data-confirm-name="{{.Name}}" autofocus spellcheck="false">
+    </div>
+    <div id="force-online-error" class="modal-error"></div>
+    <div class="modal-actions">
+        <button class="modal-cancel" type="button" data-close-dialog>cancel</button>
+        <button class="modal-submit" type="submit" data-confirm-submit disabled><span class="idle">force online</span><span class="busy">connecting...</span></button>
+    </div>
+</form>
 {{end}}
 
 {{define "name-hint"}}
@@ -22,7 +46,8 @@
 {{- end}}
 {{end}}
 
-{{define "create-error"}}<p class="modal-hint error">{{.}}</p>{{end}}
+{{define "create-error"}}{{template "dialog-error" .}}{{end}}
+{{define "dialog-error"}}<p class="modal-hint error">{{.}}</p>{{end}}
 
 {{define "info-error"}}
 <h2 id="session-info-title">{{.Name}}</h2>

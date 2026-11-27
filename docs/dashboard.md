@@ -8,7 +8,7 @@ Pages and fragments are rendered on the server with `html/template`. [htmx 4](ht
 
 ## Session terminals
 
-Each running session's frame is an iframe of `/sessions/NAME/terminal`, the dashboard's own terminal page, and the table's URL and the frame's `open` link open the same page in a new tab. The page runs xterm.js and speaks ttyd's protocol over `/sessions/NAME/terminal/ws`, which the dashboard proxies to the session's ttyd, adding the session's credential. The browser never loads anything from the session's port, so the dashboard works the same whatever the session serves there. See [dashboard access](architecture.md#dashboard-access) and [terminal credential](architecture.md#terminal-credential).
+Each running session's frame is an iframe of `/sessions/NAME/terminal`, the dashboard's own terminal page, and the table's URL and the frame's `open` link open the same page in a new tab. The page runs xterm.js and speaks ttyd's protocol over `/sessions/NAME/terminal/ws`, which the dashboard proxies to the session's ttyd, adding the session's credential. The browser never loads anything from the session's port, so the dashboard works the same whatever the session serves there. The iframe is sandboxed with only what the terminal page needs: scripts, its own origin (for the cookie and the WebSocket), and popups that escape the sandbox (for links, which open in a new tab). It can't navigate the dashboard or submit forms. See [dashboard access](architecture.md#dashboard-access) and [terminal credential](architecture.md#terminal-credential).
 
 ## Live updates
 
@@ -20,7 +20,7 @@ The new session dialog has an image variant picker listing `base` and every [var
 
 The dialog also has a secrets picker: `all secrets` (the default), `no secrets`, or `only checked` with a checkbox per stored secret. The checkboxes are only shown, with CSS `:has()`, while `only checked` is picked. Sessions that don't receive every secret show a `no secrets` or `N secrets` badge, with the names in its tooltip. Sandboxes never get one, since they never receive secrets. See [choosing secrets](architecture.md#choosing-secrets).
 
-Interactive sessions have an `offline` or `online` button next to stop or delete, and in the frame bar. `offline` takes the session offline with the unnamed hold. `online` releases the unnamed hold; if other owners still hold the session, it turns into a `force online?` button listing them in its tooltip, which releases every hold when clicked, and reverts after 3 seconds otherwise. Offline sessions show an `offline` badge with their holders and reasons in its tooltip, `offline` in place of their URL, and a placeholder in place of the iframe, which comes back when they reconnect. See [offline sessions](architecture.md#offline-sessions).
+Interactive sessions have an `offline` or `online` button next to stop or delete, and in the frame bar. `offline` takes the session offline with the unnamed hold. `online` releases the unnamed hold; if other owners still hold the session, it opens a dialog listing them and their reasons, with a field for the session's name. Its `force online` button, which releases every hold, is enabled only once the name is typed, and the server refuses a force whose typed name doesn't match. Offline sessions show an `offline` badge with their holders and reasons in its tooltip, `offline` in place of their URL, and a placeholder in place of the iframe, which comes back when they reconnect. See [offline sessions](architecture.md#offline-sessions).
 
 A banner above the table says when no Claude Code token is stored, or when it has expired or expires within 30 days, and names `safeclaw auth login`. It re-fetches with the table on every `sessions` event. Storing a token fires no docker event, so the banner clears on the next session change or page load. See [Claude Code](architecture.md#claude-code).
 
@@ -28,7 +28,7 @@ Dashboard actions respond with `HX-Trigger: sessions`, so the page also refreshe
 
 ## Two-click confirm
 
-Stop and delete need two clicks. The first POST returns a "stop?"/"delete?" button that posts with `confirm=1`. That button also contains an element that fetches the normal button again after 3 seconds, which reverts it if you don't confirm.
+Stop and delete need two clicks, and make the checks the CLI's `stop` and `rm` make: the name must be valid, and the container must exist and be a session or a sandbox. Unlike the CLI, both types are accepted, since the table lists both. The first POST returns a "stop?"/"delete?" button that posts with `confirm=1`. That button also contains an element that fetches the normal button again after 3 seconds, which reverts it if you don't confirm.
 
 ## Routes
 
@@ -45,7 +45,7 @@ Stop and delete need two clicks. The first POST returns a "stop?"/"delete?" butt
 | `GET /sessions/{name}/terminal` | The session's terminal page |
 | `GET /sessions/{name}/terminal/ws` | WebSocket (subprotocol `tty`) proxied to the session's ttyd with its credential. Only the dashboard's own `Origin` is accepted; 404 for a session without a running, online terminal |
 | `POST /sessions/{name}/start`, `/stop`, `/delete` | Session actions |
-| `POST /sessions/{name}/offline`, `/online` | Take a session offline with the unnamed hold, or release it (`force=1` releases every hold) |
+| `POST /sessions/{name}/offline`, `/online` | Take a session offline with the unnamed hold, or release it. When other holds remain, `/online` answers with the force dialog, retargeted to the info dialog. `force=1` releases every hold, and needs `confirm_name` set to the session's name (422 otherwise) |
 
 The JSON API from upstream is kept for scripting. Send the token from `~/.config/safeclaw/dashboard/PORT.token` as a bearer token:
 
@@ -58,15 +58,17 @@ curl -H "Authorization: Bearer $(cat ~/.config/safeclaw/dashboard/7680.token)" h
 |-------|------|----------|
 | `GET /api/sessions` | | `[{name, port, url, volume, active, type, variant, autoRemove, secrets}]`, `type` is `session` or `sandbox`, `variant` is the image variant (`""` for the base image), `autoRemove` is true for one-off sandboxes, `secrets` is `null` for every secret or the list of names the session receives (`[]` for none), `network` is `online`, `offline`, `none`, `host`, or `shared`, and `holds` lists `{owner, reason, since}` for each hold keeping it offline (`owner` is `""` for the unnamed hold) |
 | `POST /api/start` | `{"name"}` | `{success, url}`, or 409 for a sandbox. `url` carries the session's ttyd credential, like the URL `safeclaw run` prints |
-| `POST /api/stop` | `{"name"}` | `{success}` |
-| `POST /api/delete` | `{"name"}` | `{success}` |
+| `POST /api/stop` | `{"name"}` | `{success}`, or `{success: false, error}` with 400 for an invalid name, 404 for a missing session, or 409 for a container that is neither a session nor a sandbox |
+| `POST /api/delete` | `{"name"}` | As for stop |
 | `POST /api/net/off` | `{"name", "owner", "reason"}` | `{success, offline, holds}`, or 409 for a sandbox or a network that can't be disconnected |
 | `POST /api/net/on` | `{"name", "owner", "force"}` | `{success, offline, holds}`. `offline` stays true while other holds remain. 409 with the holders when `owner` holds nothing but others do |
-| `POST /api/create` | `{"name", "volume", "variant", "secrets", "query"}` | `{success, url}` (with the credential, as for start) or `{success: false, error}`, with 409 for a sandbox name or when it would recreate an offline session. `secrets` is `"all"`, `"none"`, or a list of names; leaving it out keeps an existing session's set, or gives a new one every secret |
+| `POST /api/create` | `{"name", "volume", "variant", "secrets", "query", "recreate"}` | `{success, url}` (with the credential, as for start) or `{success: false, error}`, with 409 for a sandbox name, for an existing session's name unless `recreate` is true, or when it would recreate an offline session. With `recreate`, an existing session is started, and recreated when a volume is given or the variant or secrets differ, as `safeclaw run` does. `secrets` is `"all"`, `"none"`, or a list of names; leaving it out keeps an existing session's set, or gives a new one every secret |
 | `GET /api/events` | | SSE, `data: <docker action>` |
 
 ## Security
 
-Every request must use a loopback `Host` (`localhost`, `127.0.0.1`, `::1`), which blocks DNS rebinding, and carry the launch token in the `safeclaw_dashboard_PORT` cookie or an `Authorization: Bearer` header, which keeps out code in session containers and other local processes. A `GET` with the token in its `token` query parameter sets the cookie and redirects to the same URL without it. State-changing requests also go through Go's `http.CrossOriginProtection`, so other websites can't drive the dashboard from your browser. The auth check is `Access.Middleware` in `internal/dashboard/access.go`, so routes added later get it by being on the same handler. The terminal WebSocket proxy is behind it too, and never forwards the browser's cookie or `Authorization` header to a session.
+Every request must use a `Host` the dashboard advertises (`127.0.0.1`, from the printed URL, or `localhost`, which is redirected to `127.0.0.1` before a browser gets the cookie), which blocks DNS rebinding. `::1` is refused, since the dashboard listens on `127.0.0.1` only. Requests must also carry the launch token in the `safeclaw_dashboard_PORT` cookie or an `Authorization: Bearer` header, which keeps out code in session containers and other local processes. A `GET` with the token in its `token` query parameter sets the cookie and redirects to the same URL without it. State-changing requests also go through Go's `http.CrossOriginProtection`, so other websites can't drive the dashboard from your browser. The auth check is `Access.Middleware` in `internal/dashboard/access.go`, so routes added later get it by being on the same handler. The terminal WebSocket proxy is behind it too, and never forwards the browser's cookie or `Authorization` header to a session.
 
 Every response, 401 and 403 refusals and static files included, carries `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`, so no other page can frame the dashboard and overlay it to pass clicks through. `http.CrossOriginProtection` can't catch that, because a framed dashboard's own requests are same-origin, and another loopback port gets the `SameSite` cookie. The one exception is the terminal page, which the frames grid iframes: it gets `X-Frame-Options: SAMEORIGIN` and its own policy, which has `frame-ancestors 'self'`, in place of the default rather than alongside it, since a browser enforces every policy it gets. So only pages on the dashboard's own origin can frame it. The headers are set by `refuseFraming` in `internal/dashboard/server.go`, which wraps every other check.
+
+Templates build URLs with `path` and `revert`, which path-escape the session name, and `hx-vals` with `vals`, which marshals the JSON, so a quote in a value can't add a key once the attribute is decoded. The action buttons' style (`variant`, `link` for the frame bar) is echoed from requests, so anything but `link` is rendered as the table style.

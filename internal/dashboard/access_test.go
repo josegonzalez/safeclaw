@@ -308,13 +308,16 @@ func TestTokenExchange(t *testing.T) {
 		t.Errorf("exchange redirects off-site: %q", loc)
 	}
 
-	// Other loopback hosts are sent to 127.0.0.1 first, so the cookie is
-	// never set for localhost, where session terminals are served.
-	for _, host := range []string{"localhost:7680", "[::1]:7680"} {
-		rec = send(h, "GET", "http://"+host+"/?token="+testToken, "", nil)
-		if rec.Code != http.StatusTemporaryRedirect || rec.Header().Get("Location") != "http://127.0.0.1:7680/?token="+testToken || len(rec.Result().Cookies()) != 0 {
-			t.Errorf("exchange on %s = %d to %q, cookies %v", host, rec.Code, rec.Header().Get("Location"), rec.Result().Cookies())
-		}
+	// localhost is sent to 127.0.0.1 first, so the cookie is never set for
+	// localhost, where session terminals are served.
+	rec = send(h, "GET", "http://localhost:7680/?token="+testToken, "", nil)
+	if rec.Code != http.StatusTemporaryRedirect || rec.Header().Get("Location") != "http://127.0.0.1:7680/?token="+testToken || len(rec.Result().Cookies()) != 0 {
+		t.Errorf("exchange on localhost = %d to %q, cookies %v", rec.Code, rec.Header().Get("Location"), rec.Result().Cookies())
+	}
+	// ::1 is not advertised, and nothing listens on it, so it is refused.
+	rec = send(h, "GET", "http://[::1]:7680/?token="+testToken, "", nil)
+	if rec.Code != http.StatusForbidden || len(rec.Result().Cookies()) != 0 {
+		t.Errorf("exchange on [::1] = %d, cookies %v", rec.Code, rec.Result().Cookies())
 	}
 
 	for _, bad := range []string{"nope", "", testToken + "x"} {

@@ -69,6 +69,8 @@ type apiRequest struct {
 	Variant string     `json:"variant"`
 	Secrets apiSecrets `json:"secrets"`
 	Query   string     `json:"query"`
+	// Recreate lets /api/create replace an existing session.
+	Recreate bool `json:"recreate"`
 	// Owner, Reason, and Force are used by /api/net/off and /api/net/on.
 	Owner  string `json:"owner"`
 	Reason string `json:"reason"`
@@ -173,7 +175,12 @@ func (s *Server) apiStop(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, apiResult{Error: err.Error()})
 		return
 	}
-	err = s.sessions.Stop(r.Context(), config.SessionName(req.Name))
+	name := config.SessionName(req.Name)
+	if _, status, err := s.target(r.Context(), name); err != nil {
+		writeJSONStatus(w, status, apiResult{Error: err.Error()})
+		return
+	}
+	err = s.sessions.Stop(r.Context(), name)
 	writeJSON(w, apiResult{Success: err == nil, Error: errString(err)})
 }
 
@@ -183,7 +190,12 @@ func (s *Server) apiDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, apiResult{Error: err.Error()})
 		return
 	}
-	err = s.sessions.Delete(r.Context(), config.SessionName(req.Name), false)
+	name := config.SessionName(req.Name)
+	if _, status, err := s.target(r.Context(), name); err != nil {
+		writeJSONStatus(w, status, apiResult{Error: err.Error()})
+		return
+	}
+	err = s.sessions.Delete(r.Context(), name, false)
 	writeJSON(w, apiResult{Success: err == nil, Error: errString(err)})
 }
 
@@ -193,8 +205,25 @@ func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, apiResult{Error: err.Error()})
 		return
 	}
+	// Like the new session dialog, create refuses a name in use. With
+	// recreate set it goes on as `safeclaw run` does: it starts the
+	// session, recreating it when a volume is given or the variant or
+	// secrets differ.
+	name := session.NormalizeName(req.Name)
+	x, err := s.taken(r.Context(), name)
+	switch {
+	case err != nil:
+		writeJSONStatus(w, http.StatusInternalServerError, apiResult{Error: err.Error()})
+		return
+	case x != nil && x.IsSandbox():
+		writeJSONStatus(w, http.StatusConflict, apiResult{Error: sandboxError(name).Error()})
+		return
+	case x != nil && !req.Recreate:
+		writeJSONStatus(w, http.StatusConflict, apiResult{Error: fmt.Sprintf("session %q already exists: set recreate to start or replace it", name)})
+		return
+	}
 	res, err := s.sessions.Ensure(r.Context(), session.Options{
-		Name:    session.NormalizeName(req.Name),
+		Name:    name,
 		Volume:  req.Volume,
 		Variant: req.Variant,
 		Secrets: req.Secrets.set,

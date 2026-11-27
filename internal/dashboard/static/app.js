@@ -15,15 +15,24 @@ document.addEventListener('click', (e) => {
 document.addEventListener('focusin', (e) => e.target.matches('[data-select-on-focus]') && e.target.select());
 document.addEventListener('input', (e) => {
     const i = e.target;
+    // Force online: the button is enabled once the session name is typed.
+    if (i.dataset.confirmName !== undefined) {
+        i.form.querySelector('[data-confirm-submit]').disabled = i.value !== i.dataset.confirmName;
+        return;
+    }
     if (i.id !== 'session-name') return;
     const pos = i.selectionStart, v = i.value.replace(/ /g, '-').toLowerCase();
     if (v !== i.value) { i.value = v; i.setSelectionRange(pos, pos); }
 });
-// Open a dialog when htmx swaps content into it (session info).
+// Open a dialog when htmx swaps content into it (session info, and the
+// force online dialog, whose HX-Retarget leaves the target a selector).
 document.addEventListener('htmx:after:swap', (e) => {
-    const d = e.detail?.ctx?.target?.closest?.('dialog');
+    let t = e.detail?.ctx?.target;
+    if (typeof t === 'string') t = document.querySelector(t);
+    const d = t?.closest?.('dialog');
     if (d && !d.open) d.showModal();
 });
+document.addEventListener('close-dialog', () => document.querySelectorAll('dialog[open]').forEach((d) => d.close()));
 document.addEventListener('session-created', (e) => {
     if (e.detail.openTab && e.detail.url) window.open(e.detail.url, '_blank');
     document.getElementById('new-session-modal').close();
@@ -67,7 +76,10 @@ if (termEl) {
     const send = (s) => ws.readyState === WebSocket.OPEN && ws.send(enc.encode(s));
     ws.onopen = () => {
         ws.send(enc.encode(JSON.stringify({columns: term.cols, rows: term.rows})));
-        term.focus();
+        // Only in its own tab: a framed terminal's iframe is sandboxed,
+        // which refuses focus without a click, so it can't take focus
+        // from the dashboard.
+        if (window === window.top) term.focus();
     };
     ws.onmessage = (e) => {
         const d = new Uint8Array(e.data);

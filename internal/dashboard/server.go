@@ -15,6 +15,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -155,8 +156,11 @@ func (s *Server) parseTemplates() (*template.Template, error) {
 			return strings.TrimPrefix(url, "http://")
 		},
 		"action": func(name, kind, variant string) actionData {
-			return actionData{Name: name, Kind: kind, Variant: variant}
+			return actionData{Name: name, Kind: kind, Variant: buttonVariant(variant)}
 		},
+		"path":   sessionPath,
+		"revert": revertPath,
+		"vals":   hxVals,
 		"busy": func(kind string) string {
 			switch kind {
 			case "start":
@@ -248,16 +252,19 @@ func allowSameOriginFraming(w http.ResponseWriter, csp string) {
 	w.Header().Set("Content-Security-Policy", csp)
 }
 
-// checkHost rejects requests whose Host is not a loopback name, which blocks
-// DNS rebinding.
+// checkHost rejects requests whose Host is not one of the names the
+// dashboard advertises, which blocks DNS rebinding: 127.0.0.1, which the
+// printed URL uses, and localhost, which the API examples use and which is
+// redirected to 127.0.0.1 before a browser gets the cookie. The listener is
+// 127.0.0.1 only, so nothing reaches it as ::1.
 func (s *Server) checkHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := r.Host
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
 		}
-		switch strings.Trim(host, "[]") {
-		case "localhost", "127.0.0.1", "::1":
+		switch host {
+		case "localhost", cookieHost:
 			next.ServeHTTP(w, r)
 		default:
 			http.Error(w, "forbidden host", http.StatusForbidden)
@@ -408,6 +415,99 @@ func (s *Server) exists(ctx context.Context, name string) bool {
 	return s.find(ctx, name) != nil
 }
 
+// errNotManaged is returned for a container named like a session that is
+// neither a session nor a sandbox.
+var errNotManaged = errors.New("is not a safeclaw session or sandbox")
+
+// taken returns the session or sandbox already using name, or nil. Unlike
+// find, it returns the error when the list fails, so a create that can't
+// check is refused rather than taken for a new name.
+func (s *Server) taken(ctx context.Context, name string) (*session.Session, error) {
+	list, err := s.sessions.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c := config.ContainerName(name)
+	for i := range list {
+		if list[i].Container == c {
+			return &list[i], nil
+		}
+	}
+	return nil, nil
+}
+
+// target returns the session or sandbox a stop or delete acts on, with
+// the checks the CLI makes: the name must be valid, and the container must
+// exist and be a session or a sandbox. Both types are allowed, since the
+// table offers stop and delete for both. On error, status is the HTTP
+// status to answer with.
+func (s *Server) target(ctx context.Context, name string) (x *session.Session, status int, err error) {
+	if err := session.ValidateName(name); err != nil {
+		return nil, http.StatusBadRequest, err
+	}
+	list, err := s.sessions.List(ctx)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	c := config.ContainerName(name)
+	for i := range list {
+		if list[i].Container != c {
+			continue
+		}
+		switch list[i].Type {
+		case config.TypeSession, config.TypeSandbox:
+			return &list[i], http.StatusOK, nil
+		}
+		return nil, http.StatusConflict, fmt.Errorf("%q %w", c, errNotManaged)
+	}
+	return nil, http.StatusNotFound, fmt.Errorf("session %q %w", name, session.ErrNotFound)
+}
+
+// buttonVariant returns an action button's style: "link" for the frame
+// bar, or "" for the table. Anything else is the table style, so a value
+// echoed from a request never reaches a template unchecked.
+func buttonVariant(v string) string {
+	if v == "link" {
+		return v
+	}
+	return ""
+}
+
+// sessionPath returns the dashboard path for a session, with the name and
+// each part path-escaped as one segment.
+func sessionPath(name string, parts ...string) string {
+	var b strings.Builder
+	b.WriteString("/sessions/")
+	b.WriteString(url.PathEscape(name))
+	for _, p := range parts {
+		b.WriteString("/")
+		b.WriteString(url.PathEscape(p))
+	}
+	return b.String()
+}
+
+// revertPath returns the URL that fetches a session's normal action
+// button, which reverts a confirm.
+func revertPath(name, kind, variant string) string {
+	q := url.Values{"kind": {kind}, "variant": {variant}}
+	return sessionPath(name, "actions") + "?" + q.Encode()
+}
+
+// hxVals returns an hx-vals JSON object of key and value pairs. It is
+// marshalled, not printed into a JSON template, so a quote in a value
+// can't add a key once the attribute is decoded.
+func hxVals(pairs ...string) (string, error) {
+	if len(pairs)%2 != 0 {
+		return "", errors.New("vals needs key and value pairs")
+	}
+	m := make(map[string]string, len(pairs)/2)
+	for i := 0; i < len(pairs); i += 2 {
+		m[pairs[i]] = pairs[i+1]
+	}
+	b, err := json.Marshal(m)
+	return string(b), err
+}
+
 // sandboxError returns the error for an interactive-only action on a
 // sandbox.
 func sandboxError(name string) error {
@@ -469,7 +569,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := session.NormalizeName(r.PostForm.Get("name"))
-	if s.exists(r.Context(), name) {
+	if x, err := s.taken(r.Context(), name); err != nil {
+		s.render(w, http.StatusUnprocessableEntity, "create-error", "could not check the name: "+err.Error())
+		return
+	} else if x != nil {
 		s.render(w, http.StatusUnprocessableEntity, "create-error", fmt.Sprintf("session %q already seems to exist", name))
 		return
 	}
@@ -517,6 +620,10 @@ func formSecrets(mode string, checked []string) (session.SecretSet, error) {
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	name := config.SessionName(r.PathValue("name"))
+	if err := session.ValidateName(name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if x := s.find(r.Context(), name); x != nil && x.IsSandbox() {
 		s.render(w, http.StatusConflict, "info-error", map[string]string{
 			"Name":  name,
@@ -536,19 +643,20 @@ type actionData struct {
 	Kind    string // stop, delete, start, offline, online
 	Variant string // "" for the table button, "link" for the frame bar
 	Confirm bool
-	// Force makes the confirm button release every hold.
-	Force bool
-	// Title is the confirm button's tooltip.
-	Title  string
-	Failed string
+	Failed  string
 }
 
 func (s *Server) handleActions(w http.ResponseWriter, r *http.Request) {
+	name := config.SessionName(r.PathValue("name"))
+	if err := session.ValidateName(name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	q := r.URL.Query()
 	s.render(w, http.StatusOK, "action", actionData{
-		Name:    config.SessionName(r.PathValue("name")),
+		Name:    name,
 		Kind:    kindOrDefault(q.Get("kind")),
-		Variant: q.Get("variant"),
+		Variant: buttonVariant(q.Get("variant")),
 	})
 }
 
@@ -575,7 +683,17 @@ func (s *Server) handleConfirmed(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := config.SessionName(r.PathValue("name"))
 		_ = r.ParseForm()
-		d := actionData{Name: name, Kind: kind, Variant: r.Form.Get("variant")}
+		d := actionData{Name: name, Kind: kind, Variant: buttonVariant(r.Form.Get("variant"))}
+		if _, status, err := s.target(r.Context(), name); err != nil {
+			if status == http.StatusBadRequest {
+				// An invalid name can't be rendered into the button's URLs.
+				http.Error(w, err.Error(), status)
+				return
+			}
+			d.Failed = err.Error()
+			s.render(w, status, "action", d)
+			return
+		}
 		if r.Form.Get("confirm") != "1" {
 			d.Confirm = true
 			s.render(w, http.StatusOK, "action", d)
@@ -601,29 +719,66 @@ func (s *Server) handleOffline(w http.ResponseWriter, r *http.Request) {
 	name := config.SessionName(r.PathValue("name"))
 	_ = r.ParseForm()
 	if _, err := s.sessions.NetOff(r.Context(), name, session.NetOffOptions{}); err != nil {
-		s.render(w, errStatus(err, http.StatusOK), "action", actionData{Name: name, Kind: "offline", Variant: r.Form.Get("variant"), Failed: err.Error()})
+		s.render(w, errStatus(err, http.StatusOK), "action", actionData{Name: name, Kind: "offline", Variant: buttonVariant(r.Form.Get("variant")), Failed: err.Error()})
 		return
 	}
 	refresh(w)
 }
 
+// forceData renders the force online dialog.
+type forceData struct {
+	Name  string
+	Holds []session.Hold
+}
+
 // handleOnline releases the unnamed hold on a session. If other owners
-// still hold it offline, it returns a confirm button that, clicked again
-// with force=1, releases every hold.
+// still hold it offline, it answers with a dialog listing them, retargeted
+// to the info dialog, which asks for the session name to be typed before
+// forcing it online. A force=1 request releases every hold, and is
+// refused unless its confirm_name field is the session's name.
 func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 	name := config.SessionName(r.PathValue("name"))
 	_ = r.ParseForm()
-	d := actionData{Name: name, Kind: "online", Variant: r.Form.Get("variant")}
-	res, err := s.sessions.NetOn(r.Context(), name, session.NetOnOptions{Force: r.Form.Get("force") == "1"})
+	force := r.Form.Get("force") == "1"
+	if force {
+		if err := session.ValidateName(name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if r.Form.Get("confirm_name") != name {
+			s.render(w, http.StatusUnprocessableEntity, "dialog-error", fmt.Sprintf("type %q to force it online", name))
+			return
+		}
+	}
+	d := actionData{Name: name, Kind: "online", Variant: buttonVariant(r.Form.Get("variant"))}
+	res, err := s.sessions.NetOn(r.Context(), name, session.NetOnOptions{Force: force})
 	if err != nil && !errors.Is(err, session.ErrHeld) {
+		if force {
+			s.render(w, errStatus(err, http.StatusUnprocessableEntity), "dialog-error", err.Error())
+			return
+		}
 		d.Failed = err.Error()
 		s.render(w, errStatus(err, http.StatusOK), "action", d)
 		return
 	}
 	if res != nil && len(res.Holds) > 0 {
-		d.Confirm, d.Force = true, true
-		d.Title = "held offline by " + holders(res.Holds)
-		s.render(w, http.StatusOK, "action", d)
+		if force {
+			s.render(w, http.StatusConflict, "dialog-error", "still held offline by "+holders(res.Holds))
+			return
+		}
+		if err := session.ValidateName(name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("HX-Retarget", "#session-info")
+		w.Header().Set("HX-Reswap", "innerHTML")
+		s.render(w, http.StatusOK, "force-online", forceData{Name: name, Holds: res.Holds})
+		return
+	}
+	if force {
+		trigger, _ := json.Marshal(map[string]bool{"sessions": true, "close-dialog": true})
+		w.Header().Set("HX-Trigger", string(trigger))
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	refresh(w)
