@@ -1,10 +1,10 @@
 # Dashboard
 
-`safeclaw dashboard` serves the dashboard on `127.0.0.1:7680` (`--port` to change) and prints a URL carrying a random token, such as `http://127.0.0.1:7680/?token=...`. Opening it logs the browser in with a cookie and a second secret, which the page keeps in `localStorage` and sends in a header. Every route but `/dashboard-proof`, static files included, returns 401 without the cookie, and every route but the page shells and static files also needs the secret. See [dashboard access](architecture.md#dashboard-access).
+`safeclaw dashboard` serves the dashboard on `127.0.0.1:7680` (`--port` to change) and prints a URL carrying a random token, such as `http://127.0.0.1:7680/?token=...`. Opening it logs the browser in with a cookie and a second secret, which the page keeps in `localStorage` and sends in a header. Every route but `/dashboard-proof`, static files included, returns 401 without the cookie, and every route but the page shells and static files also needs the secret. A login lasts 7 days at most, and ends after 12 hours with no tab open; the `log out` button in the header ends it at once. See [dashboard access](architecture.md#dashboard-access) and [logins and logout](architecture.md#logins-and-logout).
 
 ## How it works
 
-Pages and fragments are rendered on the server with `html/template`. [htmx 4](https://htmx.org) handles requests and swaps, and its SSE extension handles live updates. htmx and the extension are vendored in `internal/dashboard/static` and embedded in the binary, as are [xterm.js](https://xtermjs.org) 5.5.0 and its fit addon 0.10.0 in `static/xterm`. The only hand-written JavaScript is `static/app.js`, which keeps the login's secret and adds it to every request, opens and closes the `<dialog>` modals, copies the attach command to the clipboard, refreshes an iframe, normalizes the session name as you type, and runs the session terminal client.
+Pages and fragments are rendered on the server with `html/template`. [htmx 4](https://htmx.org) handles requests and swaps, and its SSE extension handles live updates. htmx and the extension are vendored in `internal/dashboard/static` and embedded in the binary, as are [xterm.js](https://xtermjs.org) 5.5.0 and its fit addon 0.10.0 in `static/xterm`. The only hand-written JavaScript is `static/app.js`, which keeps the login's secret and adds it to every request, clears the page on logout, opens and closes the `<dialog>` modals, copies the attach command to the clipboard, refreshes an iframe, normalizes the session name as you type, and runs the session terminal client.
 
 ## Session terminals
 
@@ -45,7 +45,8 @@ Stop and delete need two clicks, and make the checks the CLI's `stop` and `rm` m
 | `GET /sessions/{name}/actions` | Normal action button, used to revert a confirm |
 | `GET /sessions/{name}/terminal` | The session's terminal page |
 | `GET /sessions/{name}/terminal/ws?ticket=` | WebSocket (subprotocol `tty`) proxied to the session's ttyd with its credential. Takes the cookie with a ticket from `/tickets` in place of the secret. Only the dashboard's own `Origin` is accepted; 404 for a session without a running, online terminal |
-| `POST /tickets` | `path` is a terminal WebSocket path. Answers with a ticket that opens it once within 30 seconds, 400 for any other path, 503 while 64 are outstanding |
+| `POST /tickets` | `path` is a terminal WebSocket path. Answers with a ticket that opens it once within 30 seconds, only with the cookie of the login that asked for it, 400 for any other path, 503 while 64 are outstanding |
+| `POST /logout` | Ends the browser's login, so its cookie, secret, and tickets stop working and its streams and terminals close. 204 with `HX-Trigger: logged-out` and a cookie that clears it, 400 for the bearer token |
 | `POST /sessions/{name}/start`, `/stop`, `/delete` | Session actions |
 | `GET /dashboard-proof?nonce=` | Needs no login. 204 with the proof that this dashboard holds its token in the `Safeclaw-Proof` header, 400 for a nonce that isn't 16 to 128 letters, digits, `-` or `_`. See [finding the dashboard](#finding-the-dashboard) |
 | `POST /sessions/{name}/offline`, `/online` | Take a session offline with the unnamed hold, or release it. When other holds remain, `/online` answers with the force dialog, retargeted to the info dialog. `force=1` releases every hold, and needs `confirm_name` set to the session's name (422 otherwise) |

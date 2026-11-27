@@ -1,5 +1,5 @@
-// The only hand-written JS on the dashboard: the login's second secret,
-// dialogs, clipboard, iframe refresh, and the session terminal client.
+// The only hand-written JS on the dashboard: the login's second secret and
+// logout, dialogs, clipboard, iframe refresh, and the session terminal client.
 
 // Login. The cookie alone only opens the page shells, since the browser
 // also sends it to other ports on 127.0.0.1. Every other request needs the
@@ -20,23 +20,34 @@ const login = (() => {
         history.replaceState(history.state, '', location.pathname + location.search);
     }
     let shown = false;
+    // needed says to log in, and takes down whatever the page showed of a
+    // login that has ended: the table, frames and their terminals, banner,
+    // and the header's buttons.
     const needed = () => {
         if (shown) return;
         shown = true;
         const p = document.getElementById('login-needed');
         if (p) p.hidden = false;
+        document.querySelectorAll('[data-logged-in]').forEach((e) => e.hidden = true);
+        document.querySelectorAll('dialog[open]').forEach((d) => d.close());
+        document.getElementById('frames')?.remove();
+        for (const id of ['sessions', 'auth-banner']) document.getElementById(id)?.replaceChildren();
         document.dispatchEvent(new Event('login-needed'));
     };
-    // A login in another tab while this one needs it reloads this one.
+    // A login in another tab while this one needs it reloads this one, and
+    // a logout in another tab ends this one too.
     window.addEventListener('storage', (e) => {
-        if (shown && e.key === key && e.newValue) location.reload();
+        if (e.key !== key) return;
+        if (shown && e.newValue) location.reload();
+        if (!e.newValue) needed();
     });
     if (!get()) needed();
     return {
         get,
         needed,
         // stale drops a secret the dashboard refused, one from before it
-        // restarted, unless another login has replaced it meanwhile.
+        // restarted or that expired, unless another login has replaced it
+        // meanwhile.
         stale(secret) {
             if (secret && get() === secret) store?.removeItem(key);
             needed();
@@ -44,6 +55,11 @@ const login = (() => {
         header: 'Safeclaw-Secret',
     };
 })();
+// The log out button's POST /logout ends this browser's login on the
+// dashboard, which answers with the logged-out event. Its secret is the one
+// stored, since a login meanwhile would have replaced the cookie too and
+// the logout would have been refused.
+document.addEventListener('logged-out', () => login.stale(login.get()));
 // Every htmx request, the SSE stream included, carries the secret. Without
 // one there's nothing to send that would work, so the request is dropped.
 document.addEventListener('htmx:config:request', (e) => {

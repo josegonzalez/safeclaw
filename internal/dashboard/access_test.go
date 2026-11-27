@@ -103,6 +103,7 @@ var routes = []struct{ method, path, body string }{
 	{"POST", "/api/net/on", `{"name":"work","force":true}`},
 	{"GET", "/api/events", ""},
 	{"POST", "/tickets", "path=/sessions/work/terminal/ws"},
+	{"POST", "/logout", ""},
 	{"GET", "/missing", ""},
 }
 
@@ -121,9 +122,9 @@ func newAuthServer(t *testing.T, sessions Sessions) http.Handler {
 	return s.Handler()
 }
 
-// login opens the launch URL on h like a browser and returns the session
+// loginCookie opens the launch URL on h like a browser and returns the session
 // cookie it gets, as a Cookie header value.
-func login(t *testing.T, h http.Handler) string {
+func loginCookie(t *testing.T, h http.Handler) string {
 	t.Helper()
 	rec := send(h, "GET", "http://127.0.0.1:7680/?token="+testToken, "", nil)
 	cookies := rec.Result().Cookies()
@@ -350,8 +351,9 @@ func TestCookieIsNotTheToken(t *testing.T) {
 	if secret := browser[secretHeader]; secret == value || secret == testToken || strings.Contains(secret, testToken) {
 		t.Fatalf("secret = %q, cookie %q", secret, value)
 	}
-	if again := browserLogin(t, h); again["Cookie"] != cookie || again[secretHeader] != browser[secretHeader] {
-		t.Errorf("second login got %v, want the same cookie and secret %v", again, browser)
+	// Each login gets its own cookie and secret.
+	if again := browserLogin(t, h); again["Cookie"] == cookie || again[secretHeader] == browser[secretHeader] {
+		t.Errorf("second login got %v, want a new cookie and secret, not %v", again, browser)
 	}
 	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", browser); rec.Code != http.StatusOK {
 		t.Errorf("cookie and secret = %d", rec.Code)
@@ -500,25 +502,25 @@ func TestTicketExpiryAndLimit(t *testing.T) {
 	now := time.Unix(1000, 0)
 	a.now = func() time.Time { return now }
 	const ws = "/sessions/work/terminal/ws"
-	tk, ok := a.mint(ws)
+	tk, ok := a.mint(ws, nil)
 	if !ok {
 		t.Fatal("mint refused")
 	}
 	now = now.Add(ticketTTL)
-	if a.redeem(tk, ws) {
+	if a.redeem(tk, ws, nil) {
 		t.Error("expired ticket redeemed")
 	}
 	for i := range maxTickets {
-		if _, ok := a.mint(ws); !ok {
+		if _, ok := a.mint(ws, nil); !ok {
 			t.Fatalf("mint %d refused", i)
 		}
 	}
-	if _, ok := a.mint(ws); ok {
+	if _, ok := a.mint(ws, nil); ok {
 		t.Error("minted past the limit")
 	}
 	// Expired tickets make room again.
 	now = now.Add(ticketTTL)
-	if _, ok := a.mint(ws); !ok {
+	if _, ok := a.mint(ws, nil); !ok {
 		t.Error("expired tickets kept their room")
 	}
 }
@@ -543,17 +545,17 @@ func TestTokenExchange(t *testing.T) {
 		t.Fatalf("cookies = %v", cookies)
 	}
 	c := cookies[0]
-	if c.Name != "safeclaw_dashboard_7680" || c.Value == "" || c.Value == testToken || c.Value == secret || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" {
+	if c.Name != "safeclaw_dashboard_7680" || c.Value == "" || c.Value == testToken || c.Value == secret || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" || c.MaxAge != int(loginLifetime/time.Second) {
 		t.Errorf("cookie = %+v", c)
 	}
 
 	rec = send(h, "GET", "http://127.0.0.1:7680/fragments/sessions?a=1&token="+testToken, "", nil)
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/fragments/sessions?a=1#"+secretFragment+"="+secret {
+	if loc, _, _ := strings.Cut(rec.Header().Get("Location"), "#"); rec.Code != http.StatusSeeOther || loc != "/fragments/sessions?a=1" {
 		t.Errorf("exchange keeps other params: %d to %q", rec.Code, rec.Header().Get("Location"))
 	}
 
 	rec = send(h, "GET", "http://127.0.0.1:7680//evil.example/?token="+testToken, "", nil)
-	if loc := rec.Header().Get("Location"); loc != "/evil.example/#"+secretFragment+"="+secret {
+	if loc := rec.Header().Get("Location"); !strings.HasPrefix(loc, "/evil.example/#"+secretFragment+"=") {
 		t.Errorf("exchange redirects off-site: %q", loc)
 	}
 

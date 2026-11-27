@@ -17,7 +17,10 @@
     <div id="events" hx-sse:connect="/events" hidden></div>
     <header>
         <h1><span>safeclaw</span> <em>sessions</em></h1>
-        <button class="new-btn" type="button" data-open-dialog="new-session-modal">+ new</button>
+        <div class="header-actions" data-logged-in>
+            <button class="logout-btn" type="button" hx-post="/logout" hx-swap="none" title="end this browser's login">log out</button>
+            <button class="new-btn" type="button" data-open-dialog="new-session-modal">+ new</button>
+        </div>
     </header>
 
     <p id="login-needed" class="load-error" hidden>Not logged in. Open the URL <code>safeclaw dashboard</code> printed.</p>

@@ -31,6 +31,26 @@ h1 em { color: #8b949e; font-style: normal; }
     background: #3a5040;
     color: #c9c5c0;
 }
+.header-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+.header-actions[hidden] { display: none; }
+.logout-btn {
+    background: transparent;
+    border: 1px solid #4a4540;
+    color: #8b949e;
+    padding: 6px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 14px;
+}
+.logout-btn:hover {
+    background: #4a4540;
+    color: #c9c5c0;
+}
 .table-wrapper {
     overflow-x: auto;
     margin-bottom: 24px;
