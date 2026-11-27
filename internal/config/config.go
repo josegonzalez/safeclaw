@@ -88,6 +88,12 @@ func NetworkDir() string {
 	return filepath.Join(Dir(), "network")
 }
 
+// CopyDir returns the directory holding the lock that serializes copies
+// into sandboxes across safeclaw processes.
+func CopyDir() string {
+	return filepath.Join(Dir(), "copy")
+}
+
 // ContainerName returns the container name for a session name. Names that
 // already carry the prefix are returned unchanged.
 func ContainerName(session string) string {

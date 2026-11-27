@@ -160,12 +160,16 @@ func (m *Manager) netDir() string {
 }
 
 // netLock takes the lock that serializes network changes and offline state
-// across safeclaw processes. One lock file is shared by every session and
-// never removed, since removing it while another process waits on it would
-// let two holders in. The returned function releases it and is safe to call
-// more than once.
+// across safeclaw processes.
 func (m *Manager) netLock() (func(), error) {
-	dir := m.netDir()
+	return lockFile(m.netDir())
+}
+
+// lockFile takes an exclusive lock on dir/.lock, creating dir if needed.
+// One lock file is shared by every session and never removed, since
+// removing it while another process waits on it would let two holders in.
+// The returned function releases it and is safe to call more than once.
+func lockFile(dir string) (func(), error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}

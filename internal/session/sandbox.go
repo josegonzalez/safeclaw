@@ -44,6 +44,9 @@ var ErrSandboxName = errors.New("a sandbox name is required (-s NAME)")
 // a container that already exists.
 var ErrExists = errors.New("already exists: one-off sandboxes are always new")
 
+// ErrNotRunning is returned when an operation needs a running sandbox.
+var ErrNotRunning = errors.New("is not running")
+
 // ErrNoCommand is returned when a one-off sandbox command is empty.
 var ErrNoCommand = errors.New("a command is required")
 

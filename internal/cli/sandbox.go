@@ -26,6 +26,8 @@ func newSandboxCommand() *cobra.Command {
 	cmd.AddCommand(
 		newSandboxRunCommand(),
 		newSandboxExecCommand(),
+		newSandboxCopyInCommand(),
+		newSandboxCopyOutCommand(),
 		newSandboxListCommand(),
 		newSandboxStopCommand(),
 		newSandboxRemoveCommand(),
@@ -188,6 +190,84 @@ func newSandboxExecCommand() *cobra.Command {
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "allocate a TTY")
 	cmd.Flags().BoolVar(&ephemeral, "ephemeral", false, "run the command in a new one-off sandbox that is removed when it exits")
 	f.register(cmd, "name for the --ephemeral sandbox (random by default)", " (with --ephemeral)")
+	return cmd
+}
+
+// completeSandboxFirst completes NAME as a sandbox and leaves the other
+// arguments to the shell's file completion.
+func completeSandboxFirst(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) == 0 {
+		return completeType(config.TypeSandbox)(cmd, args, toComplete)
+	}
+	return nil, cobra.ShellCompDirectiveDefault
+}
+
+// writeLines writes each line to out.
+func writeLines(out io.Writer, lines []string) error {
+	for _, l := range lines {
+		if _, err := fmt.Fprintln(out, l); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func newSandboxCopyInCommand() *cobra.Command {
+	var to string
+	cmd := &cobra.Command{
+		Use:   "cp-in NAME FILE...",
+		Short: "Copy host files into a running sandbox",
+		Long: "Copy regular host files into a running sandbox, owned by the sandbox user.\n\n" +
+			"Symbolic links and anything that is not a regular file are refused before anything is copied. " +
+			"Each file is named N-NAME, with N continuing after the highest number already in the destination, " +
+			"so files with the same name never overwrite each other. The container path of each file is printed, in order.",
+		Args:              cobra.MinimumNArgs(2),
+		ValidArgsFunction: completeSandboxFirst,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			paths, err := session.NewManager(nil).CopyIn(cmd.Context(), args[0], args[1:], to)
+			if err != nil {
+				return err
+			}
+			return writeLines(cmd.OutOrStdout(), paths)
+		},
+	}
+	cmd.Flags().StringVar(&to, "to", session.DefaultCopyDest, "destination directory, under "+config.SandboxDir)
+	return cmd
+}
+
+func newSandboxCopyOutCommand() *cobra.Command {
+	var only []string
+	var force bool
+	var maxSize string
+	cmd := &cobra.Command{
+		Use:   "cp-out NAME CONTAINER_DIR HOST_DIR --only GLOB...",
+		Short: "Copy matching files out of a running sandbox",
+		Long: "Copy the regular files directly in CONTAINER_DIR whose names match an --only glob into the existing HOST_DIR.\n\n" +
+			"Symbolic links, hard links, directories, other file types, and anything in subdirectories are dropped. " +
+			"Files are read as the sandbox user and written with mode 0644, less the umask. Nothing is written unless every file arrives, " +
+			"and existing files are refused unless --force is set. The host path of each file is printed.",
+		Args:              cobra.ExactArgs(3),
+		ValidArgsFunction: completeSandboxFirst,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			limit, err := session.ParseSize(maxSize)
+			if err != nil {
+				return fmt.Errorf("--max-size: %w", err)
+			}
+			paths, err := session.NewManager(nil).CopyOut(cmd.Context(), args[0], args[1], args[2], session.CopyOutOptions{
+				Only:    only,
+				Force:   force,
+				MaxSize: limit,
+			})
+			if err != nil {
+				return err
+			}
+			return writeLines(cmd.OutOrStdout(), paths)
+		},
+	}
+	cmd.Flags().StringArrayVar(&only, "only", nil, "keep files whose names match this glob (repeatable)")
+	_ = cmd.MarkFlagRequired("only")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "overwrite existing host files")
+	cmd.Flags().StringVar(&maxSize, "max-size", session.DefaultCopyMaxSize, "limit on the total size of the files kept, with a k, m, g, or t suffix (0 for none)")
 	return cmd
 }
 

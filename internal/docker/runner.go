@@ -21,7 +21,8 @@ type Runner interface {
 	// Passthrough runs docker with args attached to the current stdio.
 	Passthrough(ctx context.Context, args ...string) error
 	// Stream starts docker with args and returns its stdout. Calling the
-	// returned function waits for the process to exit.
+	// returned function waits for the process to exit, returning an *Error
+	// carrying stderr on a non-zero exit.
 	Stream(ctx context.Context, args ...string) (io.ReadCloser, func() error, error)
 }
 
@@ -92,6 +93,8 @@ func (r ExecRunner) Passthrough(ctx context.Context, args ...string) error {
 // Stream implements Runner.
 func (r ExecRunner) Stream(ctx context.Context, args ...string) (io.ReadCloser, func() error, error) {
 	cmd := exec.CommandContext(ctx, r.bin(), args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, nil, err
@@ -99,7 +102,13 @@ func (r ExecRunner) Stream(ctx context.Context, args ...string) (io.ReadCloser, 
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
 	}
-	return out, cmd.Wait, nil
+	wait := func() error {
+		if err := cmd.Wait(); err != nil {
+			return &Error{Args: args, Stderr: stderr.String(), Err: err}
+		}
+		return nil
+	}
+	return out, wait, nil
 }
 
 // IsNotFound reports whether err came from docker failing to find an object.
