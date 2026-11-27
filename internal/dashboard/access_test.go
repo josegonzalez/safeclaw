@@ -263,7 +263,7 @@ func TestEveryResponseRefusesFraming(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
 
-			xfo, csp := "DENY", "frame-ancestors 'none'"
+			xfo, csp := "DENY", pageCSP
 			if rt.path == "/sessions/work/terminal" && rec.Code == http.StatusOK {
 				xfo, csp = "SAMEORIGIN", terminalCSP
 			}

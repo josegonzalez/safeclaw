@@ -235,18 +235,26 @@ func (s *Server) Handler() http.Handler {
 	return refuseFraming(s.checkHost(s.access.Middleware(cop.Handler(mux))))
 }
 
+// pageCSP is every response's policy but the terminal page's. Scripts,
+// styles, and everything else come only from the dashboard's own origin,
+// with no inline script or style and no eval, so markup that reached a
+// page some other way couldn't run script. htmx's own indicator styles
+// are a constructed stylesheet, which the policy doesn't cover, and the
+// favicon is a data: URL. No other page may frame the dashboard.
+const pageCSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+
 // refuseFraming tells the browser not to render any response inside a
 // frame, so another page can't overlay the dashboard and pass clicks
-// through to it. CrossOriginProtection doesn't cover this: a framed
-// dashboard's own requests are same-origin. It wraps every other check, so
-// refusals such as 401 and 403 carry the headers too.
+// through to it, and sets pageCSP. CrossOriginProtection doesn't cover
+// framing: a framed dashboard's own requests are same-origin. It wraps
+// every other check, so refusals such as 401 and 403 carry the headers too.
 //
 // A handler whose page the dashboard frames itself replaces them with
 // allowSameOriginFraming.
 func refuseFraming(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", pageCSP)
 		next.ServeHTTP(w, r)
 	})
 }

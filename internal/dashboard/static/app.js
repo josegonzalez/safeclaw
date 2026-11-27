@@ -117,6 +117,24 @@ document.getElementById('new-session-modal')?.addEventListener('close', (e) => {
     htmx.ajax('GET', '/sessions/validate', {target: '#session-name-hint', swap: 'outerHTML'});
 });
 
+// allowedLink says whether a terminal link may open: an http or https URL
+// whose host is not localhost, a name under .localhost, or a loopback or
+// unspecified address, on any port. The dashboard's cookie is sent to its
+// host on every port, whichever loopback name reaches it, and the sessions'
+// terminals listen on loopback too. This is the policy `safeclaw attach`
+// applies to the links it passes on (internal/termtext). The URL parser
+// has already read numeric hosts as browsers do, so 127.1 is 127.0.0.1 and
+// IPv6 addresses are compressed, in brackets.
+const allowedLink = (u) => {
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase().replace(/\.$/, '');
+    if (!h || h === location.hostname) return false;
+    if (h === 'localhost' || h.endsWith('.localhost')) return false;
+    if (/^(127\.\d+\.\d+\.\d+|0\.0\.0\.0)$/.test(h)) return false;
+    // IPv6 loopback and unspecified, and IPv4-mapped 127.0.0.0/8 and 0.0.0.0.
+    return !/^\[(::1?|::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}|::ffff:0:0)\]$/.test(h);
+};
+
 // Session terminal: xterm.js speaking ttyd's protocol over the dashboard's
 // WebSocket proxy, which adds ttyd's credential. A WebSocket can't carry the
 // secret header, so the socket is opened with a one-use ticket fetched with
@@ -129,14 +147,14 @@ if (termEl) {
     const term = new Terminal({
         fontSize: 13,
         scrollback: 10000,
-        // Links open in a new tab, but never on the dashboard's own host:
-        // that is where its cookie is sent.
+        // Links open in a new tab, but only http and https links off
+        // loopback.
         linkHandler: {
             allowNonHttpProtocols: false,
             activate: (_e, text) => {
                 let u;
                 try { u = new URL(text); } catch { return; }
-                if (!/^https?:$/.test(u.protocol) || u.hostname === location.hostname) return;
+                if (!allowedLink(u)) return;
                 window.open(u.href, '_blank', 'noopener,noreferrer');
             },
         },
