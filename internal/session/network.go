@@ -600,6 +600,8 @@ func (m *Manager) keepOffline(ctx context.Context, container string) error {
 // wrapping ErrOffline, a session that is offline or held offline, since a
 // recreated container would come back online. A container that was removed
 // or replaced since c was listed is left alone, and removed reports false.
+// A session's secrets and auto memory choices are kept on the host, so the
+// container created next with its name gets them back.
 func (m *Manager) RemoveStale(ctx context.Context, c docker.Container) (removed bool, err error) {
 	unlock, err := m.netLock()
 	if err != nil {
@@ -619,6 +621,10 @@ func (m *Manager) RemoveStale(ctx context.Context, c docker.Container) (removed 
 			by = " by " + strings.Join(HoldLabels(holds), ", ")
 		}
 		return false, fmt.Errorf("session %q %w%s", name, ErrOffline, by)
+	}
+	// The session's next container gets its choices back.
+	if err := m.keepChoices(name, *cur); err != nil {
+		return false, err
 	}
 	if err := m.Docker.Remove(ctx, container, true); err != nil {
 		return false, err

@@ -160,6 +160,14 @@ func NetworkDir() string {
 	return filepath.Join(Dir(), "network")
 }
 
+// ChoicesDir returns the directory holding each session's policy choices,
+// such as its auto memory choice, so they outlive its container. It is kept
+// apart from SessionsDir's history directories, which are mounted into the
+// containers.
+func ChoicesDir() string {
+	return filepath.Join(Dir(), "choices")
+}
+
 // CopyDir returns the directory holding the per-sandbox locks that
 // serialize copies into each sandbox across safeclaw processes.
 func CopyDir() string {

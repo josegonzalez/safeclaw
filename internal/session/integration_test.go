@@ -673,6 +673,19 @@ func TestIntegrationMemory(t *testing.T) {
 	if got := settings(); !strings.Contains(got, `"autoMemoryEnabled": false`) {
 		t.Errorf("settings after reuse = %q", got)
 	}
+	// So does running it again after `safeclaw rm`.
+	if err := m.Delete(ctx, name, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Ensure(ctx, Options{Name: name, NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := settings(); !strings.Contains(got, `"autoMemoryEnabled": false`) {
+		t.Errorf("settings after rm and run = %q", got)
+	}
+	if c, err := d.InspectOne(ctx, container); err != nil || c == nil || !noMemoryOf(*c) || !secretsOf(*c).Equal(none) {
+		t.Errorf("container after rm and run = %+v, %v", c, err)
+	}
 	if _, err := m.Ensure(ctx, Options{Name: name, NoMemory: boolPtr(false), NoOpen: true}); err != nil {
 		t.Fatal(err)
 	}

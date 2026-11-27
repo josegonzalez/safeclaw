@@ -250,6 +250,9 @@ type Manager struct {
 	// NetworkDir holds the saved state of offline sessions. Defaults to
 	// config.NetworkDir().
 	NetworkDir string
+	// ChoicesDir holds each session's policy choices, kept so they outlive
+	// its container. Defaults to the choices directory next to SessionsDir.
+	ChoicesDir string
 	// CopyDir holds the per-sandbox locks that serialize copies into each
 	// sandbox. Defaults to config.CopyDir().
 	CopyDir string
@@ -500,7 +503,8 @@ type Options struct {
 	// container.
 	Variant string
 	// Secrets picks the secrets the session receives. Nil keeps an existing
-	// container's set, or gives a new one every secret. A different set
+	// container's set, or the set kept for a session whose container was
+	// removed, or gives a new session every secret. A different set
 	// recreates an existing container. Names it lists must exist.
 	Secrets *SecretSet
 	// HostIPC shares the docker host's IPC namespace and /dev/shm with the
@@ -510,8 +514,9 @@ type Options struct {
 	HostIPC *bool
 	// NoMemory turns Claude Code's auto memory off for the session when
 	// true, through a root-owned managed settings file, and back on when
-	// false. Nil keeps an existing container's choice, or leaves it on for a
-	// new one. A different choice recreates an existing container.
+	// false. Nil keeps an existing container's choice, or the choice kept
+	// for a session whose container was removed, or leaves it on for a new
+	// session. A different choice recreates an existing container.
 	NoMemory *bool
 	// FreshHistory moves the session's history directory aside, to
 	// NAME.old-TIMESTAMP next to it, so the new container starts with an
@@ -584,9 +589,22 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
+	// A session without a container gets back the choices its last one
+	// recorded, kept on the host when it was created or removed.
+	var kept *choices
+	if existing == nil {
+		if kept, err = m.readChoices(name); err != nil {
+			return nil, err
+		}
+	}
+
 	set := AllSecrets()
-	if existing != nil {
+	switch {
+	case existing != nil:
 		set = secretsOf(*existing)
+	case kept != nil:
+		// readChoices checked the names.
+		set, _ = kept.secretSet()
 	}
 	oldSet := set
 	secretsChanged := false
@@ -606,7 +624,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		hostIPC = *opts.HostIPC
 	}
 
-	noMemory := existing != nil && noMemoryOf(*existing)
+	noMemory := (existing != nil && noMemoryOf(*existing)) || (kept != nil && kept.NoMemory)
 	memoryChanged := false
 	if opts.NoMemory != nil {
 		memoryChanged = existing != nil && *opts.NoMemory != noMemory
@@ -721,6 +739,11 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		// The restored container keeps the recorded IPC choice, so one that
 		// shared the host's without opting in comes back private.
 		oldVariant, oldSet, oldHostIPC, oldNoMemory := variantOf(*existing), secretsOf(*existing), hostIPCOf(*existing), noMemoryOf(*existing)
+		// Kept first, so they outlive the container even if neither it nor
+		// its replacement can be created.
+		if err := m.keepChoices(name, *existing); err != nil {
+			return nil, err
+		}
 		if err := m.Docker.Remove(ctx, container, true); err != nil {
 			return nil, err
 		}
@@ -811,7 +834,16 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 				return nil, err
 			}
 		} else {
-			m.warnHistory(name, restore != nil, opts.Secrets != nil, secretsChanged, oldSet, set)
+			m.warnHistory(name, historyChoices{
+				recreated:      restore != nil,
+				kept:           kept != nil,
+				givenSecrets:   opts.Secrets != nil,
+				givenMemory:    opts.NoMemory != nil,
+				secretsChanged: secretsChanged,
+				oldSet:         oldSet,
+				set:            set,
+				noMemory:       noMemory,
+			})
 		}
 		m.printf("Creating container: %s\n", container)
 		if err := m.create(ctx, name, container, port, want, set, hostIPC, noMemory, volumes); err != nil {
@@ -832,6 +864,13 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		if err := m.removeState(name); err != nil {
 			return nil, err
 		}
+	}
+	// The container's labels hold the choices while it exists; the copy on
+	// the host gives them back to the next one if it is removed. A kept
+	// container's are kept too, so ones created before choices were kept
+	// on the host get them.
+	if err := m.writeChoices(name, newChoices(set, noMemory)); err != nil {
+		return nil, err
 	}
 	unlock()
 
@@ -957,24 +996,47 @@ func (m *Manager) hasHistory(name string) bool {
 	return err == nil
 }
 
+// historyChoices describe the choices a new container is created with,
+// for warnHistory.
+type historyChoices struct {
+	// recreated is set when the container replaces one this run removed.
+	recreated bool
+	// kept is set when the choices of the session's last container were
+	// kept on the host.
+	kept bool
+	// givenSecrets and givenMemory are set when this run picks the secrets
+	// or the auto memory choice.
+	givenSecrets, givenMemory bool
+	// secretsChanged is set when this run recreates the container with a
+	// different set of secrets.
+	secretsChanged bool
+	// oldSet is the set the history was written with, when it is known,
+	// and set the one the new container receives.
+	oldSet, set SecretSet
+	// noMemory is set when the new container's auto memory is off.
+	noMemory bool
+}
+
 // warnHistory warns when a new container reuses history, including the
 // transcripts and memory Claude Code reads, that an earlier container wrote
-// with a different or unknown set of secrets. recreated is set when the
-// container replaces one this run removed, and given when this run picks
-// the set.
-func (m *Manager) warnHistory(name string, recreated, given, secretsChanged bool, oldSet, set SecretSet) {
+// with a different or unknown set of secrets, or whose auto memory choice
+// is unknown.
+func (m *Manager) warnHistory(name string, c historyChoices) {
 	if !m.hasHistory(name) {
 		return
 	}
 	switch {
-	case secretsChanged:
-		m.printf("Warning: session %s keeps the history its previous container wrote with %s, including transcripts and memory that Claude Code reads, and now receives %s. Use --fresh-history to start with an empty one\n", name, oldSet, set)
-	case recreated:
+	case c.secretsChanged || (c.kept && c.givenSecrets && !c.set.Equal(c.oldSet)):
+		m.printf("Warning: session %s keeps the history its previous container wrote with %s, including transcripts and memory that Claude Code reads, and now receives %s. Use --fresh-history to start with an empty one\n", name, c.oldSet, c.set)
+	case c.recreated || c.kept:
 		// The secrets are the ones the history was written with.
-	case !given && set.All():
+	case !c.givenSecrets && c.set.All():
 		m.printf("Warning: session %s has history from an earlier container, but no secret selection is remembered, so it receives every secret. Use --secrets or --no-secrets to limit it, or --fresh-history to start with an empty history\n", name)
-	case given:
-		m.printf("Warning: session %s has history from an earlier container, including transcripts and memory that Claude Code reads, which may have been written with other secrets than %s. Use --fresh-history to start with an empty one\n", name, set)
+	case c.givenSecrets:
+		m.printf("Warning: session %s has history from an earlier container, including transcripts and memory that Claude Code reads, which may have been written with other secrets than %s. Use --fresh-history to start with an empty one\n", name, c.set)
+	}
+	if !c.recreated && !c.kept && !c.givenMemory && !c.noMemory {
+		m.printf("Warning: session %s has history from an earlier container, but no auto memory choice is remembered, so auto memory is on and Claude Code loads the MEMORY.md it left. Use --no-memory to keep it off, or --fresh-history to start with an empty history\n", name)
 	}
 }
 
@@ -1327,11 +1389,22 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 }
 
 // Delete removes a session container, its saved network state, and its
-// ttyd credential. Its history stays on the host.
+// ttyd credential. Its history stays on the host, and so do its secrets and
+// auto memory choices, which the next container created with its name gets
+// back.
 func (m *Manager) Delete(ctx context.Context, name string, force bool) error {
 	name = config.SessionName(name)
 	if err := ValidateName(name); err != nil {
 		return err
+	}
+	c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
+	if err != nil {
+		return err
+	}
+	if c != nil {
+		if err := m.keepChoices(name, *c); err != nil {
+			return err
+		}
 	}
 	if err := m.Docker.Remove(ctx, config.ContainerName(name), force); err != nil {
 		return err

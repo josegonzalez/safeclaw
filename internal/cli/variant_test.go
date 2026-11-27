@@ -97,8 +97,8 @@ func withFakes(t *testing.T, f *fakeImages, config string) *dockertest.Runner {
 	origDocker, origManager, origLoad := newDocker, newManager, loadVariants
 	t.Cleanup(func() { newDocker, newManager, loadVariants = origDocker, origManager, origLoad })
 	newDocker = func() *docker.Client { return r.Client() }
-	netDir := t.TempDir()
-	newManager = func() *session.Manager { return &session.Manager{NetworkDir: netDir} }
+	netDir, choicesDir := t.TempDir(), t.TempDir()
+	newManager = func() *session.Manager { return &session.Manager{NetworkDir: netDir, ChoicesDir: choicesDir} }
 	loadVariants = func() (*variant.Set, error) { return set, nil }
 	return r
 }
@@ -340,5 +340,31 @@ func TestReportStaleSkipsHeld(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".lock")); err != nil {
 		t.Errorf("recreate did not take the network lock: %v", err)
+	}
+}
+
+// build --recreate keeps the secrets and auto memory choices of the
+// sessions it removes, so running them again keeps them.
+func TestReportStaleKeepsChoices(t *testing.T) {
+	containers := `[
+		{"Id": "a1", "Name": "/safeclaw-a", "Image": "old", "Config": {"Labels": {"safeclaw.memory": "off", "safeclaw.secrets": ""}}, "HostConfig": {"NetworkMode": "bridge"}, "NetworkSettings": {"Networks": {"bridge": {}}}},
+		{"Id": "b1", "Name": "/safeclaw-b", "Image": "old", "Config": {"Labels": {"safeclaw.type": "sandbox"}}, "HostConfig": {"NetworkMode": "bridge"}, "NetworkSettings": {"Networks": {"bridge": {}}}}
+	]`
+	f := &fakeImages{images: map[string]string{"safeclaw": "new"}, containers: containers}
+	r := withFakes(t, f, "")
+	var out strings.Builder
+	if err := reportStale(t.Context(), r.Client(), &out, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.Find("rm -v -f safeclaw-a"); !ok {
+		t.Fatalf("not removed: %v", r.Commands())
+	}
+	dir := newManager().ChoicesDir
+	b, err := os.ReadFile(filepath.Join(dir, "a.json"))
+	if err != nil || string(b) != `{"secrets":[],"noMemory":true}`+"\n" {
+		t.Errorf("kept choices = %q, %v", b, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "b.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("sandbox choices kept: %v", err)
 	}
 }

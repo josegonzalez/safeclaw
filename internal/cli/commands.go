@@ -307,7 +307,7 @@ func newRemoveCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:               "rm NAME",
 		Aliases:           []string{"delete"},
-		Short:             "Delete a session container (history is kept on the host)",
+		Short:             "Delete a session container (history and its secrets and auto memory choices are kept on the host)",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessions,
 		RunE: func(cmd *cobra.Command, args []string) error {
