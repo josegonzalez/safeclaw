@@ -25,6 +25,7 @@ func TestCheckImageLabels(t *testing.T) {
 		{"", map[string]string{"safeclaw.type": "sandbox"}, false},
 		{"", map[string]string{"safeclaw.secrets": ""}, false},
 		{"", map[string]string{"safeclaw.ipc": "host"}, false},
+		{"", map[string]string{"safeclaw.memory": "off"}, false},
 		{"", map[string]string{"safeclaw.auth": "1"}, false},
 		{"", map[string]string{"safeclaw.future": "x"}, false},
 	} {

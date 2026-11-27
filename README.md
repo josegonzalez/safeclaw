@@ -199,6 +199,15 @@ Rebuilding containers or restarting sessions won't affect your history or memory
 safeclaw run -s work --no-secrets --fresh-history
 ```
 
+Claude Code loads `MEMORY.md` into every later conversation, including after the container is recreated, so a single prompt-injected turn can leave instructions that persist across rebuilds. Auto memory stays on by default. To turn it off for a session, pass `--no-memory` to `run` or `new`:
+
+```bash
+safeclaw run -s triage --no-memory          # auto memory off
+safeclaw run -s triage --no-memory=false    # back on
+```
+
+The choice is remembered for the session like its secrets, and changing it recreates the container. It is set in a root-owned managed settings file, so the agent can't turn it back on. Memory already in the history directory is kept but not loaded while auto memory is off. See [architecture](docs/architecture.md#auto-memory) for details.
+
 Image variants and their defaults are configured in `~/.config/safeclaw/config.yaml`, see [image variants](#image-variants).
 
 ## Authentication
@@ -250,7 +259,7 @@ The choice is remembered for the session like its secrets, and changing it recre
 |---------|-------------|
 | `safeclaw build` | Build the image from the build context embedded in the binary (`--context .` for a checkout), then each `--variant` and every variant already built. Warns about sessions on an older image; `--recreate` removes them, skipping offline sessions. |
 | `safeclaw pull` | Pull `ghcr.io/josegonzalez/safeclaw` for this version and tag it `safeclaw`, then fetch each `--variant` and every variant already present |
-| `safeclaw run` | Start/reuse a container, inject auth, start ttyd. `-s name` for named sessions, `-v` for volumes, `--variant` for an image variant, `--secrets`, `--no-secrets`, or `--all-secrets` to choose the secrets it receives, `--host-ipc` to share the host's IPC namespace, `--fresh-history` to move its history aside and start with an empty one, `-n` to skip opening the browser, `-q "question"` to start with a query. |
+| `safeclaw run` | Start/reuse a container, inject auth, start ttyd. `-s name` for named sessions, `-v` for volumes, `--variant` for an image variant, `--secrets`, `--no-secrets`, or `--all-secrets` to choose the secrets it receives, `--host-ipc` to share the host's IPC namespace, `--no-memory` to turn Claude Code's auto memory off, `--fresh-history` to move its history aside and start with an empty one, `-n` to skip opening the browser, `-q "question"` to start with a query. |
 | `safeclaw new` | Same as `run` but never prompts (used by the dashboard) |
 | `safeclaw dashboard` | Web dashboard for managing sessions |
 | `safeclaw auth login` | Sign in with `claude setup-token` in a container and store the token |

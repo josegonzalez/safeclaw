@@ -582,6 +582,76 @@ func TestIntegrationSecrets(t *testing.T) {
 	}
 }
 
+// TestIntegrationMemory turns a real session's auto memory off and back on,
+// and checks that the managed settings file holding the choice is
+// root-owned and that sclaw can't change, replace, or add to it.
+func TestIntegrationMemory(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+
+	dir := t.TempDir()
+	m := &Manager{
+		Docker:      d,
+		Secrets:     secrets.FileStore{Dir: filepath.Join(dir, ".secrets")},
+		SessionsDir: filepath.Join(dir, "sessions"),
+		TTYDDir:     filepath.Join(dir, "ttyd"),
+		NetworkDir:  filepath.Join(dir, "network"),
+		Out:         os.Stdout,
+		OpenBrowser: func(string) error { return nil },
+	}
+	name := fmt.Sprintf("itest-memory-%d", rand.IntN(1_000_000))
+	container := config.ContainerName(name)
+	t.Cleanup(func() { _ = d.Remove(ctx, container, true) })
+
+	none := NoSecrets()
+	settings := func() string {
+		t.Helper()
+		out, err := d.Exec(ctx, container, docker.ExecOptions{}, "cat", config.SessionSettingsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+
+	if _, err := m.Ensure(ctx, Options{Name: name, Secrets: &none, NoMemory: boolPtr(true), NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := settings(); !strings.Contains(got, `"autoMemoryEnabled": false`) || !strings.Contains(got, `"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"`) {
+		t.Errorf("off settings = %q", got)
+	}
+	for _, c := range []struct{ script, want string }{
+		{"stat -c '%U:%G %a' " + config.ManagedSettingsDir + " " + config.SessionSettingsFile, "root:root 755\nroot:root 644"},
+		{"echo '{}' > " + config.SessionSettingsFile + " 2>/dev/null || echo refused", "refused"},
+		{"mv " + config.SessionSettingsFile + " /tmp/s.json 2>/dev/null || echo refused", "refused"},
+		{"echo '{}' > " + config.ManagedSettingsDir + "/zz.json 2>/dev/null || echo refused", "refused"},
+	} {
+		out, err := d.Exec(ctx, container, docker.ExecOptions{}, "bash", "-c", c.script)
+		if got := strings.TrimSpace(string(out)); err != nil || got != c.want {
+			t.Errorf("%s = %q, %v; want %q", c.script, got, err, c.want)
+		}
+	}
+
+	// Reusing the session keeps it off; turning it back on recreates it.
+	if _, err := m.Ensure(ctx, Options{Name: name, NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := settings(); !strings.Contains(got, `"autoMemoryEnabled": false`) {
+		t.Errorf("settings after reuse = %q", got)
+	}
+	if _, err := m.Ensure(ctx, Options{Name: name, NoMemory: boolPtr(false), NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := settings(); got != "{}" {
+		t.Errorf("on settings = %q", got)
+	}
+	if c, err := d.InspectOne(ctx, container); err != nil || c == nil || noMemoryOf(*c) {
+		t.Errorf("container after turning memory on = %+v, %v", c, err)
+	}
+}
+
 // TestIntegrationNetwork takes a real session offline, checks its web
 // terminal is unreachable and that a restart keeps it offline, then brings
 // it back and checks docker published its port again.

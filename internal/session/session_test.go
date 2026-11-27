@@ -88,6 +88,8 @@ type world struct {
 	runErrs []runErr
 	// failDisconnect fails that many disconnects from each named network.
 	failDisconnect map[string]int
+	// failMemory fails writing the session's auto memory setting.
+	failMemory bool
 }
 
 type runErr struct {
@@ -312,6 +314,9 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 			}
 			return []byte("user\n"), nil
 		}
+		if strings.Contains(cmd, "managed-settings.d") && w.failMemory {
+			return nil, errors.New("read-only file system")
+		}
 		if strings.Contains(cmd, "capture-pane") && w.prompt {
 			return []byte("────\n❯ \n"), nil
 		}
@@ -489,7 +494,11 @@ func TestEnsureWritesLegacyConfig(t *testing.T) {
 	if !ok || !strings.Contains(git.String(), "git config --global user.name") || strings.Contains(git.String(), "credential") {
 		t.Errorf("legacy git config not written: %v", r.Commands())
 	}
-	if hasCall(r, "exec -i --user root") || hasCall(r, "exec --user root safeclaw-old /bin/sh -c umask 022") {
+	// Only the auto memory setting, which is not sclaw's, is written as root.
+	if slices.ContainsFunc(r.Commands(), func(c string) bool {
+		return (strings.HasPrefix(c, "exec -i --user root") || strings.HasPrefix(c, "exec --user root safeclaw-old /bin/sh -c umask 022")) &&
+			!strings.Contains(c, "/etc/claude-code/managed-settings.d/")
+	}) {
 		t.Errorf("wrote as root in a legacy container: %v", r.Commands())
 	}
 }
