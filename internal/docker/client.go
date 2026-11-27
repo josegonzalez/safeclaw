@@ -112,6 +112,17 @@ func (c Container) HostPort(containerPort int) int {
 	return 0
 }
 
+// HostIP returns the host address the given container port is published
+// on, "" when it is not published or docker reports none.
+func (c Container) HostIP(containerPort int) string {
+	for _, b := range c.HostConfig.PortBindings[fmt.Sprintf("%d/tcp", containerPort)] {
+		if p, err := strconv.Atoi(b.HostPort); err == nil && p > 0 {
+			return b.HostIP
+		}
+	}
+	return ""
+}
+
 // BindMounts returns "source:destination" for each bind mount, skipping any
 // whose destination is in skip.
 func (c Container) BindMounts(skip ...string) []string {

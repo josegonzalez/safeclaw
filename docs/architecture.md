@@ -10,12 +10,26 @@ Everything on the host is one Go binary, `safeclaw`. It talks to Docker by runni
 
 The user interacts with Claude Code through a browser, not a local terminal. This gives full access to the native Claude Code UI rather than building a custom one on top of the Agent SDK.
 
-- **ttyd** serves a web terminal over HTTP/WebSocket on port 7681 inside the container, published on `127.0.0.1` at the first free port from 7681 up
+- **ttyd** serves a web terminal over HTTP/WebSocket on port 7681 inside the container, published on `[::1]` at the first free port from 7681 up
 - **tmux** manages the Claude Code session inside the container (session `main`)
 - `safeclaw ttyd-wrapper` creates the tmux session and starts `claude --dangerously-skip-permissions` if it doesn't exist, then attaches
 - One port, one ttyd process, one tmux session per container
 
 Containers created from the upstream image don't contain the `safeclaw` binary, so `run` falls back to their `/home/sclaw/ttyd-wrapper.sh`.
+
+### Terminal credential
+
+The published port is not private to the session's owner: other session containers can reach it through the runtime's host gateway or the default bridge, and so can any local process or a browser page allowed to open a WebSocket to loopback. So ttyd runs with `-c` and `-O`:
+
+- `-c` requires a per-session credential, user `safeclaw` and a password made with `crypto/rand` the first time the session starts. It is kept in `~/.config/safeclaw/ttyd/NAME` (honoring `XDG_CONFIG_HOME`), a 0600 file in a 0700 directory, outside the history directory that is mounted into the container. It is never followed through a symlink, survives ttyd restarts and recreates, and is removed with `safeclaw rm`
+- The credential reaches ttyd without appearing on a host command line: it is written to `/home/sclaw/.ttyd-credential` in the container on stdin, and ttyd is started through `sh -c` reading that file
+- `-O` refuses WebSocket clients whose `Origin` doesn't match the `Host` they connected to
+
+ttyd checks the credential twice: as basic auth on every HTTP request and the WebSocket upgrade, and as the `AuthToken` in the WebSocket's first message, which its own page fetches from `/token`.
+
+`safeclaw run` prints the session URL with the credential in it, `http://safeclaw:PASSWORD@localhost:PORT`, and opens it, so the browser logs in to ttyd directly. `safeclaw ls` shows the URL without it. The dashboard never sends the browser to the session's port; it proxies the terminal instead, see [dashboard access](#dashboard-access).
+
+Sessions are published on `[::1]` rather than `127.0.0.1` because `127.0.0.1` is where the dashboard's cookie is set, and cookies aren't scoped by port. Code in a session runs as the same user as its ttyd, so it can replace ttyd with any server on that port; if the browser were ever sent to `http://127.0.0.1:PORT`, that server would get the dashboard's cookie. With the port on `[::1]`, nothing a session controls listens on `127.0.0.1`. URLs keep using `localhost`, which browsers resolve to `[::1]`, because ttyd's origin check doesn't match a bracketed IPv6 `Host`. Sessions created before this keep `127.0.0.1` until they are recreated, and `run` warns about them.
 
 ## Dashboard access
 
@@ -25,7 +39,14 @@ The dashboard listens on `127.0.0.1`, but that only keeps other machines out: co
 - API clients send `Authorization: Bearer TOKEN`, reading the token from `~/.config/safeclaw/dashboard/PORT.token` (honoring `XDG_CONFIG_HOME`). The directory is 0700 and the file 0600; it is replaced on start and removed on exit
 - Anything else, static files included, gets 401 before any session or docker call. Tokens are compared in constant time
 
-The cookie is only ever set for `127.0.0.1`, and the token URL on `localhost` or `::1` first redirects there. Cookies aren't scoped by port, and session terminals are served from inside their containers at `localhost:PORT`, so a cookie for `localhost` would be sent to every session's ttyd. Restarting the dashboard makes a new token, so open the newly printed URL again.
+The cookie is only ever set for `127.0.0.1`, and the token URL on `localhost` or `::1` first redirects there. Cookies aren't scoped by port, and session terminals are served from inside their containers at `localhost:PORT` and published on `[::1]`, so neither name a session can serve on gets the cookie. Restarting the dashboard makes a new token, so open the newly printed URL again.
+
+The dashboard shows each session's terminal through itself rather than framing ttyd:
+
+- `GET /sessions/NAME/terminal` is the dashboard's own page: vendored xterm.js and the client in `static/app.js`, with a `Content-Security-Policy` allowing only the dashboard's own scripts and connections. The iframe and the `open` link point at it
+- Its WebSocket, `GET /sessions/NAME/terminal/ws`, is behind the token like every route, and only accepts an `Origin` equal to the dashboard's own, since other pages on `127.0.0.1` are the same site and get the SameSite cookie. The dashboard opens a new WebSocket to the session's published port, so the browser's cookie and `Authorization` header never reach it, and adds ttyd's credential as basic auth and as the first message's `AuthToken`, sending `localhost:PORT` as the `Host` and `Origin` so `-O` passes. Then it relays messages both ways
+
+Nothing the session's port returns is ever served as a page: only the terminal bytes on the WebSocket come from ttyd, and xterm.js renders them as text. A session that replaced its ttyd therefore can't run script on the dashboard's origin, which would have the dashboard's full authority. Terminal links open in a new tab, except links to the dashboard's own host.
 
 The `Host` check (against DNS rebinding) and `http.CrossOriginProtection` (against other websites driving the dashboard from your browser) still apply on top of the token.
 
@@ -34,11 +55,11 @@ The `Host` check (against DNS rebinding) and `http.CrossOriginProtection` (again
 `safeclaw run` (and the dashboard's create and start) all go through the same code path:
 
 1. Pick the [image variant](#image-variants) and check its image exists, pick the [secrets](#choosing-secrets) the session receives, then check that the Claude token is present if the session receives it (prompting for it only in `run`) and that every listed secret exists
-2. Reuse the container's existing port, or pick the lowest port no `safeclaw-*` container reserves and nothing on the host is listening on
+2. Reuse the container's existing port, or pick the lowest port no `safeclaw-*` container reserves and nothing on the host is listening on, on `[::1]` or `127.0.0.1`
 3. Create, start, or refresh the container. With `-v`, a `--variant` other than the container's, a different set of secrets, or a different [`--host-ipc`](#ipc-namespace) choice, an existing container is recreated, keeping its port and whichever of its mount, variant, secrets, and IPC choice were not given again. Every volume is checked before the old container is removed, and if the new one can't be created, the old one is created again with its port, mounts, variant, secrets, and IPC choice, so a failed recreate never loses the session's secret set. A running container has ttyd and tmux restarted so new env vars take effect. An [offline](#offline-sessions) session is never recreated, and starting it keeps it offline
 4. Write `/home/sclaw/.env` from the secrets the session receives
 5. Configure git from the GitHub account if the session receives `GH_TOKEN`
-6. Start ttyd, and with `-q`, wait for Claude Code's input prompt before sending the query
+6. Start ttyd with the session's [terminal credential](#terminal-credential), and with `-q`, wait for Claude Code's input prompt before sending the query
 
 ### IPC namespace
 

@@ -298,6 +298,7 @@ func TestContainerCannotCreateSession(t *testing.T) {
 		Docker:      r.Client(),
 		Secrets:     secrets.FileStore{Dir: filepath.Join(dir, "secrets")},
 		SessionsDir: filepath.Join(dir, "sessions"),
+		TTYDDir:     filepath.Join(dir, "ttyd"),
 		NetworkDir:  filepath.Join(dir, "network"),
 		CopyDir:     filepath.Join(dir, "copy"),
 		Out:         io.Discard,

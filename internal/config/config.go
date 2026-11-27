@@ -31,6 +31,11 @@ const (
 	LegacyWrapper = "/home/sclaw/ttyd-wrapper.sh"
 	// TmuxSession is the tmux session name Claude Code runs in.
 	TmuxSession = "main"
+	// TTYDCredentialFile is where the session's ttyd credential is written
+	// inside the container, for ttyd to read at start.
+	TTYDCredentialFile = "/home/sclaw/.ttyd-credential"
+	// TTYDUser is the user name of every session's ttyd credential.
+	TTYDUser = "safeclaw"
 
 	// LabelType is the container label that records a session's type.
 	// Containers without it are interactive sessions.
@@ -113,6 +118,12 @@ func NetworkDir() string {
 // into sandboxes across safeclaw processes.
 func CopyDir() string {
 	return filepath.Join(Dir(), "copy")
+}
+
+// TTYDDir returns the directory holding each session's ttyd credential. It
+// is kept apart from SessionsDir, which is mounted into the containers.
+func TTYDDir() string {
+	return filepath.Join(Dir(), "ttyd")
 }
 
 // DashboardDir returns the directory holding the dashboard's API tokens.

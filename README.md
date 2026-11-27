@@ -45,7 +45,7 @@ safeclaw run -s work        # safeclaw-work on the next available port
 safeclaw run -s research    # safeclaw-research on the next available port
 ```
 
-On first run, `safeclaw run` prompts you to set up authentication tokens, offering to sign in to Claude Code for you. It then starts a web terminal at http://localhost:7681 and opens it in your browser.
+On first run, `safeclaw run` prompts you to set up authentication tokens, offering to sign in to Claude Code for you. It then starts a web terminal at http://localhost:7681 and opens it in your browser. The terminal needs a credential made for each session, so the printed URL carries it, like `http://safeclaw:PASSWORD@localhost:7681`; the dashboard adds it for you.
 
 ## Dashboard
 

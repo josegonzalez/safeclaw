@@ -1,0 +1,17 @@
+{{define "terminal"}}<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>SafeClaw - {{.Name}}</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/static/xterm/xterm.css">
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/xterm/xterm.min.js" defer></script>
+    <script src="/static/xterm/addon-fit.min.js" defer></script>
+    <script src="/static/app.js" defer></script>
+</head>
+<body class="terminal-page">
+    <div id="terminal" data-terminal="/sessions/{{.Name}}/terminal/ws"></div>
+</body>
+</html>
+{{end}}

@@ -21,9 +21,12 @@ import (
 type fakeContainer struct {
 	Running bool
 	Port    int
-	Mounts  []string // source:destination bind mounts, or a bare anonymous volume path
-	Image   string
-	Labels  map[string]string
+	// HostIP is the address Port is published on. Defaults to 127.0.0.1,
+	// as for containers created before terminals moved to [::1].
+	HostIP string
+	Mounts []string // source:destination bind mounts, or a bare anonymous volume path
+	Image  string
+	Labels map[string]string
 	// RunImage is the image name the container was run from.
 	RunImage string
 	// Memory, NanoCPUs, and PidsLimit are the limits docker reports.
@@ -98,7 +101,11 @@ func (w *world) inspectJSON(names []string) []byte {
 		}
 		bindings := map[string]any{}
 		if c.Port > 0 {
-			bindings["7681/tcp"] = []map[string]string{{"HostIp": "127.0.0.1", "HostPort": fmt.Sprint(c.Port)}}
+			ip := c.HostIP
+			if ip == "" {
+				ip = "127.0.0.1"
+			}
+			bindings["7681/tcp"] = []map[string]string{{"HostIp": ip, "HostPort": fmt.Sprint(c.Port)}}
 		}
 		status := "exited"
 		if c.Running {
@@ -159,6 +166,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 	case args[0] == "run":
 		var name string
 		var port int
+		hostIP := ""
 		var mounts []string
 		var autoRemove bool
 		var memory, cpus, pids int64
@@ -179,7 +187,9 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 				k, v, _ := strings.Cut(args[i+1], "=")
 				labels[k] = v
 			case "-p":
-				_, _ = fmt.Sscanf(args[i+1], "127.0.0.1:%d:7681", &port)
+				if _, err := fmt.Sscanf(args[i+1], "[::1]:%d:7681", &port); err == nil {
+					hostIP = "::1"
+				}
 			case "-v":
 				mounts = append(mounts, args[i+1])
 			case "--memory":
@@ -210,7 +220,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 			}
 		}
 		w.runs++
-		w.containers[name] = &fakeContainer{Running: fail.err == nil, Port: port, Mounts: mounts, Image: id, RunImage: image, Labels: labels, AutoRemove: autoRemove,
+		w.containers[name] = &fakeContainer{Running: fail.err == nil, Port: port, HostIP: hostIP, Mounts: mounts, Image: id, RunImage: image, Labels: labels, AutoRemove: autoRemove,
 			Memory: memory, NanoCPUs: cpus, PidsLimit: pids, ID: fmt.Sprintf("id-%s-%d", name, w.runs), NetworkMode: mode, IpcMode: ipc, Offline: mode == "none"}
 		return []byte("id\n"), fail.err
 	case args[0] == "rm":
@@ -279,6 +289,7 @@ func newTestManager(t *testing.T, w *world) (*Manager, *dockertest.Runner) {
 		Docker:        r.Client(),
 		Secrets:       store,
 		SessionsDir:   filepath.Join(dir, "sessions"),
+		TTYDDir:       filepath.Join(dir, "ttyd"),
 		NetworkDir:    filepath.Join(dir, "network"),
 		CopyDir:       filepath.Join(dir, "copy"),
 		PortFree:      func(int) bool { return true },
@@ -307,14 +318,18 @@ func TestEnsureCreatesContainer(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 7681 is reserved by a stopped container, 7682 by a running one.
-	if res.Port != 7683 || res.URL != "http://localhost:7683" || res.Container != "safeclaw-work" {
+	cred, err := m.Credential("work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Port != 7683 || res.URL != "http://safeclaw:"+cred.Password+"@localhost:7683" || res.Container != "safeclaw-work" {
 		t.Errorf("result = %+v", res)
 	}
 	run, ok := r.Find("run ")
 	if !ok {
 		t.Fatal("no docker run")
 	}
-	want := "run -d --name safeclaw-work -p 127.0.0.1:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects safeclaw sleep infinity"
+	want := "run -d --name safeclaw-work -p [::1]:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects safeclaw sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -334,7 +349,7 @@ func TestEnsureCreatesContainer(t *testing.T) {
 			t.Errorf("secret leaked into argv: %q", c)
 		}
 	}
-	if !hasCall(r, "exec -d safeclaw-work ttyd -W -t titleFixed=SafeClaw - work -p 7681 safeclaw ttyd-wrapper") {
+	if !hasCall(r, `exec -d safeclaw-work sh -c exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O -t titleFixed=SafeClaw - work -p 7681 safeclaw ttyd-wrapper`) {
 		t.Errorf("ttyd not started natively: %v", r.Commands())
 	}
 	if hasCall(r, "exec safeclaw-work bash -c") {
@@ -364,7 +379,7 @@ func TestEnsureReusesRunningContainer(t *testing.T) {
 		t.Error("should not create or start")
 	}
 	// Upstream image: falls back to the legacy wrapper script.
-	if !hasCall(r, "exec -d safeclaw-default ttyd -W -t titleFixed=SafeClaw - default -p 7681 /home/sclaw/ttyd-wrapper.sh") {
+	if !hasCall(r, `exec -d safeclaw-default sh -c exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O -t titleFixed=SafeClaw - default -p 7681 /home/sclaw/ttyd-wrapper.sh`) {
 		t.Errorf("legacy wrapper not used: %v", r.Commands())
 	}
 }

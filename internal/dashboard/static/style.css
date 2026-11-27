@@ -486,3 +486,15 @@ form.htmx-request .modal-cancel {
     opacity: 0.5;
     pointer-events: none;
 }
+
+/* Session terminal page, shown in a frame or its own tab */
+body.terminal-page {
+    padding: 0;
+    background: #000;
+    height: 100vh;
+    overflow: hidden;
+}
+#terminal {
+    height: 100%;
+    padding: 4px;
+}

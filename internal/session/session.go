@@ -129,6 +129,9 @@ type Manager struct {
 	// CopyDir holds the lock that serializes copies into sandboxes.
 	// Defaults to config.CopyDir().
 	CopyDir string
+	// TTYDDir holds each session's ttyd credential. Defaults to
+	// config.TTYDDir().
+	TTYDDir string
 	// Out receives progress messages. Defaults to io.Discard.
 	Out io.Writer
 	// Prompter is used for interactive runs.
@@ -162,6 +165,7 @@ func NewManager(out io.Writer) *Manager {
 		SessionsDir: config.SessionsDir(),
 		NetworkDir:  config.NetworkDir(),
 		CopyDir:     config.CopyDir(),
+		TTYDDir:     config.TTYDDir(),
 		Out:         out,
 		LoadVariants: func() (*variant.Set, error) {
 			return variant.Load(config.File())
@@ -258,11 +262,15 @@ func (m *Manager) portFree(port int) bool {
 	if m.PortFree != nil {
 		return m.PortFree(port)
 	}
-	l, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(port))
-	if err != nil {
-		return false
+	// Sessions are published on PublishHost, but browsers may try either
+	// address for localhost, so both must be free.
+	for _, host := range []string{PublishHost, legacyPublishHost} {
+		l, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+		if err != nil {
+			return false
+		}
+		_ = l.Close()
 	}
-	_ = l.Close()
 	return true
 }
 
@@ -320,13 +328,15 @@ type Result struct {
 	Name      string
 	Container string
 	Port      int
-	URL       string
+	// URL is the session URL with its ttyd credential in it.
+	URL string
 	// Offline is set when the session is disconnected from every network,
 	// so its web terminal is unreachable.
 	Offline bool
 }
 
-// URLFor returns the session URL for a host port.
+// URLFor returns the session URL for a host port, without the credential
+// ttyd requires; see URLWithCredential.
 func URLFor(port int) string {
 	return fmt.Sprintf("http://localhost:%d", port)
 }
@@ -475,6 +485,9 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if existing != nil && !hostIPC && sharesHostIPC(*existing) {
 		m.printf("Warning: session %s shares the host's IPC namespace because it was created before private namespaces became the default. Run with --host-ipc=false to recreate it with a private one, or --host-ipc to keep sharing it\n", name)
 	}
+	if existing != nil && existing.HostPort(config.TTYDPort) > 0 && publishedOnCookieHost(*existing) {
+		m.printf("Warning: session %s publishes its terminal on 127.0.0.1, the dashboard's cookie host, because it was created before terminals moved to [::1]. Recreate it, for example with -v or `safeclaw rm`, to move it\n", name)
+	}
 
 	if port == 0 {
 		port, err = m.allocatePort(ctx)
@@ -534,11 +547,12 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	native := m.hasNativeWrapper(ctx, container)
-	if err := m.startTTYD(ctx, name, container, native); err != nil {
+	cred, err := m.startTTYD(ctx, name, container, native)
+	if err != nil {
 		return nil, err
 	}
 
-	res := &Result{Name: name, Container: container, Port: port, URL: URLFor(port), Offline: offline}
+	res := &Result{Name: name, Container: container, Port: port, URL: URLWithCredential(port, cred), Offline: offline}
 	m.printf("\nSafeClaw is running at: %s\n", res.URL)
 	if offline {
 		m.printf("Warning: this session is offline, so its web terminal is unreachable until: safeclaw net on %s\n", name)
@@ -593,6 +607,13 @@ func (m *Manager) ensureTokens(interactive bool, set SecretSet) error {
 // allocatePort returns the lowest port from FirstSessionPort that no
 // safeclaw container has reserved and that is free on the host.
 func (m *Manager) allocatePort(ctx context.Context) (int, error) {
+	if m.PortFree == nil {
+		l, err := net.Listen("tcp", net.JoinHostPort(PublishHost, "0"))
+		if err != nil {
+			return 0, fmt.Errorf("session terminals are published on [%s], which this host can't listen on: %w", PublishHost, err)
+		}
+		_ = l.Close()
+	}
 	cs, err := m.Docker.List(ctx, config.ContainerPrefix)
 	if err != nil {
 		return 0, err
@@ -633,9 +654,9 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 	args = append(args, ipcArgs(hostIPC)...)
 	args = append(args,
 		"--name", container,
-		"-p", fmt.Sprintf("127.0.0.1:%d:%d", port, config.TTYDPort),
-		"-v", dataDir+":"+config.ProjectsMount,
 	)
+	args = append(args, publishArgs(port)...)
+	args = append(args, "-v", dataDir+":"+config.ProjectsMount)
 	args = append(args, variantArgs(variantName)...)
 	args = append(args, secretArgs(set)...)
 	for _, volume := range volumes {
@@ -690,17 +711,6 @@ func (m *Manager) writeEnv(ctx context.Context, container string, set SecretSet)
 func (m *Manager) hasNativeWrapper(ctx context.Context, container string) bool {
 	_, err := m.Docker.Exec(ctx, container, docker.ExecOptions{}, "sh", "-c", "command -v safeclaw")
 	return err == nil
-}
-
-func (m *Manager) startTTYD(ctx context.Context, name, container string, native bool) error {
-	args := []string{"ttyd", "-W", "-t", "titleFixed=SafeClaw - " + name, "-p", strconv.Itoa(config.TTYDPort)}
-	if native {
-		args = append(args, "safeclaw", "ttyd-wrapper")
-	} else {
-		args = append(args, config.LegacyWrapper)
-	}
-	_, err := m.Docker.Exec(ctx, container, docker.ExecOptions{Detach: true}, args...)
-	return err
 }
 
 func (m *Manager) sendQuery(ctx context.Context, container string, native bool, query string) error {
@@ -869,8 +879,8 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 	return m.Docker.Stop(ctx, config.ContainerName(name), 1)
 }
 
-// Delete removes a session container and its saved network state. Its
-// history stays on the host.
+// Delete removes a session container, its saved network state, and its
+// ttyd credential. Its history stays on the host.
 func (m *Manager) Delete(ctx context.Context, name string, force bool) error {
 	if err := m.Docker.Remove(ctx, config.ContainerName(name), force); err != nil {
 		return err
@@ -880,5 +890,8 @@ func (m *Manager) Delete(ctx context.Context, name string, force bool) error {
 		return err
 	}
 	defer unlock()
-	return m.removeState(config.SessionName(name))
+	if err := m.removeState(config.SessionName(name)); err != nil {
+		return err
+	}
+	return m.removeCredential(name)
 }
