@@ -84,8 +84,10 @@ const (
 	LabelBracketedHostTTYD = "io.github.josegonzalez.safeclaw.ttyd-bracketed-host"
 	// LabelCredentialFileTTYD is the image label, copied onto its
 	// containers, marking an image whose ttyd reads its credential from a
-	// file with --credential-file. Containers without it get the credential
-	// on ttyd's command line.
+	// file with --credential-file. Sessions are not created from an image
+	// without it, and containers without it are recreated from an image
+	// with it, or refused, so no ttyd gets the credential on its command
+	// line.
 	LabelCredentialFileTTYD = "io.github.josegonzalez.safeclaw.ttyd-credential-file"
 
 	// LabelSecrets is the container label that records which secrets an
