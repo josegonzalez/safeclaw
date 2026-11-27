@@ -225,6 +225,8 @@ func reportStale(ctx context.Context, d *docker.Client, out io.Writer, recreate 
 			switch {
 			case errors.Is(err, session.ErrOffline):
 				fmt.Fprintf(out, "Skipping offline session: %s (run `safeclaw net on %s`, then rebuild with --recreate)\n", name, name)
+			case errors.Is(err, session.ErrUnreadableState):
+				fmt.Fprintf(out, "Skipping session: %v\n", err)
 			case err != nil:
 				return err
 			case removed:
@@ -241,7 +243,7 @@ func reportStale(ctx context.Context, d *docker.Client, out io.Writer, recreate 
 			sandboxes = true
 			name += " (sandbox)"
 		}
-		if m.OfflineOrHeld(c) {
+		if held, _ := m.OfflineOrHeld(c); held {
 			name += " (offline)"
 		}
 		fmt.Fprintf(out, "  %s\n", name)

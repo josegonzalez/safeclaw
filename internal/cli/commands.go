@@ -303,7 +303,7 @@ func newStopCommand() *cobra.Command {
 }
 
 func newRemoveCommand() *cobra.Command {
-	var force bool
+	var opts session.DeleteOptions
 	cmd := &cobra.Command{
 		Use:               "rm NAME",
 		Aliases:           []string{"delete"},
@@ -314,14 +314,15 @@ func newRemoveCommand() *cobra.Command {
 			if err := resolveArg(cmd, args); err != nil {
 				return err
 			}
-			m := session.NewManager(nil)
+			m := newManager()
 			if err := m.RequireType(cmd.Context(), args[0], config.TypeSession); err != nil {
 				return err
 			}
-			return m.Delete(cmd.Context(), args[0], force)
+			return m.DeleteWith(cmd.Context(), args[0], opts)
 		},
 	}
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "remove a running session too")
+	cmd.Flags().BoolVarP(&opts.Force, "force", "f", false, "remove a running session too")
+	cmd.Flags().BoolVar(&opts.ReleaseHolds, "release-holds", false, "remove a session held offline too, releasing every hold")
 	return cmd
 }
 

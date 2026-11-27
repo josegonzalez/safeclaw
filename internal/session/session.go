@@ -683,8 +683,15 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Volume != "" {
 		volumes = []string{opts.Volume}
 	}
-	// A held session stays offline even if something reconnected it.
-	offline := existing != nil && (Offline(*existing) || len(m.holdsFor(name, *existing)) > 0)
+	// A held session stays offline even if something reconnected it. One
+	// whose saved state can't be read may be held, so it is refused rather
+	// than started or recreated online.
+	offline := false
+	if existing != nil {
+		if offline, err = m.OfflineOrHeld(*existing); err != nil {
+			return nil, err
+		}
+	}
 	// restore recreates the removed container if its replacement can't be
 	// created, so a failed recreate never leaves the session without its
 	// container and the secret set recorded in its label.
@@ -1349,7 +1356,7 @@ func (m *Manager) List(ctx context.Context) ([]Session, error) {
 			AutoRemove: c.HostConfig.AutoRemove,
 			Secrets:    sessionSecrets(c),
 			Network:    NetworkStatus(c),
-			Holds:      m.holdsFor(config.SessionName(name), c),
+			Holds:      m.listedHolds(config.SessionName(name), c),
 		}
 		if mounts := c.BindMounts(config.ProjectsMount); len(mounts) > 0 {
 			s.Volume = strings.Join(mounts, ", ")
@@ -1389,25 +1396,32 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 	return m.Docker.Stop(ctx, config.ContainerName(name), 1)
 }
 
-// Delete removes a session container, its saved network state, and its
+// DeleteOptions configures DeleteWith.
+type DeleteOptions struct {
+	// Force removes a running container too.
+	Force bool
+	// ReleaseHolds removes a session held offline, releasing every hold,
+	// and one whose saved state can't be read.
+	ReleaseHolds bool
+}
+
+// Delete removes a session container, as DeleteWith does without releasing
+// holds.
+func (m *Manager) Delete(ctx context.Context, name string, force bool) error {
+	return m.DeleteWith(ctx, name, DeleteOptions{Force: force})
+}
+
+// DeleteWith removes a session container, its saved network state, and its
 // ttyd credential. Its history stays on the host, and so do its secrets and
 // auto memory choices, which the next container created with its name gets
-// back.
-func (m *Manager) Delete(ctx context.Context, name string, force bool) error {
+// back. A session held offline is refused with an error wrapping ErrHeld
+// that names its holders, unless opts.ReleaseHolds is set, so removing it
+// can't take it from a job that relies on it being offline. It all happens
+// under the network lock, so a container created and taken offline under
+// the same name meanwhile keeps its hold.
+func (m *Manager) DeleteWith(ctx context.Context, name string, opts DeleteOptions) error {
 	name = config.SessionName(name)
 	if err := ValidateName(name); err != nil {
-		return err
-	}
-	c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
-	if err != nil {
-		return err
-	}
-	if c != nil {
-		if err := m.keepChoices(name, *c); err != nil {
-			return err
-		}
-	}
-	if err := m.Docker.Remove(ctx, config.ContainerName(name), force); err != nil {
 		return err
 	}
 	unlock, err := m.netLock()
@@ -1415,7 +1429,29 @@ func (m *Manager) Delete(ctx context.Context, name string, force bool) error {
 		return err
 	}
 	defer unlock()
-	if err := m.removeState(name); err != nil {
+
+	c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
+	if err != nil {
+		return err
+	}
+	if c == nil {
+		// docker reports the missing container.
+		return m.Docker.Remove(ctx, config.ContainerName(name), opts.Force)
+	}
+	holds, err := m.holdsFor(name, *c)
+	if err != nil && !opts.ReleaseHolds {
+		return err
+	}
+	if len(holds) > 0 && !opts.ReleaseHolds {
+		return fmt.Errorf("session %q %w by %s: release the holds with `safeclaw net on %s --owner OWNER` first, or remove it anyway with `safeclaw rm --release-holds %s`", name, ErrHeld, strings.Join(HoldLabels(holds), ", "), name, name)
+	}
+	if err := m.keepChoices(name, *c); err != nil {
+		return err
+	}
+	if err := m.Docker.Remove(ctx, config.ContainerName(name), opts.Force); err != nil {
+		return err
+	}
+	if err := m.removeRemovedState(ctx, name, opts.ReleaseHolds); err != nil {
 		return err
 	}
 	return m.removeCredential(name)

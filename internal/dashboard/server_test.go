@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,6 +26,8 @@ type fakeSessions struct {
 	stopped  []string
 	deleted  []string
 	ensureFn func(session.Options) (*session.Result, error)
+	// deleteErr fails Delete.
+	deleteErr error
 	// variants is returned by Variants; nil means the built-ins.
 	variants   *variant.Set
 	variantErr error
@@ -86,6 +89,9 @@ func (f *fakeSessions) Stop(_ context.Context, n string) error {
 }
 
 func (f *fakeSessions) Delete(_ context.Context, n string, _ bool) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
 	f.deleted = append(f.deleted, n)
 	return nil
 }
@@ -359,6 +365,31 @@ func TestCrossOriginAndHostProtection(t *testing.T) {
 	rec = do(h, "POST", "/sessions/work/stop", url.Values{"confirm": {"1"}}, map[string]string{"Sec-Fetch-Site": "same-origin"})
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("same-origin POST blocked: %d", rec.Code)
+	}
+}
+
+// Deleting a session held offline is refused with a conflict that names
+// its holders, from the dashboard and the API alike.
+func TestDeleteHeld(t *testing.T) {
+	f := &fakeSessions{list: sampleSessions(), deleteErr: fmt.Errorf(`session "old" %w by triage: release the holds first`, session.ErrHeld)}
+	h := newTestServer(t, f)
+
+	rec := do(h, "POST", "/sessions/old/delete", url.Values{"confirm": {"1"}}, nil)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "held offline by triage") {
+		t.Errorf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+
+	req := httptest.NewRequest("POST", "http://localhost:7680/api/delete", strings.NewReader(`{"name":"old"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var r apiResult
+	_ = json.Unmarshal(rec.Body.Bytes(), &r)
+	if rec.Code != http.StatusConflict || r.Success || !strings.Contains(r.Error, "held offline by triage") {
+		t.Errorf("api delete: %d %+v", rec.Code, r)
+	}
+	if len(f.deleted) != 0 {
+		t.Errorf("deleted = %v", f.deleted)
 	}
 }
 

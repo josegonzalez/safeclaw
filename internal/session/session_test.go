@@ -102,6 +102,8 @@ type world struct {
 	failDisconnect map[string]int
 	// failMemory fails writing the session's auto memory setting.
 	failMemory bool
+	// onRemove runs after docker rm removes the named container.
+	onRemove func(name string)
 }
 
 type runErr struct {
@@ -307,6 +309,9 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		return []byte("id\n"), fail.err
 	case args[0] == "rm":
 		delete(w.containers, args[len(args)-1])
+		if w.onRemove != nil {
+			w.onRemove(args[len(args)-1])
+		}
 	case args[0] == "start":
 		c := w.containers[args[1]]
 		c.Running = true

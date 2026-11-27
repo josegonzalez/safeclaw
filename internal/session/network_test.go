@@ -282,14 +282,32 @@ func TestEnsureCreateRemovesStaleState(t *testing.T) {
 	}
 }
 
-func TestDeleteRemovesState(t *testing.T) {
+func TestDeleteRefusesHeld(t *testing.T) {
 	ctx := context.Background()
-	m, _ := newTestManager(t, netWorld(&fakeContainer{Image: "img"}))
+	w := netWorld(&fakeContainer{Image: "img"})
+	m, r := newTestManager(t, w)
+	if _, err := m.NetOff(ctx, "n", NetOffOptions{Owner: "triage"}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := m.NetOff(ctx, "n", NetOffOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Delete(ctx, "n", true); err != nil {
+	err := m.Delete(ctx, "n", true)
+	if !errors.Is(err, ErrHeld) || !strings.Contains(err.Error(), "by triage, unnamed") || !strings.Contains(err.Error(), "--release-holds") {
+		t.Fatalf("err = %v, want it held naming the holders", err)
+	}
+	if hasCall(r, "rm ") || w.containers["safeclaw-n"] == nil {
+		t.Error("held session removed")
+	}
+	if st, err := m.readState("n"); err != nil || st == nil || len(st.Holds) != 2 {
+		t.Errorf("state = %+v, %v; want the holds kept", st, err)
+	}
+
+	if err := m.DeleteWith(ctx, "n", DeleteOptions{Force: true, ReleaseHolds: true}); err != nil {
 		t.Fatal(err)
+	}
+	if w.containers["safeclaw-n"] != nil {
+		t.Error("session not removed")
 	}
 	if _, err := os.Stat(m.statePath("n")); !os.IsNotExist(err) {
 		t.Errorf("state kept: %v", err)
@@ -297,6 +315,167 @@ func TestDeleteRemovesState(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(m.NetworkDir, ".lock")); err != nil {
 		t.Errorf("lock file should stay: %v", err)
 	}
+}
+
+// A session offline without holds, for example after a raw docker network
+// disconnect, is removed as before, along with any state an earlier
+// container left.
+func TestDeleteOfflineWithoutHolds(t *testing.T) {
+	ctx := context.Background()
+	w := netWorld(&fakeContainer{Image: "img", Offline: true})
+	m, _ := newTestManager(t, w)
+	if err := m.writeState("n", &netState{ContainerID: "earlier", Holds: []Hold{{Owner: "a"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Delete(ctx, "n", true); err != nil {
+		t.Fatal(err)
+	}
+	if w.containers["safeclaw-n"] != nil {
+		t.Error("session not removed")
+	}
+	if _, err := os.Stat(m.statePath("n")); !os.IsNotExist(err) {
+		t.Errorf("stale state kept: %v", err)
+	}
+}
+
+// Delete holds the network lock while it removes the container, so no
+// Ensure or net off can create or take offline a container with the name
+// in between, and it keeps state that belongs to a container that has the
+// name once it is removed.
+func TestDeleteKeepsNewContainersState(t *testing.T) {
+	ctx := context.Background()
+	w := netWorld(&fakeContainer{Image: "img"})
+	m, _ := newTestManager(t, w)
+	locked := false
+	w.onRemove = func(name string) {
+		probe, cancel := context.WithTimeout(ctx, 3*lockRetry)
+		defer cancel()
+		unlock, err := lockFileCtx(probe, m.netDir(), ".lock")
+		if err == nil {
+			unlock()
+		}
+		locked = errors.Is(err, context.DeadlineExceeded)
+		// Something outside safeclaw creates a container with the name,
+		// whose state is then written.
+		w.containers[name] = &fakeContainer{Image: "img", ID: "c2"}
+		if err := m.writeState("n", &netState{ContainerID: "c2", Holds: []Hold{{Owner: "b"}}}); err != nil {
+			t.Error(err)
+		}
+	}
+	if err := m.Delete(ctx, "n", true); err != nil {
+		t.Fatal(err)
+	}
+	if !locked {
+		t.Error("removed without the network lock")
+	}
+	st, err := m.readState("n")
+	if err != nil || st == nil || st.ContainerID != "c2" || len(st.Holds) != 1 {
+		t.Errorf("state = %+v, %v; want the new container's kept", st, err)
+	}
+}
+
+// Unreadable state fails closed: the session may be held, so it is not
+// removed, recreated, started, relayed, or removed as stale, and listings
+// show it held by unknown owners.
+func TestUnreadableStateFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	c := &fakeContainer{Running: true, Port: 7681, Image: "img"}
+	w := netWorld(c)
+	m, r := newTestManager(t, w)
+	if _, err := m.Ensure(ctx, Options{Name: "n", NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m.statePath("n"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	isHeld := func(what string, err error) {
+		t.Helper()
+		if !errors.Is(err, ErrUnreadableState) || !strings.Contains(err.Error(), m.statePath("n")) {
+			t.Errorf("%s: err = %v, want it held naming the state file", what, err)
+		}
+	}
+
+	held, err := m.OfflineOrHeld(*mustInspect(t, m, "safeclaw-n"))
+	if !held {
+		t.Error("OfflineOrHeld = false")
+	}
+	isHeld("OfflineOrHeld", err)
+	_, err = m.NetOff(ctx, "n", NetOffOptions{})
+	isHeld("net off", err)
+	_, err = m.NetOn(ctx, "n", NetOnOptions{Force: true})
+	isHeld("net on", err)
+
+	r.Calls = nil
+	_, err = m.Ensure(ctx, Options{Name: "n", NoOpen: true})
+	isHeld("run", err)
+	_, err = m.Ensure(ctx, Options{Name: "n", NoOpen: true, Volume: t.TempDir() + ":/home/sclaw/p"})
+	isHeld("recreate", err)
+	if hasCall(r, "rm ") || hasCall(r, "run ") || hasCall(r, "exec ") {
+		t.Errorf("run acted on it: %v", r.Commands())
+	}
+
+	_, err = m.Terminal(ctx, "n")
+	isHeld("terminal", err)
+	if !errors.Is(err, ErrNoTerminal) {
+		t.Errorf("terminal err = %v, want ErrNoTerminal", err)
+	}
+
+	removed, err := m.RemoveStale(ctx, *mustInspect(t, m, "safeclaw-n"))
+	if removed {
+		t.Error("removed as stale")
+	}
+	isHeld("build --recreate", err)
+
+	s, err := m.Get(ctx, "n")
+	if err != nil || len(s.Holds) != 1 || s.Holds[0].Label() != "unknown" {
+		t.Errorf("Get = %+v, %v; want an unknown hold", s, err)
+	}
+	list, err := m.List(ctx)
+	if err != nil || len(list) != 1 || HoldLabels(list[0].Holds)[0] != "unknown" {
+		t.Errorf("List = %+v, %v; want an unknown hold", list, err)
+	}
+
+	err = m.Delete(ctx, "n", true)
+	isHeld("rm", err)
+	if w.containers["safeclaw-n"] == nil {
+		t.Fatal("removed")
+	}
+	if err := m.DeleteWith(ctx, "n", DeleteOptions{Force: true, ReleaseHolds: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(m.statePath("n")); !os.IsNotExist(err) {
+		t.Errorf("unreadable state kept: %v", err)
+	}
+}
+
+// A held session that is still attached, after a failed disconnect, gets
+// no terminal, like an offline one.
+func TestTerminalRefusesHeld(t *testing.T) {
+	ctx := context.Background()
+	w := netWorld(twoNetContainer())
+	w.failDisconnect = map[string]int{"work": 2}
+	m, _ := newTestManager(t, w)
+	if _, err := m.Ensure(ctx, Options{Name: "n", NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Terminal(ctx, "n"); err != nil {
+		t.Fatalf("online terminal: %v", err)
+	}
+	if _, err := m.NetOff(ctx, "n", NetOffOptions{Owner: "triage"}); !errors.Is(err, ErrStillOnline) {
+		t.Fatalf("net off err = %v, want it still attached", err)
+	}
+	if _, err := m.Terminal(ctx, "n"); !errors.Is(err, ErrNoTerminal) || !strings.Contains(err.Error(), "held offline by triage") {
+		t.Errorf("terminal err = %v, want it refused naming the holder", err)
+	}
+}
+
+func mustInspect(t *testing.T, m *Manager, name string) *docker.Container {
+	t.Helper()
+	c, err := m.Docker.InspectOne(context.Background(), name)
+	if err != nil || c == nil {
+		t.Fatal(c, err)
+	}
+	return c
 }
 
 func TestListNetwork(t *testing.T) {

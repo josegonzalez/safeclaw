@@ -633,7 +633,7 @@ func (m *Manager) Get(ctx context.Context, name string) (*Session, error) {
 		AutoRemove: c.HostConfig.AutoRemove,
 		Secrets:    sessionSecrets(*c),
 		Network:    NetworkStatus(*c),
-		Holds:      m.holdsFor(name, *c),
+		Holds:      m.listedHolds(name, *c),
 	}, nil
 }
 
