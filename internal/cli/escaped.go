@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/hangup"
+	"github.com/josegonzalez/safeclaw/internal/hostterm"
 	"github.com/josegonzalez/safeclaw/internal/termtext"
 )
 
@@ -125,8 +126,5 @@ func runChild(argv []string, o childOptions) (int, error) {
 // exitCode returns a finished process's exit code, or 128 plus the signal
 // number when a signal killed it.
 func exitCode(ps *os.ProcessState) int {
-	if ws, ok := ps.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-		return 128 + int(ws.Signal())
-	}
-	return ps.ExitCode()
+	return hostterm.ExitCode(ps)
 }
