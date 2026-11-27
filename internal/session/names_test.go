@@ -33,14 +33,15 @@ func TestValidateNameCanonical(t *testing.T) {
 
 func TestResolveName(t *testing.T) {
 	ctx := context.Background()
-	w := &world{image: "img", containers: map[string]*fakeContainer{"safeclaw-Old": {}}}
+	w := &world{image: "img", containers: map[string]*fakeContainer{"safeclaw-Old": {}, "safeclaw-other": {}}}
 	m, r := newTestManager(t, w)
 	for in, want := range map[string]string{
 		"work":          "work",
 		"Work":          "work",
 		"safeclaw-Work": "work",
 		"safeclaw-work": "work",
-		"old":           "old",
+		"other":         "other",
+		"Other":         "other",
 	} {
 		got, err := m.ResolveName(ctx, in)
 		if err != nil || got != want {
@@ -52,17 +53,77 @@ func TestResolveName(t *testing.T) {
 			t.Errorf("ResolveName(%q) = %q, want an error", bad, got)
 		}
 	}
-	// A container made with exactly a mixed-case name is never mistaken
-	// for the lowercase session.
-	for _, in := range []string{"Old", "safeclaw-Old"} {
+	// A container made with a mixed-case name is never mistaken for the
+	// lowercase session, whichever case the name is given in, and the
+	// lowercase session that would share its state is refused too.
+	for _, in := range []string{"Old", "safeclaw-Old", "old", "OLD", "safeclaw-old"} {
 		if _, err := m.ResolveName(ctx, in); !errors.Is(err, ErrLegacyName) || !strings.Contains(err.Error(), "docker rm -f safeclaw-Old") {
 			t.Errorf("ResolveName(%q): err = %v, want ErrLegacyName", in, err)
 		}
 	}
-	// Lowercase names need no lookup.
+	// The lookup only lists containers.
 	r.Calls = nil
-	if _, err := m.ResolveName(ctx, "work"); err != nil || len(r.Calls) != 0 {
-		t.Errorf("err = %v, calls = %v", err, r.Commands())
+	if _, err := m.ResolveName(ctx, "work"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range r.Commands() {
+		if !strings.HasPrefix(c, "ps ") {
+			t.Errorf("ran %q", c)
+		}
+	}
+}
+
+// A session is refused, whether it would be created or reused, while a
+// container left from a mixed-case name shares its history, ttyd credential
+// and network state on a case-insensitive filesystem. Nothing is created,
+// started, or written.
+func TestEnsureRefusesLegacyContainer(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name       string
+		containers map[string]*fakeContainer
+		legacy     []string
+	}{
+		{"new", map[string]*fakeContainer{"safeclaw-Work": {Running: true, Port: 7690}}, []string{"safeclaw-Work"}},
+		{"existing", map[string]*fakeContainer{"safeclaw-Work": {Port: 7690}, "safeclaw-work": {Running: true, Port: 7691, Image: "img"}}, []string{"safeclaw-Work"}},
+		{"several", map[string]*fakeContainer{"safeclaw-Work": {}, "safeclaw-WORK": {}}, []string{"safeclaw-WORK", "safeclaw-Work"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &world{image: "img", containers: tc.containers, native: true}
+			m, r := newTestManager(t, w)
+			for _, name := range []string{"work", "safeclaw-work"} {
+				r.Calls = nil
+				_, err := m.Ensure(ctx, Options{Name: name, NoOpen: true})
+				if !errors.Is(err, ErrLegacyName) {
+					t.Fatalf("Ensure(%q): err = %v, want ErrLegacyName", name, err)
+				}
+				for _, l := range tc.legacy {
+					if !strings.Contains(err.Error(), "docker rm -f "+l) {
+						t.Errorf("err = %v, want it to name %s", err, l)
+					}
+				}
+				for _, c := range r.Commands() {
+					if !strings.HasPrefix(c, "ps ") {
+						t.Errorf("ran %q", c)
+					}
+				}
+			}
+			for _, path := range []string{filepath.Join(m.SessionsDir, "work"), m.credentialPath("work"), m.choicesPath("work"), m.statePath("work")} {
+				if _, err := os.Stat(path); err == nil {
+					t.Errorf("%s written", path)
+				}
+			}
+		})
+	}
+	// Once the legacy container is removed, the session is created.
+	w := &world{image: "img", containers: map[string]*fakeContainer{"safeclaw-Work": {}}, native: true}
+	m, r := newTestManager(t, w)
+	if _, err := m.Ensure(ctx, Options{Name: "work", NoOpen: true}); !errors.Is(err, ErrLegacyName) {
+		t.Fatalf("err = %v, want ErrLegacyName", err)
+	}
+	delete(w.containers, "safeclaw-Work")
+	if _, err := m.Ensure(ctx, Options{Name: "work", NoOpen: true}); err != nil || !hasCall(r, "run") {
+		t.Fatalf("err = %v, calls = %v", err, r.Commands())
 	}
 }
 

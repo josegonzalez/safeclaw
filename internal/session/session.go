@@ -198,27 +198,68 @@ func legacyNameError(name string) error {
 
 // ResolveName returns the canonical session name for a name given on the
 // command line: one container prefix is removed and letters are lowercased,
-// as the dashboard does. A name with uppercase letters is refused if a
-// container was made with exactly that name before names were lowercased,
-// so a command meant for it never acts on the lowercase session instead.
+// as the dashboard does. The name is refused if a container left from
+// before names were lowercased matches it case-insensitively, such as
+// safeclaw-Work for `work` or `WORK`, because on a case-insensitive
+// filesystem that container shares the session's history, ttyd credential,
+// and network state, and a command meant for one would act on both.
 func (m *Manager) ResolveName(ctx context.Context, name string) (string, error) {
-	name = config.SessionName(name)
-	if lower := strings.ToLower(name); lower != name {
-		if nameRe.MatchString(lower) {
-			c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
-			if err != nil {
-				return "", err
-			}
-			if c != nil && c.ShortName() == config.ContainerName(name) {
-				return "", legacyNameError(name)
-			}
-		}
-		name = lower
-	}
+	name = strings.ToLower(config.SessionName(name))
 	if err := ValidateName(name); err != nil {
 		return "", err
 	}
+	if err := m.checkLegacyContainers(ctx, name); err != nil {
+		return "", err
+	}
 	return name, nil
+}
+
+// legacyContainers returns the containers whose names match the canonical
+// session name's container case-insensitively but not exactly. They were
+// made before session names were lowercased.
+func (m *Manager) legacyContainers(ctx context.Context, name string) ([]string, error) {
+	container := config.ContainerName(name)
+	names, err := m.Docker.ContainerNames(ctx, config.ContainerPrefix)
+	if err != nil {
+		return nil, err
+	}
+	var legacy []string
+	for _, n := range names {
+		if n != container && strings.EqualFold(n, container) {
+			legacy = append(legacy, n)
+		}
+	}
+	slices.Sort(legacy)
+	return legacy, nil
+}
+
+// checkLegacyContainers refuses a canonical session name while a container
+// left from before names were lowercased matches it case-insensitively,
+// with an error wrapping ErrLegacyName that names each one and how to
+// remove it.
+func (m *Manager) checkLegacyContainers(ctx context.Context, name string) error {
+	legacy, err := m.legacyContainers(ctx, name)
+	if err != nil || len(legacy) == 0 {
+		return err
+	}
+	return legacyContainerError(name, legacy)
+}
+
+// legacyContainerError explains why a session is refused while the legacy
+// containers exist. Removing them is the only fix: `safeclaw rm` would
+// remove the lowercase session's state with theirs, and a renamed container
+// still mounts the shared history directory.
+func legacyContainerError(name string, legacy []string) error {
+	cmds := make([]string, len(legacy))
+	for i, c := range legacy {
+		cmds[i] = "`docker rm -f " + c + "`"
+	}
+	what, it, obj := "the container "+legacy[0]+" was", "it shares", "it"
+	if len(legacy) > 1 {
+		what, it, obj = "the containers "+strings.Join(legacy, ", ")+" were", "they share", "them"
+	}
+	return fmt.Errorf("session %q: %w, but %s made with a mixed-case name before they were, and on a case-insensitive filesystem %s this session's history, ttyd credential, and network state. Remove %s with %s first; the history stays on the host",
+		name, ErrLegacyName, what, it, obj, strings.Join(cmds, " and "))
 }
 
 // NormalizeName applies the dashboard's name rules: spaces become dashes,
@@ -572,6 +613,14 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 	defer release()
+
+	// Checked under the session's lock, which is named after the canonical
+	// name, so every run of this session is serialized with the check, and
+	// no safeclaw run can make a mixed-case container since ValidateName
+	// refuses those names.
+	if err := m.checkLegacyContainers(ctx, name); err != nil {
+		return nil, err
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()

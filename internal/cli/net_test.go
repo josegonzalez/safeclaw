@@ -48,6 +48,8 @@ func TestRemoveHeldSession(t *testing.T) {
 		case len(args) > 0 && args[0] == "rm":
 			exists = false
 			return nil, nil
+		case len(args) > 0 && args[0] == "ps":
+			return nil, nil
 		}
 		return nil, dockertest.NotFound(args)
 	}}

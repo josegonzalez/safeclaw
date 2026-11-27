@@ -174,7 +174,7 @@ func TestEnsureRefusesSandbox(t *testing.T) {
 		t.Errorf("error should name the session: %v", err)
 	}
 	for _, c := range r.Commands() {
-		if !strings.HasPrefix(c, "image inspect") && !strings.HasPrefix(c, "container inspect") {
+		if !strings.HasPrefix(c, "image inspect") && !strings.HasPrefix(c, "container inspect") && !strings.HasPrefix(c, "ps ") {
 			t.Errorf("unexpected docker call: %q", c)
 		}
 	}
@@ -459,7 +459,7 @@ func TestPrepareEphemeral(t *testing.T) {
 	}
 	// The caller runs the container; preparing only inspects.
 	for _, c := range r.Commands() {
-		if !strings.HasPrefix(c, "image inspect") && !strings.HasPrefix(c, "container inspect") {
+		if !strings.HasPrefix(c, "image inspect") && !strings.HasPrefix(c, "container inspect") && !strings.HasPrefix(c, "ps ") {
 			t.Errorf("unexpected docker call: %q", c)
 		}
 	}

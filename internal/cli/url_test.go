@@ -78,7 +78,7 @@ func TestURLCommand(t *testing.T) {
 		t.Errorf("opened %q without --open", opened)
 	}
 	for _, c := range r.Commands() {
-		if !strings.HasPrefix(c, "container inspect ") {
+		if !strings.HasPrefix(c, "container inspect ") && !strings.HasPrefix(c, "ps ") {
 			t.Errorf("url touched the session: %q", c)
 		}
 	}
