@@ -471,7 +471,7 @@ func TestEnsureReusesRunningContainer(t *testing.T) {
 	if res.Port != 7690 {
 		t.Errorf("port = %d, want reused 7690", res.Port)
 	}
-	for _, p := range []string{"exec safeclaw-default pkill -f ttyd", "exec safeclaw-default tmux kill-server", "exec safeclaw-default bash -c umask 022\n"} {
+	for _, p := range []string{"exec safeclaw-default sh -c " + killTTYDScript, "exec safeclaw-default tmux kill-server", "exec safeclaw-default bash -c umask 022\n"} {
 		if !hasCall(r, p) {
 			t.Errorf("missing %q in %v", p, r.Commands())
 		}

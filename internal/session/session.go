@@ -551,10 +551,12 @@ func URLFor(port int) string {
 
 // Ensure creates, starts, or refreshes a session container and starts ttyd
 // in it. It is the equivalent of upstream's run.sh.
+//
+// Locks are taken in one order, and none is taken while a later one is
+// held, so they never deadlock: the session's own Ensure lock (see
+// ensureLock), then m.mu, then the network lock. Delete, `net off`, and
+// `net on` take only the network lock.
 func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	name := opts.Name
 	if name == "" {
 		name = config.DefaultSession
@@ -564,6 +566,15 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 	container := config.ContainerName(name)
+
+	release, err := m.ensureLock(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	// The network lock keeps `net off` and `net on` from changing the
 	// container between the offline check and the remove or start below.
@@ -816,8 +827,13 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 				return nil, err
 			}
 		}
-		// Restart ttyd/tmux so fresh env vars take effect.
-		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "pkill", "-f", "ttyd")
+		// Restart ttyd/tmux so fresh env vars take effect. The old ttyd
+		// must be gone before its credential is rotated and a new one
+		// starts; tmux has no server when nothing is attached, so its
+		// error is ignored.
+		if err := m.stopTTYD(ctx, name, container); err != nil {
+			return nil, err
+		}
 		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "tmux", "kill-server")
 		m.sleep(time.Second)
 	case existing != nil:

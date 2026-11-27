@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
@@ -213,6 +214,22 @@ func (m *Manager) rotateCredential(name string) (Credential, error) {
 	return c, nil
 }
 
+// ensureLock takes the session's own lock, which Ensure holds from before
+// it reads the container until it returns, so two safeclaw processes (the
+// CLI and the dashboard, say) can't interleave restarting one session's
+// ttyd: each would rotate the credential, and the host file could end up
+// holding one while ttyd took the other. It is a file in a directory of
+// the ttyd directory whose dot no session name can start with, so it is
+// never taken for a credential. Waiting for it ends with ctx, so a run
+// stuck holding it can't keep another past its Ctrl-C.
+func (m *Manager) ensureLock(ctx context.Context, name string) (func(), error) {
+	release, err := lockFileCtx(ctx, filepath.Join(m.ttydDir(), ".ensure"), name+".lock")
+	if err != nil {
+		return nil, fmt.Errorf("session %q: wait for other runs of it: %w", name, err)
+	}
+	return release, nil
+}
+
 // readRegular reads path without following a symlink at it. An entry that
 // is not a regular file is reported as not existing.
 func readRegular(path string) ([]byte, error) {
@@ -288,7 +305,9 @@ func writePrivate(path, content string) error {
 // with -c, on its command line, so it is refused. Ensure recreates or
 // refuses such a container before changing anything, so it never gets
 // here. The image's ttyd is also patched to refuse framing on every
-// response (setup/ttyd), which needs no flag.
+// response (setup/ttyd), which needs no flag. It returns once the new ttyd
+// answers a request carrying the new credential, or an error wrapping
+// ErrTTYDRestart if it doesn't.
 func (m *Manager) startTTYD(ctx context.Context, name, variant, container string, native bool, labels map[string]string) (Credential, error) {
 	if !readsCredentialFile(labels) {
 		return Credential{}, argvCredentialError(name, variant, true)
@@ -306,8 +325,122 @@ func (m *Manager) startTTYD(ctx context.Context, name, variant, container string
 	} else {
 		args = append(args, config.LegacyWrapper)
 	}
-	_, err = m.Docker.Exec(ctx, container, docker.ExecOptions{Detach: true}, args...)
-	return cred, err
+	if _, err := m.Docker.Exec(ctx, container, docker.ExecOptions{Detach: true}, args...); err != nil {
+		return Credential{}, err
+	}
+	if err := m.checkTTYDAnswers(ctx, name, container, cred); err != nil {
+		return Credential{}, err
+	}
+	return cred, nil
+}
+
+// The scripts below match ttyd with the pattern [t]tyd, which matches
+// "ttyd" but not itself, so pkill -f never matches the shell running it.
+// Nor does any other text in them, so a pkill never ends one mid-check.
+var (
+	// killTTYDScript signals every process with ttyd in its command line,
+	// ttyd and the wrapper it runs, with pkill's default SIGTERM or the
+	// signal given as its argument. pkill exits 1 when nothing matched,
+	// which is not an error here.
+	killTTYDScript = `pkill "$@" -f '[t]tyd'; s=$?; [ "$s" -le 1 ] || exit "$s"`
+	// ttydGoneScript prints why ttyd is not gone yet: a ttyd process, or
+	// anything listening on ttyd's port, read from /proc/net since the
+	// image may have no ss or netstat. It prints nothing once both are
+	// gone.
+	ttydGoneScript = `pgrep -x '[t]tyd' >/dev/null; s=$?; [ "$s" -le 1 ] || exit "$s"
+if [ "$s" -eq 0 ]; then echo 'its process is still running'
+elif grep -Eqs '^ *[0-9]+: [0-9A-F]+:` + ttydPortHex + ` [0-9A-F]+:[0-9A-F]+ 0A ' /proc/net/tcp /proc/net/tcp6; then echo 'something still listens on port ` + ttydPortStr + `'
+fi`
+	// ttydAnswersScript requests ttyd's page with the credential curl reads
+	// from its config on stdin, so it is on no command line, and prints the
+	// HTTP status unless it is 200, or 000 when nothing answered.
+	ttydAnswersScript = `c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 --config - http://127.0.0.1:` + ttydPortStr + `/); [ "$c" = 200 ] || echo "$c"`
+
+	ttydPortStr = strconv.Itoa(config.TTYDPort)
+	ttydPortHex = fmt.Sprintf("%04X", config.TTYDPort)
+)
+
+// How often, and for how long, a ttyd is checked while it stops or starts.
+const (
+	ttydPoll       = 200 * time.Millisecond
+	ttydStopPolls  = 25 // 5s for SIGTERM, then as long again for SIGKILL
+	ttydStartPolls = 50 // 10s
+)
+
+// ErrTTYDRestart is wrapped by the errors for a ttyd that could not be
+// stopped, or a new one that did not answer with its new credential.
+var ErrTTYDRestart = errors.New("its ttyd could not be restarted")
+
+// stopTTYD stops the ttyd running in a session's container, and waits until
+// no ttyd runs and nothing listens on its port, so the one started next
+// with a new credential is the only one: an old ttyd left running would
+// keep the port and take the old credential while the host file and the
+// printed URL carry the new one. One that ignores SIGTERM gets SIGKILL. A
+// failed pkill, or a ttyd still there after SIGKILL, is an error, before
+// the credential is rotated, so the old credential stays the one the host
+// file holds.
+func (m *Manager) stopTTYD(ctx context.Context, name, container string) error {
+	why := ""
+	for _, sig := range [][]string{nil, {"-KILL"}} {
+		args := append([]string{"sh", "-c", killTTYDScript, "sh"}, sig...)
+		if _, err := m.Docker.Exec(ctx, container, docker.ExecOptions{}, args...); err != nil {
+			return fmt.Errorf("session %q: %w: stopping the old ttyd failed: %w", name, ErrTTYDRestart, err)
+		}
+		var err error
+		why, err = m.pollTTYD(ctx, container, ttydGoneScript, nil, ttydStopPolls, nil)
+		if err != nil {
+			return fmt.Errorf("session %q: %w: checking that the old ttyd stopped failed: %w", name, ErrTTYDRestart, err)
+		}
+		if why == "" {
+			return nil
+		}
+	}
+	return fmt.Errorf("session %q: %w: the old ttyd did not stop (%s), so it would keep taking the old credential. Stop the session with `safeclaw stop %s` and run it again", name, ErrTTYDRestart, why, name)
+}
+
+// checkTTYDAnswers waits until the ttyd just started in container answers
+// a request carrying cred. A refusal means another ttyd, with another
+// credential, holds the port, and is an error right away.
+func (m *Manager) checkTTYDAnswers(ctx context.Context, name, container string, cred Credential) error {
+	stdin := func() io.Reader { return strings.NewReader(`user = "` + cred.String() + "\"\n") }
+	status, err := m.pollTTYD(ctx, container, ttydAnswersScript, stdin, ttydStartPolls, func(out string) bool { return out == "401" })
+	switch {
+	case err != nil:
+		return fmt.Errorf("session %q: %w: checking that the new ttyd answers failed: %w", name, ErrTTYDRestart, err)
+	case status == "401":
+		return fmt.Errorf("session %q: %w: the ttyd on port %d refused the new credential, so another ttyd still holds it. Stop the session with `safeclaw stop %s` and run it again", name, ErrTTYDRestart, config.TTYDPort, name)
+	case status != "":
+		return fmt.Errorf("session %q: %w: the new ttyd did not answer on port %d (HTTP status %s)", name, ErrTTYDRestart, config.TTYDPort, status)
+	}
+	return nil
+}
+
+// pollTTYD runs script in container up to polls times, ttydPoll apart,
+// until it prints nothing or prints what final accepts, and returns its
+// last output. stdin, when set, gives each run its stdin.
+func (m *Manager) pollTTYD(ctx context.Context, container, script string, stdin func() io.Reader, polls int, final func(string) bool) (string, error) {
+	out := ""
+	for i := range polls {
+		if i > 0 {
+			m.sleep(ttydPoll)
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		var opts docker.ExecOptions
+		if stdin != nil {
+			opts.Stdin = stdin()
+		}
+		b, err := m.Docker.Exec(ctx, container, opts, "sh", "-c", script)
+		if err != nil {
+			return "", err
+		}
+		out = strings.TrimSpace(string(b))
+		if out == "" || (final != nil && final(out)) {
+			break
+		}
+	}
+	return out, nil
 }
 
 // Terminal is where a running session's ttyd can be reached from the host.
