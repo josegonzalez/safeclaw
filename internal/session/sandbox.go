@@ -418,6 +418,8 @@ func (m *Manager) Get(ctx context.Context, name string) (*Session, error) {
 		Variant:    variantOf(*c),
 		AutoRemove: c.HostConfig.AutoRemove,
 		Secrets:    sessionSecrets(*c),
+		Network:    NetworkStatus(*c),
+		Holds:      m.holdsFor(name, *c),
 	}, nil
 }
 

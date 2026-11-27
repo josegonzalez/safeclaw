@@ -48,6 +48,7 @@ func NewRootCommand() *cobra.Command {
 		newStopCommand(),
 		newRemoveCommand(),
 		newAttachCommand(),
+		newNetCommand(),
 		newSandboxCommand(),
 		newVariantCommand(),
 		newTTYDWrapperCommand(),

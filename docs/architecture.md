@@ -23,7 +23,7 @@ Containers created from the upstream image don't contain the `safeclaw` binary, 
 
 1. Pick the [image variant](#image-variants) and check its image exists, pick the [secrets](#choosing-secrets) the session receives, then check that the Claude token is present if the session receives it (prompting for it only in `run`) and that every listed secret exists
 2. Reuse the container's existing port, or pick the lowest port no `safeclaw-*` container reserves and nothing on the host is listening on
-3. Create, start, or refresh the container. With `-v`, a `--variant` other than the container's, or a different set of secrets, an existing container is recreated, keeping its port and whichever of its mount, variant, and secrets were not given again. A running container has ttyd and tmux restarted so new env vars take effect
+3. Create, start, or refresh the container. With `-v`, a `--variant` other than the container's, or a different set of secrets, an existing container is recreated, keeping its port and whichever of its mount, variant, and secrets were not given again. A running container has ttyd and tmux restarted so new env vars take effect. An [offline](#offline-sessions) session is never recreated, and starting it keeps it offline
 4. Write `/home/sclaw/.env` from the secrets the session receives
 5. Configure git from the GitHub account if the session receives `GH_TOKEN`
 6. Start ttyd, and with `-q`, wait for Claude Code's input prompt before sending the query
@@ -55,6 +55,25 @@ A one-off sandbox lives for exactly one job, so callers sharing the host need no
 - `safeclaw sandbox run --rm` creates a detached one-off sandbox for jobs with several steps (`docker cp`, then several `sandbox exec` calls). Progress goes to stderr and only its name to stdout, and `safeclaw sandbox stop` removes it
 
 `safeclaw sandbox ls` marks them in a ONE-OFF column, and `safeclaw ls` lists their type as `sandbox (one-off)`.
+
+## Offline sessions
+
+`safeclaw net off NAME` takes an interactive session off the network while it handles something untrusted, and `safeclaw net on NAME` brings it back. Taking a session offline disconnects it from every network it is attached to, which also takes down its ttyd web terminal, since the published port belongs to the container's network. Claude Code keeps running but can't reach the API until the session is back.
+
+The networks are saved before anything is disconnected, along with any aliases, static addresses, and links (leaving out the aliases docker adds itself), so `net on` restores exactly those. The state is kept in `~/.config/safeclaw/network/NAME.json` (honoring `XDG_CONFIG_HOME`), not in the session's history directory, because that directory is mounted into the container. It records the container ID, so state left by a session that was removed and recreated under the same name, for example by `safeclaw rm` or `safeclaw build --recreate`, is ignored and deleted rather than applied to the new container. Without saved state, for example after a raw `docker network disconnect`, `net on` reconnects the session to the network it was created with (`bridge`).
+
+Each `net off` records a hold with its `--owner`, an optional `--reason`, and when it was taken. Without `--owner` it takes the unnamed hold, which every caller without an owner shares. Taking an offline session offline again adds a hold, or updates the same owner's, and keeps the saved networks. `net on` releases only the hold for its `--owner` (or the unnamed one), fails if other owners hold the session and it holds nothing, and reconnects the session only once no holds remain, so one job can't bring a session back online while another still relies on it being offline. `--force` releases every hold. Every network change and state write happens under one lock file in that directory, so concurrent safeclaw processes don't interleave.
+
+The status comes from docker: a session attached to no network is offline. `safeclaw ls` shows it in a NETWORK column (`online`, `offline` with its holders, `none` for sandboxes, or `host`), and the dashboard shows an `offline` badge.
+
+While a session is offline:
+
+- `run` and the dashboard's start still start or refresh it, warning that the web terminal is unreachable, and a started session is disconnected again if docker attached any network
+- `run` refuses to recreate it for a new `-v`, `--variant`, or set of secrets, so it can't come back online as a new container
+- `safeclaw build --recreate` skips it, and the stale report marks it `(offline)`
+- `safeclaw rm` removes its saved state along with the container
+
+Sessions using host networking, or sharing another container's network, can't be disconnected, so `net off` refuses them. Sandboxes always run with `--network none`, so the `net` commands refuse them too.
 
 ## Image variants
 

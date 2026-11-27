@@ -41,6 +41,7 @@ func TestIntegrationLifecycle(t *testing.T) {
 		Docker:      d,
 		Secrets:     store,
 		SessionsDir: filepath.Join(dir, "sessions"),
+		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 		OpenBrowser: func(string) error { return nil },
 	}
@@ -113,6 +114,7 @@ func TestIntegrationSandbox(t *testing.T) {
 		Docker:      d,
 		Secrets:     secrets.Store{Dir: filepath.Join(dir, ".secrets")},
 		SessionsDir: filepath.Join(dir, "sessions"),
+		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 	}
 	name := fmt.Sprintf("itest-sandbox-%d", rand.IntN(1_000_000))
@@ -222,6 +224,7 @@ func TestIntegrationSandboxRemove(t *testing.T) {
 		Docker:      d,
 		Secrets:     secrets.Store{Dir: filepath.Join(dir, ".secrets")},
 		SessionsDir: filepath.Join(dir, "sessions"),
+		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 	}
 	res, err := m.EnsureSandbox(ctx, SandboxOptions{Remove: true, Variant: config.BaseVariant})
@@ -403,6 +406,7 @@ func TestIntegrationSecrets(t *testing.T) {
 		Docker:      d,
 		Secrets:     store,
 		SessionsDir: filepath.Join(dir, "sessions"),
+		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 		OpenBrowser: func(string) error { return nil },
 	}
@@ -450,4 +454,74 @@ func TestIntegrationSecrets(t *testing.T) {
 	if err != nil || !s.Secrets.Equal(NoSecrets()) {
 		t.Errorf("session = %+v, %v", s, err)
 	}
+}
+
+// TestIntegrationNetwork takes a real session offline, checks its web
+// terminal is unreachable and that a restart keeps it offline, then brings
+// it back and checks docker published its port again.
+func TestIntegrationNetwork(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+	dir := t.TempDir()
+	store := secrets.Store{Dir: filepath.Join(dir, ".secrets")}
+	if _, err := store.Set(secrets.ClaudeToken, "integration-dummy"); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{
+		Docker:      d,
+		Secrets:     store,
+		SessionsDir: filepath.Join(dir, "sessions"),
+		NetworkDir:  filepath.Join(dir, "network"),
+		Out:         os.Stdout,
+		OpenBrowser: func(string) error { return nil },
+	}
+	name := fmt.Sprintf("itest-net-%d", rand.IntN(1_000_000))
+	container := config.ContainerName(name)
+	t.Cleanup(func() { _ = d.Remove(ctx, container, true) })
+
+	res, err := m.Ensure(ctx, Options{Name: name, NoOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitHTTP(t, res.URL)
+
+	if _, err := m.NetOff(ctx, name, NetOffOptions{Owner: "itest"}); err != nil {
+		t.Fatal(err)
+	}
+	offline := func(when string) {
+		t.Helper()
+		c, err := d.InspectOne(ctx, container)
+		if err != nil || c == nil {
+			t.Fatalf("%s: inspect: %v", when, err)
+		}
+		if !Offline(*c) {
+			t.Errorf("%s: still attached to %v", when, attached(*c))
+		}
+		client := http.Client{Timeout: 2 * time.Second}
+		if resp, err := client.Get(res.URL); err == nil {
+			_ = resp.Body.Close()
+			t.Errorf("%s: web terminal answered %d while offline", when, resp.StatusCode)
+		}
+	}
+	offline("after net off")
+
+	if err := m.Stop(ctx, name); err != nil {
+		t.Fatal(err)
+	}
+	if res2, err := m.Ensure(ctx, Options{Name: name, NoOpen: true}); err != nil || !res2.Offline {
+		t.Fatalf("restart = %+v, %v", res2, err)
+	}
+	offline("after restart")
+
+	if _, err := m.NetOn(ctx, name, NetOnOptions{}); !errors.Is(err, ErrHeld) {
+		t.Errorf("unnamed net on err = %v, want ErrHeld", err)
+	}
+	on, err := m.NetOn(ctx, name, NetOnOptions{Owner: "itest"})
+	if err != nil || on.Offline {
+		t.Fatalf("net on = %+v, %v", on, err)
+	}
+	waitHTTP(t, res.URL)
 }

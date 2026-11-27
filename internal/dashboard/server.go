@@ -34,6 +34,8 @@ type Sessions interface {
 	Ensure(ctx context.Context, opts session.Options) (*session.Result, error)
 	Stop(ctx context.Context, name string) error
 	Delete(ctx context.Context, name string, force bool) error
+	NetOff(ctx context.Context, name string, opts session.NetOffOptions) (*session.NetResult, error)
+	NetOn(ctx context.Context, name string, opts session.NetOnOptions) (*session.NetResult, error)
 	Variants() (*variant.Set, error)
 	SecretNames() ([]string, error)
 }
@@ -89,6 +91,7 @@ func New(opts Options) (*Server, error) {
 	}
 	if s.events == nil && opts.Manager != nil {
 		s.events = opts.Manager.Docker.Events
+		s.hub.IsSession = isSession(opts.Manager.Docker)
 	}
 	if s.port == 0 {
 		s.port = config.DashboardPort
@@ -129,9 +132,14 @@ func (s *Server) parseTemplates() (*template.Template, error) {
 				return "starting"
 			case "delete":
 				return "deleting"
+			case "offline":
+				return "disconnecting"
+			case "online":
+				return "connecting"
 			}
 			return "stopping"
 		},
+		"holders": holders,
 	}).ParseFS(s.files, "templates/*.html")
 }
 
@@ -162,12 +170,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /sessions/{name}/start", s.handleStart)
 	mux.HandleFunc("POST /sessions/{name}/stop", s.handleConfirmed("stop"))
 	mux.HandleFunc("POST /sessions/{name}/delete", s.handleConfirmed("delete"))
+	mux.HandleFunc("POST /sessions/{name}/offline", s.handleOffline)
+	mux.HandleFunc("POST /sessions/{name}/online", s.handleOnline)
 
 	mux.HandleFunc("GET /api/sessions", s.apiSessions)
 	mux.HandleFunc("POST /api/start", s.apiStart)
 	mux.HandleFunc("POST /api/stop", s.apiStop)
 	mux.HandleFunc("POST /api/delete", s.apiDelete)
 	mux.HandleFunc("POST /api/create", s.apiCreate)
+	mux.HandleFunc("POST /api/net/off", s.apiNetOff)
+	mux.HandleFunc("POST /api/net/on", s.apiNetOn)
 	mux.HandleFunc("GET /api/events", s.apiEvents)
 
 	cop := http.NewCrossOriginProtection()
@@ -320,13 +332,38 @@ func sandboxError(name string) error {
 	return fmt.Errorf("session %q %w", name, session.ErrIsSandbox)
 }
 
-// errStatus returns 409 for actions refused because the target is a sandbox
-// and fallback otherwise.
+// conflicts are the errors for actions refused because of the target's
+// type or network state.
+var conflicts = []error{
+	session.ErrIsSandbox,
+	session.ErrHostNetwork,
+	session.ErrSharedNetwork,
+	session.ErrNoNetwork,
+	session.ErrHeld,
+	session.ErrOffline,
+}
+
+// errStatus returns 409 for actions refused because of the target's type or
+// network state, and fallback otherwise.
 func errStatus(err error, fallback int) int {
-	if errors.Is(err, session.ErrIsSandbox) {
-		return http.StatusConflict
+	for _, c := range conflicts {
+		if errors.Is(err, c) {
+			return http.StatusConflict
+		}
 	}
 	return fallback
+}
+
+// holders describes the holds on an offline session, with their reasons.
+func holders(holds []session.Hold) string {
+	parts := make([]string, len(holds))
+	for i, h := range holds {
+		parts[i] = h.Label()
+		if h.Reason != "" {
+			parts[i] += " (" + h.Reason + ")"
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 type hintData struct {
@@ -414,10 +451,14 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 // actionData renders a session's action button.
 type actionData struct {
 	Name    string
-	Kind    string // stop, delete, start
+	Kind    string // stop, delete, start, offline, online
 	Variant string // "" for the table button, "link" for the frame bar
 	Confirm bool
-	Failed  string
+	// Force makes the confirm button release every hold.
+	Force bool
+	// Title is the confirm button's tooltip.
+	Title  string
+	Failed string
 }
 
 func (s *Server) handleActions(w http.ResponseWriter, r *http.Request) {
@@ -431,7 +472,7 @@ func (s *Server) handleActions(w http.ResponseWriter, r *http.Request) {
 
 func kindOrDefault(k string) string {
 	switch k {
-	case "stop", "delete", "start":
+	case "stop", "delete", "start", "offline", "online":
 		return k
 	}
 	return "stop"
@@ -471,6 +512,39 @@ func (s *Server) handleConfirmed(kind string) http.HandlerFunc {
 		}
 		refresh(w)
 	}
+}
+
+// handleOffline takes a session offline with the unnamed hold.
+func (s *Server) handleOffline(w http.ResponseWriter, r *http.Request) {
+	name := config.SessionName(r.PathValue("name"))
+	_ = r.ParseForm()
+	if _, err := s.sessions.NetOff(r.Context(), name, session.NetOffOptions{}); err != nil {
+		s.render(w, errStatus(err, http.StatusOK), "action", actionData{Name: name, Kind: "offline", Variant: r.Form.Get("variant"), Failed: err.Error()})
+		return
+	}
+	refresh(w)
+}
+
+// handleOnline releases the unnamed hold on a session. If other owners
+// still hold it offline, it returns a confirm button that, clicked again
+// with force=1, releases every hold.
+func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
+	name := config.SessionName(r.PathValue("name"))
+	_ = r.ParseForm()
+	d := actionData{Name: name, Kind: "online", Variant: r.Form.Get("variant")}
+	res, err := s.sessions.NetOn(r.Context(), name, session.NetOnOptions{Force: r.Form.Get("force") == "1"})
+	if err != nil && !errors.Is(err, session.ErrHeld) {
+		d.Failed = err.Error()
+		s.render(w, errStatus(err, http.StatusOK), "action", d)
+		return
+	}
+	if res != nil && len(res.Holds) > 0 {
+		d.Confirm, d.Force = true, true
+		d.Title = "held offline by " + holders(res.Holds)
+		s.render(w, http.StatusOK, "action", d)
+		return
+	}
+	refresh(w)
 }
 
 // handleEvents streams a "sessions" event whenever a safeclaw container changes.

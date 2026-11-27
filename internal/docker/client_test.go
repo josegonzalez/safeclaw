@@ -10,11 +10,16 @@ import (
 )
 
 const inspectJSON = `[{
+  "Id": "abc123def456789",
   "Name": "/safeclaw-work",
   "Image": "sha256:abc",
   "Config": {"Labels": {"safeclaw.type": "sandbox", "safeclaw.secrets": ""}},
   "State": {"Status": "exited", "Running": false},
-  "HostConfig": {"PortBindings": {"7681/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7683"}]}, "AutoRemove": true},
+  "HostConfig": {"PortBindings": {"7681/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7683"}]}, "AutoRemove": true, "NetworkMode": "bridge"},
+  "NetworkSettings": {"Networks": {
+    "bridge": {"Aliases": null, "IPAMConfig": null},
+    "work": {"Aliases": ["safeclaw-work", "api"], "Links": ["db:db"], "IPAMConfig": {"IPv4Address": "10.1.0.5"}}
+  }},
   "Mounts": [
     {"Type": "bind", "Source": "/Users/me/.config/safeclaw/sessions/work", "Destination": "/home/sclaw/.claude/projects"},
     {"Type": "bind", "Source": "/Users/me/proj", "Destination": "/home/sclaw/proj"},
@@ -52,6 +57,14 @@ func TestParseInspect(t *testing.T) {
 	if !c.HostConfig.AutoRemove {
 		t.Error("AutoRemove = false, want true")
 	}
+	if c.ID != "abc123def456789" || c.HostConfig.NetworkMode != "bridge" {
+		t.Errorf("ID, NetworkMode = %q, %q", c.ID, c.HostConfig.NetworkMode)
+	}
+	work := c.NetworkSettings.Networks["work"]
+	if len(c.NetworkSettings.Networks) != 2 || !reflect.DeepEqual(work.Aliases, []string{"safeclaw-work", "api"}) ||
+		work.IPAMConfig == nil || work.IPAMConfig.IPv4Address != "10.1.0.5" || !reflect.DeepEqual(work.Links, []string{"db:db"}) {
+		t.Errorf("Networks = %+v", c.NetworkSettings.Networks)
+	}
 	want := []string{"/Users/me/proj:/home/sclaw/proj"}
 	if got := c.BindMounts("/home/sclaw/.claude/projects"); !reflect.DeepEqual(got, want) {
 		t.Errorf("BindMounts = %v, want %v", got, want)
@@ -86,8 +99,15 @@ func TestParseEvent(t *testing.T) {
 	if !ok || ev.Action != "die" || ev.Name != "safeclaw-x" {
 		t.Errorf("ParseEvent = %+v, %v", ev, ok)
 	}
-	if _, ok := docker.ParseEvent([]byte(`{"Type":"network","Action":"connect"}`)); ok {
-		t.Error("network events should be ignored")
+	if ev.Type != "container" || ev.Container != "" {
+		t.Errorf("container event = %+v", ev)
+	}
+	ev, ok = docker.ParseEvent([]byte(`{"Type":"network","Action":"disconnect","Actor":{"Attributes":{"name":"bridge","container":"abc"}}}`))
+	if !ok || ev.Type != "network" || ev.Action != "disconnect" || ev.Name != "bridge" || ev.Container != "abc" {
+		t.Errorf("network event = %+v, %v", ev, ok)
+	}
+	if _, ok := docker.ParseEvent([]byte(`{"Type":"image","Action":"pull"}`)); ok {
+		t.Error("image events should be ignored")
 	}
 	if _, ok := docker.ParseEvent([]byte(`not json`)); ok {
 		t.Error("bad lines should be ignored")
@@ -104,6 +124,26 @@ func TestEventsStream(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Name != "safeclaw-a" {
 		t.Errorf("events = %+v", got)
+	}
+	if want := "events --filter type=container --filter type=network --format {{json .}}"; r.Commands()[0] != want {
+		t.Errorf("events = %q, want %q", r.Commands()[0], want)
+	}
+}
+
+func TestNetworkArgs(t *testing.T) {
+	r := &dockertest.Runner{}
+	c := r.Client()
+	ctx := context.Background()
+	_ = c.NetworkDisconnect(ctx, "bridge", "safeclaw-a")
+	_ = c.NetworkConnect(ctx, "bridge", "safeclaw-a", docker.ConnectOptions{})
+	_ = c.NetworkConnect(ctx, "work", "safeclaw-a", docker.ConnectOptions{Aliases: []string{"api"}, Links: []string{"db:db"}, IPv4: "10.1.0.5", IPv6: "fd00::5"})
+	want := []string{
+		"network disconnect bridge safeclaw-a",
+		"network connect bridge safeclaw-a",
+		"network connect --alias api --link db:db --ip 10.1.0.5 --ip6 fd00::5 work safeclaw-a",
+	}
+	if got := r.Commands(); !reflect.DeepEqual(got, want) {
+		t.Errorf("network = %v, want %v", got, want)
 	}
 }
 

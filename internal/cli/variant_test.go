@@ -244,3 +244,33 @@ func TestVariantDockerfile(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+func TestReportStaleSkipsOffline(t *testing.T) {
+	containers := `[
+		{"Id": "a1", "Name": "/safeclaw-a", "Image": "old", "Config": {"Labels": {}}, "HostConfig": {"NetworkMode": "bridge"}, "NetworkSettings": {"Networks": {}}},
+		{"Id": "b1", "Name": "/safeclaw-b", "Image": "old", "Config": {"Labels": {}}, "HostConfig": {"NetworkMode": "bridge"}, "NetworkSettings": {"Networks": {"bridge": {}}}}
+	]`
+	f := &fakeImages{images: map[string]string{"safeclaw": "new"}, containers: containers}
+	r := withFakes(t, f, "")
+	var out strings.Builder
+	if err := reportStale(t.Context(), r.Client(), &out, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "  a (offline)\n") || !strings.Contains(out.String(), "  b\n") {
+		t.Errorf("out = %q", out.String())
+	}
+
+	out.Reset()
+	if err := reportStale(t.Context(), r.Client(), &out, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Skipping offline session: a") {
+		t.Errorf("out = %q", out.String())
+	}
+	if _, ok := r.Find("rm -v -f safeclaw-a"); ok {
+		t.Error("offline session removed")
+	}
+	if _, ok := r.Find("rm -v -f safeclaw-b"); !ok {
+		t.Error("online stale session not removed")
+	}
+}

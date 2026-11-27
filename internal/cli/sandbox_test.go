@@ -104,9 +104,10 @@ func TestSandboxExecArgs(t *testing.T) {
 
 func TestWriteSandboxes(t *testing.T) {
 	list := []session.Session{
-		{Name: "job", Status: "running", Volume: "-", Type: "sandbox", Variant: "sandbox", AutoRemove: true},
-		{Name: "box", Status: "exited", Volume: "/in:/in", Type: "sandbox"},
-		{Name: "work", Status: "running", Volume: "-", Type: "session"},
+		{Name: "job", Status: "running", Volume: "-", Type: "sandbox", Variant: "sandbox", AutoRemove: true, Network: "none"},
+		{Name: "box", Status: "exited", Volume: "/in:/in", Type: "sandbox", Network: "none"},
+		{Name: "work", Status: "running", Volume: "-", Type: "session", Network: "online"},
+		{Name: "triage", Status: "running", Volume: "-", Type: "session", Network: "offline", Holds: []session.Hold{{Owner: "job"}, {}}},
 	}
 	var b strings.Builder
 	if err := writeSandboxes(&b, list); err != nil {
@@ -123,10 +124,11 @@ func TestWriteSandboxes(t *testing.T) {
 	if err := writeSessions(&b, list); err != nil {
 		t.Fatal(err)
 	}
-	want = "SESSION   TYPE                VARIANT   STATUS    URL   VOLUME\n" +
-		"job       sandbox (one-off)   sandbox   running   -     -\n" +
-		"box       sandbox             -         exited    -     /in:/in\n" +
-		"work      session             -         running   -     -\n"
+	want = "SESSION   TYPE                VARIANT   STATUS    NETWORK                  URL   VOLUME\n" +
+		"job       sandbox (one-off)   sandbox   running   none                     -     -\n" +
+		"box       sandbox             -         exited    none                     -     /in:/in\n" +
+		"work      session             -         running   online                   -     -\n" +
+		"triage    session             -         running   offline (job, unnamed)   -     -\n"
 	if b.String() != want {
 		t.Errorf("ls =\n%s\nwant\n%s", b.String(), want)
 	}
