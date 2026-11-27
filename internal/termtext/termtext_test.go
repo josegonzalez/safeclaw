@@ -1,6 +1,9 @@
 package termtext
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestEscape(t *testing.T) {
 	cases := []struct{ name, in, want string }{
@@ -21,5 +24,62 @@ func TestEscape(t *testing.T) {
 		if got := Escape(tc.in); got != tc.want {
 			t.Errorf("%s: Escape(%q) = %q, want %q", tc.name, tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestWriter(t *testing.T) {
+	in := "ok \x1b[31mred\x1b[0m\ncafé ✓ \u009b2J\r\xff end\t\U0001F600\n"
+	// Every split point, including ones inside a multi-byte rune, must give
+	// the same output as escaping the whole stream at once.
+	for split := 0; split <= len(in); split++ {
+		var b strings.Builder
+		w := NewWriter(&b)
+		for _, part := range []string{in[:split], in[split:]} {
+			n, err := w.Write([]byte(part))
+			if err != nil || n != len(part) {
+				t.Fatalf("split %d: Write = %d, %v", split, n, err)
+			}
+		}
+		if err := w.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := b.String(), Escape(in); got != want {
+			t.Errorf("split %d: got %q, want %q", split, got, want)
+		}
+	}
+}
+
+func TestWriterByteAtATime(t *testing.T) {
+	in := "a\u202eb é \U0001F600 \x1b]0;x\x07"
+	var b strings.Builder
+	w := NewWriter(&b)
+	for i := range len(in) {
+		if _, err := w.Write([]byte{in[i]}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := b.String(), Escape(in); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestWriterFlushIncomplete(t *testing.T) {
+	var b strings.Builder
+	w := NewWriter(&b)
+	// The first two bytes of a three-byte rune are held back until Flush.
+	if _, err := w.Write([]byte("x\xe2\x9c")); err != nil {
+		t.Fatal(err)
+	}
+	if got := b.String(); got != "x" {
+		t.Errorf("before Flush: %q", got)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := b.String(), `x\xe2\x9c`; got != want {
+		t.Errorf("after Flush: %q, want %q", got, want)
 	}
 }

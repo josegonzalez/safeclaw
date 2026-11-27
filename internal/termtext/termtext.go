@@ -3,6 +3,7 @@ package termtext
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -53,4 +54,60 @@ func safe(s string) bool {
 		}
 	}
 	return true
+}
+
+// Writer escapes everything written to it with Escape's rules before
+// passing it on, for streams such as a command's output. A UTF-8 sequence
+// split across writes is held back until the rest of it arrives, so it is
+// kept whole rather than escaped byte by byte. Call Flush when the stream
+// ends to write out a held-back sequence that never completed.
+type Writer struct {
+	w       io.Writer
+	pending []byte
+}
+
+// NewWriter returns a Writer that writes escaped text to w.
+func NewWriter(w io.Writer) *Writer {
+	return &Writer{w: w}
+}
+
+// Write escapes p and writes it to the underlying writer. It returns
+// len(p) when the escaped text was written, since escaping changes how
+// many bytes reach the underlying writer.
+func (e *Writer) Write(p []byte) (int, error) {
+	e.pending = append(e.pending, p...)
+	buf := e.pending
+	n := len(buf) - incompleteTail(buf)
+	if _, err := io.WriteString(e.w, Escape(string(buf[:n]))); err != nil {
+		e.pending = nil
+		return 0, err
+	}
+	e.pending = append([]byte(nil), buf[n:]...)
+	return len(p), nil
+}
+
+// Flush writes out a held-back incomplete UTF-8 sequence, escaped as the
+// invalid bytes it now is.
+func (e *Writer) Flush() error {
+	if len(e.pending) == 0 {
+		return nil
+	}
+	_, err := io.WriteString(e.w, Escape(string(e.pending)))
+	e.pending = nil
+	return err
+}
+
+// incompleteTail returns the length of the UTF-8 sequence at the end of b
+// that has started but not finished, or 0 when b ends on a whole rune or
+// on bytes that can't start one.
+func incompleteTail(b []byte) int {
+	for i := len(b) - 1; i >= 0 && len(b)-i < utf8.UTFMax; i-- {
+		if utf8.RuneStart(b[i]) {
+			if utf8.FullRune(b[i:]) {
+				return 0
+			}
+			return len(b) - i
+		}
+	}
+	return 0
 }

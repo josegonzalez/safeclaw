@@ -10,6 +10,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/session"
@@ -132,6 +133,10 @@ func sandboxExecArgv(name string, interactive, tty bool, command []string) []str
 // sandboxExecArgs validates exec's arguments: COMMAND with --ephemeral,
 // otherwise NAME COMMAND, with the sandbox creation flags refused.
 func sandboxExecArgs(cmd *cobra.Command, args []string) error {
+	escape, _ := cmd.Flags().GetBool("escape-controls")
+	if tty, _ := cmd.Flags().GetBool("tty"); escape && tty {
+		return errors.New("--escape-controls can't be used with -t: a TTY needs its control characters, and docker merges stdout and stderr into it")
+	}
 	if ephemeral, _ := cmd.Flags().GetBool("ephemeral"); ephemeral {
 		if len(args) == 0 {
 			return errors.New("a command is required: exec --ephemeral -- COMMAND [ARG...]")
@@ -150,14 +155,19 @@ func sandboxExecArgs(cmd *cobra.Command, args []string) error {
 }
 
 func newSandboxExecCommand() *cobra.Command {
-	var interactive, tty, ephemeral bool
+	var interactive, tty, ephemeral, escape bool
 	var f sandboxFlags
 	cmd := &cobra.Command{
-		Use:   "exec {NAME | --ephemeral [-s NAME]} [-i] [-t] -- COMMAND [ARG...]",
+		Use:   "exec {NAME | --ephemeral [-s NAME]} [-i] [-t | --escape-controls] -- COMMAND [ARG...]",
 		Short: "Run a command in a sandbox as the sandbox user",
 		Long: "Run a command in a sandbox as the sandbox user.\n\n" +
 			"With --ephemeral, no NAME is given: the command runs in a new one-off sandbox that is removed when it exits, " +
-			"and the command's exit code is returned. Without -s the sandbox gets a random name, and an existing name is refused.",
+			"and the command's exit code is returned. Without -s the sandbox gets a random name, and an existing name is refused.\n\n" +
+			"With --escape-controls, the command's stdout and stderr are kept apart and passed through safeclaw, which writes control characters " +
+			"other than newline and tab, invalid UTF-8, and other unprintable characters as visible escapes such as \\x1b, " +
+			"so escape sequences from untrusted files never reach the terminal. The exit code is returned as is " +
+			"(128 plus the signal number when a signal killed docker), and SIGINT, SIGTERM, SIGHUP and SIGQUIT are forwarded. " +
+			"It can't be used with -t.",
 		Args: sandboxExecArgs,
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			if ephemeral {
@@ -180,6 +190,9 @@ func newSandboxExecCommand() *cobra.Command {
 				}
 				argv = sandboxExecArgv(args[0], interactive, tty, args[1:])
 			}
+			if escape {
+				return runEscapedExec(cmd, argv, interactive)
+			}
 			bin, err := exec.LookPath("docker")
 			if err != nil {
 				return err
@@ -189,9 +202,32 @@ func newSandboxExecCommand() *cobra.Command {
 	}
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "keep stdin open")
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "allocate a TTY")
+	cmd.Flags().BoolVar(&escape, "escape-controls", false, "escape control characters in the command's output before they reach the terminal")
 	cmd.Flags().BoolVar(&ephemeral, "ephemeral", false, "run the command in a new one-off sandbox that is removed when it exits")
 	f.register(cmd, "name for the --ephemeral sandbox (random by default)", " (with --ephemeral)")
 	return cmd
+}
+
+// runEscapedExec runs a sandbox exec argv through runEscaped. The command
+// shares safeclaw's process group only when it reads stdin from a
+// terminal, which a background process group can't do.
+func runEscapedExec(cmd *cobra.Command, argv []string, interactive bool) error {
+	var stdin io.Reader
+	shareGroup := false
+	if interactive {
+		stdin = cmd.InOrStdin()
+		if f, ok := stdin.(*os.File); ok {
+			shareGroup = term.IsTerminal(int(f.Fd()))
+		}
+	}
+	code, err := runEscaped(argv, stdin, cmd.OutOrStdout(), cmd.ErrOrStderr(), shareGroup)
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return exitCodeError{code}
+	}
+	return nil
 }
 
 // completeSandboxFirst completes NAME as a sandbox and leaves the other

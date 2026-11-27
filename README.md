@@ -74,6 +74,10 @@ safeclaw sandbox exec triage -- pdftotext /in/report.pdf -
 safeclaw sandbox exec triage -- unzip -l /in/report.zip
 safeclaw sandbox exec -i triage -- python3 - < extract.py
 
+# Escape control characters in the output, so escape sequences in file names
+# or tool errors never reach your terminal
+safeclaw sandbox exec --escape-controls triage -- 7z l /in/archive.7z
+
 # Copy files in, owned by the sandbox user and numbered so names never collide
 safeclaw sandbox cp-in triage ~/Downloads/report.zip   # prints /sandbox/in/1-report.zip
 safeclaw sandbox exec triage -- unzip -d /sandbox/out /sandbox/in/1-report.zip
@@ -242,7 +246,7 @@ The choice is remembered for the session like its secrets, and changing it recre
 | `safeclaw net on NAME` | Release the hold for `--owner` (or the unnamed hold) and reconnect the session once none remain. `--force` releases every hold. |
 | `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory read-only, `--variant` picks the image variant, `--memory`, `--pids-limit`, and `--cpus` set limits. |
 | `safeclaw sandbox run --rm [-s NAME]` | Create a one-off sandbox that is removed when it stops, and print its name |
-| `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY) |
+| `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY, `--escape-controls` to escape control characters in its output) |
 | `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`. |
 | `safeclaw sandbox cp-in NAME FILE...` | Copy regular host files into a running sandbox as `N-name`, owned by the sandbox user, refusing links and other file types. `--to` picks a directory under `/sandbox` (default `/sandbox/in`). |
 | `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, sparse files, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given, `--max-size` (default `1g`) caps the total, and `--max-files` (default `1000`) caps the number of files. |

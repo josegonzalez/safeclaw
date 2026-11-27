@@ -17,7 +17,7 @@ make lint               # golangci-lint
 make test-integration   # real docker; needs the safeclaw image, and safeclaw:sandbox for the variant test
 ```
 
-Unit tests use `internal/docker/dockertest`, a fake docker runner that records every command. The integration tests (`-tags integration`) create, restart, and delete a real session container, and check a real sandbox's isolation: its user, network, read-only mounts and root fs, `docker cp` into `/sandbox`, and that removing it removes its volume. Another checks `sandbox cp-in` and `cp-out`: that copied files are owned by the sandbox user and numbered across calls, that links are refused on the way in and links, directories, and nested files are dropped on the way out, that existing host files need `--force`, and that `--max-size` and stopped sandboxes are refused. They also check that a one-off sandbox from `sandbox run --rm` is removed with its volume when stopped, and that `sandbox exec --ephemeral` passes stdin, stdout, and the exit code through and leaves no container behind. These run on the base image. With the `sandbox` variant built, another test checks that sandboxes use it by default, that its poppler, tesseract (with English), 7zip, and file tools run, and that it keeps the sandbox's label, user, and network isolation.
+Unit tests use `internal/docker/dockertest`, a fake docker runner that records every command. The `--escape-controls` runner is unit tested against local commands: escaping on both streams, stdin, exit codes, death by signal, and signal forwarding. The integration tests (`-tags integration`) create, restart, and delete a real session container, and check a real sandbox's isolation: its user, network, read-only mounts and root fs, `docker cp` into `/sandbox`, and that removing it removes its volume. Another checks `sandbox cp-in` and `cp-out`: that copied files are owned by the sandbox user and numbered across calls, that links are refused on the way in and links, directories, and nested files are dropped on the way out, that existing host files need `--force`, and that `--max-size` and stopped sandboxes are refused. They also check that a one-off sandbox from `sandbox run --rm` is removed with its volume when stopped, and that `sandbox exec --ephemeral` passes stdin, stdout, and the exit code through and leaves no container behind. These run on the base image. With the `sandbox` variant built, another test checks that sandboxes use it by default, that its poppler, tesseract (with English), 7zip, and file tools run, and that it keeps the sandbox's label, user, and network isolation.
 
 ## End to end
 
@@ -65,6 +65,8 @@ For one-off sandboxes:
 ```bash
 safeclaw sandbox exec --ephemeral -i -- cat < README.md   # prints the file
 safeclaw sandbox exec --ephemeral -- false; echo $?       # 1
+safeclaw sandbox exec --ephemeral --escape-controls -- sh -c 'printf "\033[31mred\n"; exit 3'; echo $?   # \x1b[31mred, then 3
+safeclaw sandbox exec --ephemeral --escape-controls -t -- true   # refused
 name=$(safeclaw sandbox run --rm -v ./docs:/in)
 safeclaw sandbox ls                                       # yes under ONE-OFF
 safeclaw sandbox stop "$name"                             # and it is gone
