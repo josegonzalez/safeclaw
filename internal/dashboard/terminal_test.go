@@ -3,10 +3,15 @@ package dashboard
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +19,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
 	"github.com/josegonzalez/safeclaw/internal/session"
 )
 
@@ -77,16 +83,30 @@ func newFakeTTYD(t *testing.T) *fakeTTYD {
 }
 
 type fakeTerminals struct {
+	mu    sync.Mutex
 	t     *session.Terminal
+	err   error
 	calls int
 }
 
 func (f *fakeTerminals) Terminal(_ context.Context, name string) (*session.Terminal, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
 	if name != "work" {
 		return nil, session.ErrNoTerminal
 	}
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.t, nil
+}
+
+// set makes the "work" session's terminal t, or its lookup fail with err.
+func (f *fakeTerminals) set(t *session.Terminal, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.t, f.err = t, err
 }
 
 var testCred = session.Credential{User: "safeclaw", Password: "ttyd-secret"}
@@ -374,5 +394,214 @@ func TestTerminalRelayPassesTTYDOriginCheckOnIPv6(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("no hello")
+	}
+}
+
+// openTerminal mints a ticket for the "work" session's terminal with
+// browser's login and opens its WebSocket with it, as the terminal page
+// does, returning the ticket too.
+func openTerminal(ctx context.Context, t *testing.T, srv *httptest.Server, browser map[string]string) (*websocket.Conn, string, int, error) {
+	t.Helper()
+	tk := mintTicket(t, srv.Config.Handler, browser, "/sessions/work/terminal/ws")
+	c, status, err := dialWithTicket(ctx, srv, browser, tk)
+	return c, tk, status, err
+}
+
+func dialWithTicket(ctx context.Context, srv *httptest.Server, browser map[string]string, tk string) (*websocket.Conn, int, error) {
+	h := http.Header{}
+	h.Set("Origin", srv.URL)
+	h.Set("Cookie", browser["Cookie"])
+	return dialDashboard(ctx, srv, "/sessions/work/terminal/ws?ticket="+tk, h)
+}
+
+// wantTryAgainLater checks that the relay accepted c's upgrade and then
+// closed it with StatusTryAgainLater, which the terminal page retries.
+func wantTryAgainLater(ctx context.Context, t *testing.T, c *websocket.Conn, reason string) {
+	t.Helper()
+	defer func() { _ = c.CloseNow() }()
+	// The page sends its hello on open, before the relay closes.
+	_ = c.Write(ctx, websocket.MessageBinary, []byte(`{"columns":80,"rows":24}`))
+	_, _, err := c.Read(ctx)
+	var ce websocket.CloseError
+	if !errors.As(err, &ce) || ce.Code != websocket.StatusTryAgainLater || ce.Reason != reason {
+		t.Fatalf("read = %v, want a close with %v %q", err, websocket.StatusTryAgainLater, reason)
+	}
+}
+
+// wantEcho checks that c reaches the fake ttyd.
+func wantEcho(ctx context.Context, t *testing.T, c *websocket.Conn) {
+	t.Helper()
+	if err := c.Write(ctx, websocket.MessageBinary, []byte(`{"columns":80,"rows":24}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Write(ctx, websocket.MessageBinary, []byte("0hi")); err != nil {
+		t.Fatal(err)
+	}
+	if _, msg, err := c.Read(ctx); err != nil || string(msg) != "0hi" {
+		t.Fatalf("echo = %q, %v", msg, err)
+	}
+}
+
+// startingManager returns a session.Manager whose "work" session's
+// container is running with its terminal port published at tty's address,
+// as it is from `docker run` on, and the directory its ttyd credential goes
+// in, which starts empty, as it is until Ensure starts ttyd.
+func startingManager(t *testing.T, tty *fakeTTYD) (*session.Manager, string) {
+	t.Helper()
+	host, port, _ := net.SplitHostPort(tty.srv.Listener.Addr().String())
+	inspect := `[{"Id":"abc","Name":"/safeclaw-work","State":{"Status":"running","Running":true},` +
+		`"HostConfig":{"NetworkMode":"bridge","PortBindings":{"7681/tcp":[{"HostIp":"` + host + `","HostPort":"` + port + `"}]}},` +
+		`"NetworkSettings":{"Networks":{"bridge":{}}}}]`
+	r := &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
+		if strings.Join(args, " ") == "container inspect safeclaw-work" {
+			return []byte(inspect), nil
+		}
+		return nil, dockertest.NotFound(args)
+	}}
+	dir := t.TempDir()
+	return &session.Manager{Docker: r.Client(), TTYDDir: dir, NetworkDir: t.TempDir()}, dir
+}
+
+// TestTerminalRelayRetriesWhileSessionStarts opens a session's terminal
+// while it is being created, as a frame that loads as soon as its container
+// starts does: the real session.Manager finds the container running with
+// its port published, but no ttyd credential yet. The relay accepts the
+// upgrade and closes it with StatusTryAgainLater, since a browser can't see
+// the status of a refused upgrade, without contacting the session. The
+// ticket was used up, so the retry takes a new one, and connects once the
+// credential is written.
+func TestTerminalRelayRetriesWhileSessionStarts(t *testing.T) {
+	tty := newFakeTTYD(t)
+	m, dir := startingManager(t, tty)
+	s, err := New(Options{Sessions: &fakeSessions{list: sampleSessions()}, Terminals: m, Token: testToken, TokenFile: "unused"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s.Handler())
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	browser := browserLogin(t, srv.Config.Handler)
+
+	c, tk, status, err := openTerminal(ctx, t, srv, browser)
+	if err != nil {
+		t.Fatalf("dial while starting: %v (%d), want the upgrade accepted", err, status)
+	}
+	wantTryAgainLater(ctx, t, c, terminalStartingReason)
+	tty.mu.Lock()
+	dialed := tty.dialed
+	tty.mu.Unlock()
+	if dialed != 0 {
+		t.Errorf("a session without a credential was dialed %d times", dialed)
+	}
+	// Tickets stay single-use: the refused attempt used its ticket up.
+	if _, status, err := dialWithTicket(ctx, srv, browser, tk); err == nil || status != http.StatusUnauthorized {
+		t.Errorf("reused ticket: err = %v, status = %d, want 401", err, status)
+	}
+
+	// A credential that isn't ttyd's user:password is broken, not starting.
+	if err := os.WriteFile(filepath.Join(dir, "work"), []byte("garbage\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, status, err := openTerminal(ctx, t, srv, browser); err == nil || status != http.StatusBadGateway {
+		t.Errorf("invalid credential: err = %v, status = %d, want 502", err, status)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "work"), []byte(testCred.String()+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, _, status, err = openTerminal(ctx, t, srv, browser)
+	if err != nil {
+		t.Fatalf("dial once ready: %v (%d)", err, status)
+	}
+	defer func() { _ = c.CloseNow() }()
+	wantEcho(ctx, t, c)
+	tty.mu.Lock()
+	defer tty.mu.Unlock()
+	if tty.hello["AuthToken"] != testCred.Token() {
+		t.Errorf("hello = %v, want the credential written meanwhile", tty.hello)
+	}
+}
+
+// TestTerminalRelayRetriesUntilTTYDListens covers the rest of the start:
+// the credential is written but ttyd isn't listening yet, or was started
+// with a credential rotated after the lookup. The relay closes with
+// StatusTryAgainLater, and a retry with a new ticket connects once ttyd
+// answers.
+func TestTerminalRelayRetriesUntilTTYDListens(t *testing.T) {
+	srv, tty, terms := newTerminalServer(t)
+	ready := terms.t
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	down := l.Addr().String()
+	_ = l.Close()
+	terms.set(&session.Terminal{Addr: down, Host: tty.host, Credential: testCred}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	browser := browserLogin(t, srv.Config.Handler)
+
+	c, _, status, err := openTerminal(ctx, t, srv, browser)
+	if err != nil {
+		t.Fatalf("dial while ttyd is down: %v (%d)", err, status)
+	}
+	wantTryAgainLater(ctx, t, c, "the session's terminal is not answering")
+
+	terms.set(ready, nil)
+	c, _, status, err = openTerminal(ctx, t, srv, browser)
+	if err != nil {
+		t.Fatalf("dial once ttyd listens: %v (%d)", err, status)
+	}
+	defer func() { _ = c.CloseNow() }()
+	wantEcho(ctx, t, c)
+}
+
+// TestTerminalRelayRefusesBrokenLookups checks that failures a retry won't
+// fix are still refused before the upgrade: a session without a running
+// terminal with 404, and a lookup that fails otherwise with 502.
+func TestTerminalRelayRefusesBrokenLookups(t *testing.T) {
+	srv, tty, terms := newTerminalServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	browser := browserLogin(t, srv.Config.Handler)
+	for _, tc := range []struct {
+		err    error
+		status int
+	}{
+		{fmt.Errorf("session %q %w: it is stopped", "work", session.ErrNoTerminal), http.StatusNotFound},
+		{fmt.Errorf("session %q %w: it is held offline by triage", "work", session.ErrNoTerminal), http.StatusNotFound},
+		// Saved offline state that can't be read keeps it closed, whatever
+		// the reason, even a missing file.
+		{fmt.Errorf("session %q %w: %w", "work", session.ErrNoTerminal, &fs.PathError{Op: "open", Path: "/net/work.json", Err: fs.ErrNotExist}), http.StatusNotFound},
+		{errors.New("docker inspect: daemon unavailable"), http.StatusBadGateway},
+	} {
+		terms.set(nil, tc.err)
+		if _, _, status, err := openTerminal(ctx, t, srv, browser); err == nil || status != tc.status {
+			t.Errorf("%v: err = %v, status = %d, want %d", tc.err, err, status, tc.status)
+		}
+	}
+	tty.mu.Lock()
+	defer tty.mu.Unlock()
+	if tty.dialed != 0 {
+		t.Errorf("failed lookups reached the session %d times", tty.dialed)
+	}
+}
+
+func TestTerminalStarting(t *testing.T) {
+	missing := &fs.PathError{Op: "open", Path: "/ttyd/work", Err: fs.ErrNotExist}
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{nil, false},
+		{fmt.Errorf("session %q: read ttyd credential: %w", "work", missing), true},
+		{fmt.Errorf("session %q %w: it does not exist", "work", session.ErrNoTerminal), false},
+		{fmt.Errorf("%w: %w", session.ErrNoTerminal, missing), false},
+		{errors.New("invalid ttyd credential in /ttyd/work"), false},
+	} {
+		if got := terminalStarting(tc.err); got != tc.want {
+			t.Errorf("terminalStarting(%v) = %v, want %v", tc.err, got, tc.want)
+		}
 	}
 }

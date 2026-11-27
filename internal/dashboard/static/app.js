@@ -160,9 +160,35 @@ if (termEl) {
     });
     term.onResize(({cols, rows}) => send('1' + JSON.stringify({columns: cols, rows})));
     new ResizeObserver(() => fit.fit()).observe(termEl);
-    const loggedOut = () => notice('not logged in: open the URL `safeclaw dashboard` printed, then click refresh');
+    let stopped = false;
+    const loggedOut = () => {
+        if (stopped) return;
+        stopped = true;
+        notice('not logged in: open the URL `safeclaw dashboard` printed, then click refresh');
+    };
     document.addEventListener('login-needed', loggedOut);
+    // A frame loads as soon as its session's container starts, which can be
+    // before its ttyd is up. The relay then closes the socket with 1013
+    // (try again later), and the page tries again with a new ticket, since
+    // each opens the socket once, waiting twice as long each time up to 2
+    // seconds, for up to a minute from the first refusal.
+    const tryAgainLater = 1013, startWindow = 60000, maxDelay = 2000;
+    let startedAt = 0, delay = 0;
+    const retry = () => {
+        if (stopped) return;
+        if (!startedAt) {
+            startedAt = Date.now();
+            notice('starting...');
+        }
+        if (Date.now() - startedAt > startWindow) {
+            notice('the terminal did not start: click refresh to try again');
+            return;
+        }
+        delay = Math.min(delay ? delay * 2 : 250, maxDelay);
+        setTimeout(connect, delay);
+    };
     const connect = async () => {
+        if (stopped) return;
         const secret = login.get();
         if (!secret) { loggedOut(); return; }
         let r;
@@ -179,20 +205,26 @@ if (termEl) {
         if (r.status === 401) { login.stale(secret); return; }
         if (!r.ok) { notice('could not open the terminal: ' + (await r.text()).trim()); return; }
         url.searchParams.set('ticket', await r.text());
-        ws = new WebSocket(url, ['tty']);
-        ws.binaryType = 'arraybuffer';
-        ws.onopen = () => {
-            ws.send(enc.encode(JSON.stringify({columns: term.cols, rows: term.rows})));
+        const sock = ws = new WebSocket(url, ['tty']);
+        sock.binaryType = 'arraybuffer';
+        sock.onopen = () => {
+            sock.send(enc.encode(JSON.stringify({columns: term.cols, rows: term.rows})));
             // Only in its own tab: a framed terminal's iframe is sandboxed,
             // which refuses focus without a click, so it can't take focus
             // from the dashboard.
             if (window === window.top) term.focus();
         };
-        ws.onmessage = (e) => {
+        sock.onmessage = (e) => {
+            // ttyd answered, so a later refusal starts a new window.
+            startedAt = 0;
+            delay = 0;
             const d = new Uint8Array(e.data);
             if (d[0] === 0x30) term.write(d.subarray(1));
         };
-        ws.onclose = () => notice('disconnected: click refresh to reconnect');
+        sock.onclose = (e) => {
+            if (e.code === tryAgainLater) retry();
+            else if (!stopped) notice('disconnected: click refresh to reconnect');
+        };
     };
     connect();
 }
