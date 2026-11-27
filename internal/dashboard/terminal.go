@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 
 	"github.com/coder/websocket"
 
@@ -63,7 +64,8 @@ func (s *Server) handleTerminalSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	t, err := s.terminals.Terminal(r.Context(), name)
-	if err != nil {
+	starting := terminalStarting(err)
+	if err != nil && !starting {
 		status := http.StatusBadGateway
 		if errors.Is(err, session.ErrNoTerminal) {
 			status = http.StatusNotFound
@@ -82,12 +84,21 @@ func (s *Server) handleTerminalSocket(w http.ResponseWriter, r *http.Request) {
 		_ = client.Close(websocket.StatusPolicyViolation, "the tty subprotocol is required")
 		return
 	}
+	// A browser can't see the status of a refused upgrade, so a terminal
+	// that isn't up yet is reported after it, as a close with
+	// StatusTryAgainLater, which the terminal page retries.
+	if starting {
+		_ = client.Close(websocket.StatusTryAgainLater, terminalStartingReason)
+		return
+	}
 	client.SetReadLimit(terminalReadLimit)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	upstream, err := dialTerminal(ctx, t)
 	if err != nil {
+		// ttyd isn't listening yet, or was started with a credential
+		// rotated after the lookup; either way, a retry looks it up again.
 		log.Printf("terminal %s: %v", name, err)
 		_ = client.Close(websocket.StatusTryAgainLater, "the session's terminal is not answering")
 		return
@@ -118,6 +129,19 @@ func (s *Server) handleTerminalSocket(w http.ResponseWriter, r *http.Request) {
 	cancel()
 	_ = client.Close(websocket.StatusNormalClosure, "")
 	_ = upstream.Close(websocket.StatusNormalClosure, "")
+}
+
+// terminalStartingReason is the close reason for a terminal that isn't up
+// yet.
+const terminalStartingReason = "the session's terminal is starting"
+
+// terminalStarting reports whether a terminal lookup failed only because
+// the session is still starting: its container is running with its port
+// published, but its ttyd credential isn't written yet. A session's frame
+// loads as soon as its container starts, before Ensure writes the
+// credential and starts ttyd.
+func terminalStarting(err error) bool {
+	return err != nil && errors.Is(err, os.ErrNotExist) && !errors.Is(err, session.ErrNoTerminal)
 }
 
 // dialTerminal opens a WebSocket to the session's ttyd. It dials the address
