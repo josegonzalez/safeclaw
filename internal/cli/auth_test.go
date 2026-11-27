@@ -6,11 +6,13 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/josegonzalez/safeclaw/internal/hangup"
 	"github.com/josegonzalez/safeclaw/internal/secrets"
 	"github.com/josegonzalez/safeclaw/internal/session"
 )
@@ -193,5 +195,23 @@ func TestStdinIsTerminal(t *testing.T) {
 	run.SetIn(strings.NewReader(""))
 	if stdinIsTerminal(run) {
 		t.Fatal("a reader stdin counts as a terminal")
+	}
+}
+
+// Closing the terminal during a login cancels it, so it removes its sign-in
+// container instead of dying with it still there.
+func TestCancelOnHangup(t *testing.T) {
+	if len(hangup.Signals(syscall.SIGHUP)) == 0 {
+		t.Skip("SIGHUP is ignored, as under nohup")
+	}
+	ctx, stop := cancelOnHangup(context.Background())
+	defer stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("SIGHUP did not cancel the login")
 	}
 }

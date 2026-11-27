@@ -270,9 +270,9 @@ type Manager struct {
 	// PortFree reports whether a host port can be bound. Defaults to a
 	// net.Listen probe.
 	PortFree func(port int) bool
-	// ProcessAlive reports whether a host PID is running. Defaults to a
-	// signal 0 probe.
-	ProcessAlive func(pid string) bool
+	// AuthDir holds the owner files that running logins lock for as long
+	// as their sign-in containers exist. Defaults to config.AuthDir().
+	AuthDir string
 	// Sleep defaults to time.Sleep.
 	Sleep func(time.Duration)
 	// OpenBrowser defaults to open/xdg-open.
@@ -297,6 +297,7 @@ func NewManager(out io.Writer) *Manager {
 		CopyDir:      config.CopyDir(),
 		TTYDDir:      config.TTYDDir(),
 		DashboardDir: config.DashboardDir(),
+		AuthDir:      config.AuthDir(),
 		Out:          out,
 		LoadVariants: func() (*variant.Set, error) {
 			return variant.Load(config.File())

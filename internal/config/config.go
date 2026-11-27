@@ -111,8 +111,9 @@ const (
 	MemoryOff = "off"
 
 	// LabelAuth marks the short-lived container `safeclaw auth login` runs
-	// `claude setup-token` in, with the PID of the safeclaw process that
-	// started it.
+	// `claude setup-token` in, with the random owner ID of the login that
+	// started it. That login locks a file named after the ID in AuthDir
+	// until the container is gone.
 	LabelAuth = "safeclaw.auth"
 	// AuthContainerPrefix starts the name of every sign-in container. It is
 	// outside ContainerPrefix, so sign-in containers are never listed as
@@ -178,6 +179,12 @@ func CopyDir() string {
 // is kept apart from SessionsDir, which is mounted into the containers.
 func TTYDDir() string {
 	return filepath.Join(Dir(), "ttyd")
+}
+
+// AuthDir returns the directory holding the owner file each running
+// `safeclaw auth login` locks while its sign-in container exists.
+func AuthDir() string {
+	return filepath.Join(Dir(), "auth")
 }
 
 // DashboardDir returns the directory holding the dashboard's API tokens.

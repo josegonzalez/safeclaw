@@ -922,7 +922,8 @@ func TestIntegrationSetupTokenRecording(t *testing.T) {
 	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
 		t.Skip("safeclaw image not built; run `safeclaw build` first")
 	}
-	id, err := d.Run(ctx, "-d", "--label", config.LabelAuth+"=integration", config.ImageName, "sleep", "infinity")
+	args := append([]string{"-d", "--label", config.LabelAuth + "=integration"}, hardenArgs...)
+	id, err := d.Run(ctx, append(args, config.ImageName, "sleep", "infinity")...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -930,6 +931,11 @@ func TestIntegrationSetupTokenRecording(t *testing.T) {
 
 	if out, err := d.Exec(ctx, id, docker.ExecOptions{}, "bash", "-c", "command -v claude script"); err != nil || strings.Count(string(out), "\n") != 2 {
 		t.Fatalf("image lacks claude or script: %q, %v", out, err)
+	}
+	// Claude Code starts without capabilities, under script's pty, the
+	// way the sign-in runs it.
+	if out, err := d.Exec(ctx, id, docker.ExecOptions{Stdin: strings.NewReader("")}, "script", "-qec", "claude --version", "/dev/null"); err != nil || !strings.Contains(string(out), "Claude Code") {
+		t.Errorf("claude --version under script: %q, %v", out, err)
 	}
 	const tok = "sk-ant-oat01-integration_Test-0123456789"
 	cmd := `printf '\033[1m%s\033[0m\n' ` + tok

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
+	"github.com/josegonzalez/safeclaw/internal/hangup"
 	"github.com/josegonzalez/safeclaw/internal/prompt"
 	"github.com/josegonzalez/safeclaw/internal/secrets"
 	"github.com/josegonzalez/safeclaw/internal/session"
@@ -81,6 +84,19 @@ var removeStaleAuthContainers = func(ctx context.Context) {
 	m.RemoveStaleAuthContainers(ctx)
 }
 
+// cancelOnHangup returns ctx, also cancelled by SIGHUP. Interrupts and
+// SIGTERM already cancel the command's context, and closing the terminal
+// sends SIGHUP, which would otherwise kill a login before it removes its
+// sign-in container. A process started with SIGHUP ignored, as under nohup,
+// keeps ignoring it.
+func cancelOnHangup(ctx context.Context) (context.Context, context.CancelFunc) {
+	sigs := hangup.Signals(syscall.SIGHUP)
+	if len(sigs) == 0 {
+		return context.WithCancel(ctx)
+	}
+	return signal.NotifyContext(ctx, sigs...)
+}
+
 func newAuthLoginCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "login",
@@ -92,8 +108,10 @@ func newAuthLoginCommand() *cobra.Command {
 			if !stdinIsTerminal(cmd) {
 				return errors.New("auth login needs a terminal; pipe an existing token to `safeclaw auth set` instead")
 			}
+			ctx, stop := cancelOnHangup(cmd.Context())
+			defer stop()
 			m := session.NewManager(cmd.OutOrStdout())
-			tok, err := m.SetupToken(cmd.Context())
+			tok, err := m.SetupToken(ctx)
 			if err != nil {
 				return err
 			}
