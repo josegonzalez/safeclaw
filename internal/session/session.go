@@ -751,6 +751,18 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			}
 		}
 	default:
+		// A new container gets a new credential, so one an earlier container
+		// could read never opens its terminal. No container has the name
+		// now, so no running ttyd still takes the old one, and a container
+		// restored below gets the new one when its ttyd next starts.
+		if _, err := m.rotateCredential(name); err != nil {
+			if restore != nil {
+				if rerr := restore(); rerr != nil {
+					return nil, fmt.Errorf("%w (restoring the previous container also failed: %w)", err, rerr)
+				}
+			}
+			return nil, err
+		}
 		archived := ""
 		if opts.FreshHistory {
 			if archived, err = m.archiveHistory(name); err != nil {
