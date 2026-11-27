@@ -77,6 +77,19 @@ docker cp report.zip safeclaw-triage:/sandbox/
 safeclaw sandbox rm -f triage
 ```
 
+A one-off sandbox lives for exactly one job, so jobs never share files, locks, or cleanup. Without `-s` it gets a random name, and a name that already exists is refused.
+
+```bash
+# Run one command in a new sandbox that is removed when the command exits
+safeclaw sandbox exec --ephemeral -i -- python3 - < extract.py
+safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- unzip -l /in/report.zip
+
+# Or keep one around for a job with several steps; it is removed when stopped
+name=$(safeclaw sandbox run --rm -v ~/inbox:/in)
+safeclaw sandbox exec "$name" -- unzip -d /sandbox/out /in/report.zip
+safeclaw sandbox stop "$name"
+```
+
 ## What's included
 
 - Ubuntu 26.04
@@ -135,7 +148,9 @@ You can add any additional secrets with `safeclaw env` or by creating files in t
 | `safeclaw rm NAME` | Delete a session container (history is kept) |
 | `safeclaw attach NAME` | Attach to a session's tmux session in this terminal |
 | `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory read-only, `--memory`, `--pids-limit`, and `--cpus` set limits. |
+| `safeclaw sandbox run --rm [-s NAME]` | Create a one-off sandbox that is removed when it stops, and print its name |
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY) |
+| `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v` and limit flags as `sandbox run`. |
 | `safeclaw sandbox ls` | List sandboxes |
 | `safeclaw sandbox stop NAME` | Stop a sandbox |
 | `safeclaw sandbox rm NAME` | Delete a sandbox and its `/sandbox` volume |

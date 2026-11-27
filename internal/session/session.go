@@ -505,6 +505,14 @@ type Session struct {
 	Status string `json:"-"`
 	// Type is config.TypeSession or config.TypeSandbox.
 	Type string `json:"type"`
+	// AutoRemove is set for one-off sandboxes, which docker removes when
+	// they stop.
+	AutoRemove bool `json:"autoRemove"`
+}
+
+// IsOneOff reports whether the session is a one-off sandbox.
+func (s Session) IsOneOff() bool {
+	return s.IsSandbox() && s.AutoRemove
 }
 
 // IsSandbox reports whether the session is a headless sandbox.
@@ -534,12 +542,13 @@ func (m *Manager) List(ctx context.Context) ([]Session, error) {
 			continue
 		}
 		s := Session{
-			Container: name,
-			Name:      config.SessionName(name),
-			Active:    c.State.Running,
-			Status:    c.State.Status,
-			Volume:    "-",
-			Type:      TypeOf(c),
+			Container:  name,
+			Name:       config.SessionName(name),
+			Active:     c.State.Running,
+			Status:     c.State.Status,
+			Volume:     "-",
+			Type:       TypeOf(c),
+			AutoRemove: c.HostConfig.AutoRemove,
 		}
 		if mounts := c.BindMounts(config.ProjectsMount); len(mounts) > 0 {
 			s.Volume = strings.Join(mounts, ", ")

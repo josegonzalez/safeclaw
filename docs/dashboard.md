@@ -10,7 +10,7 @@ Pages and fragments are rendered on the server with `html/template`. [htmx 4](ht
 
 The server runs one `docker events` stream, restarted a second after it exits. Whenever a `safeclaw-*` container is created, started, stopped, dies, or is destroyed, it sends a `sessions` event to every browser on `/events`. The page then re-fetches the sessions table and the frames grid and morphs them into place (`innerMorph`/`outerMorph`). Unchanged iframes keep their DOM node, so running terminals don't reconnect when another session changes.
 
-Sandboxes are listed in the table with a `sandbox` badge and only their stop or delete button. They have no URL, info dialog, start button, or iframe, and start and info return 409 for them. Create refuses a sandbox's name like any other taken name.
+Sandboxes are listed in the table with a `sandbox` badge and only their stop or delete button. They have no URL, info dialog, start button, or iframe, and start and info return 409 for them. Create refuses a sandbox's name like any other taken name. One-off sandboxes also get a `one-off` badge, and stopping one removes its row, because docker removes the container when it stops.
 
 Dashboard actions respond with `HX-Trigger: sessions`, so the page also refreshes right away without waiting for the docker event.
 
@@ -35,7 +35,7 @@ The JSON API from upstream is kept for scripting:
 
 | Route | Body | Response |
 |-------|------|----------|
-| `GET /api/sessions` | | `[{name, port, url, volume, active, type}]`, `type` is `session` or `sandbox` |
+| `GET /api/sessions` | | `[{name, port, url, volume, active, type, autoRemove}]`, `type` is `session` or `sandbox`, `autoRemove` is true for one-off sandboxes |
 | `POST /api/start` | `{"name"}` | `{success, url}`, or 409 for a sandbox |
 | `POST /api/stop` | `{"name"}` | `{success}` |
 | `POST /api/delete` | `{"name"}` | `{success}` |

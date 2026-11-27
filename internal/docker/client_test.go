@@ -14,7 +14,7 @@ const inspectJSON = `[{
   "Image": "sha256:abc",
   "Config": {"Labels": {"safeclaw.type": "sandbox"}},
   "State": {"Status": "exited", "Running": false},
-  "HostConfig": {"PortBindings": {"7681/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7683"}]}},
+  "HostConfig": {"PortBindings": {"7681/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7683"}]}, "AutoRemove": true},
   "Mounts": [
     {"Type": "bind", "Source": "/Users/me/.config/safeclaw/sessions/work", "Destination": "/home/sclaw/.claude/projects"},
     {"Type": "bind", "Source": "/Users/me/proj", "Destination": "/home/sclaw/proj"},
@@ -42,6 +42,9 @@ func TestParseInspect(t *testing.T) {
 	}
 	if got := c.Label("missing"); got != "" {
 		t.Errorf("Label(missing) = %q", got)
+	}
+	if !c.HostConfig.AutoRemove {
+		t.Error("AutoRemove = false, want true")
 	}
 	want := []string{"/Users/me/proj:/home/sclaw/proj"}
 	if got := c.BindMounts("/home/sclaw/.claude/projects"); !reflect.DeepEqual(got, want) {
