@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"sync"
@@ -35,13 +36,20 @@ type Hub struct {
 	mu      sync.Mutex
 	clients map[chan string]struct{}
 	// IsSession reports whether a container ID belongs to a safeclaw
-	// container, to filter network events. Nil publishes them all.
-	IsSession func(id string) bool
+	// container, to filter network events. Nil publishes them all. An error
+	// means it could not tell, and the answer is not cached.
+	IsSession func(id string) (bool, error)
+
+	// sessions caches IsSession answers by container ID. An entry is dropped
+	// when its container is destroyed, and all of them when the event stream
+	// restarts, since a destroy may have been missed.
+	sessionsMu sync.Mutex
+	sessions   map[string]bool
 }
 
 // NewHub returns an empty Hub.
 func NewHub() *Hub {
-	return &Hub{clients: map[chan string]struct{}{}}
+	return &Hub{clients: map[chan string]struct{}{}, sessions: map[string]bool{}}
 }
 
 // Subscribe registers a client. Call the returned function to unsubscribe.
@@ -75,10 +83,13 @@ func (h *Hub) Publish(action string) {
 // checked by ID.
 func (h *Hub) Handle(ev docker.Event) {
 	if ev.Type == "network" {
-		if watchedNetworkActions[ev.Action] && (h.IsSession == nil || h.IsSession(ev.Container)) {
+		if watchedNetworkActions[ev.Action] && h.isSession(ev.Container) {
 			h.Publish(ev.Action)
 		}
 		return
+	}
+	if ev.Action == "destroy" {
+		h.forget(ev.Container)
 	}
 	if !watchedActions[ev.Action] || !strings.HasPrefix(ev.Name, config.ContainerPrefix) {
 		return
@@ -86,33 +97,61 @@ func (h *Hub) Handle(ev docker.Event) {
 	h.Publish(ev.Action)
 }
 
-// isSession returns a Hub.IsSession that inspects the container, caching
-// the answer per ID.
-func isSession(d *docker.Client) func(id string) bool {
-	var mu sync.Mutex
-	seen := map[string]bool{}
-	return func(id string) bool {
-		if id == "" {
-			return false
-		}
-		mu.Lock()
-		v, ok := seen[id]
-		mu.Unlock()
-		if ok {
-			return v
-		}
+// isSession answers IsSession for a container ID, from the cache when it can.
+func (h *Hub) isSession(id string) bool {
+	if h.IsSession == nil {
+		return true
+	}
+	if id == "" {
+		return false
+	}
+	h.sessionsMu.Lock()
+	v, ok := h.sessions[id]
+	h.sessionsMu.Unlock()
+	if ok {
+		return v
+	}
+	v, err := h.IsSession(id)
+	if err != nil {
+		return false
+	}
+	h.sessionsMu.Lock()
+	h.sessions[id] = v
+	h.sessionsMu.Unlock()
+	return v
+}
+
+// forget drops a container's cached IsSession answer.
+func (h *Hub) forget(id string) {
+	h.sessionsMu.Lock()
+	delete(h.sessions, id)
+	h.sessionsMu.Unlock()
+}
+
+// forgetAll drops every cached IsSession answer.
+func (h *Hub) forgetAll() {
+	h.sessionsMu.Lock()
+	clear(h.sessions)
+	h.sessionsMu.Unlock()
+}
+
+// errNotInspectable is returned for a container that inspect cannot find,
+// which may only mean it is not inspectable yet.
+var errNotInspectable = errors.New("container not inspectable")
+
+// isSession returns a Hub.IsSession that inspects the container.
+func isSession(d *docker.Client) func(id string) (bool, error) {
+	return func(id string) (bool, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		c, err := d.InspectOne(ctx, id)
-		if err != nil || c == nil {
-			// Not cached: the container may not be inspectable yet.
-			return false
+		if err != nil {
+			return false, err
 		}
-		v = strings.HasPrefix(c.ShortName(), config.ContainerPrefix)
-		mu.Lock()
-		seen[id] = v
-		mu.Unlock()
-		return v
+		if c == nil {
+			return false, errNotInspectable
+		}
+		return strings.HasPrefix(c.ShortName(), config.ContainerPrefix), nil
 	}
 }
 
@@ -120,6 +159,8 @@ func isSession(d *docker.Client) func(id string) bool {
 // after it ends.
 func (h *Hub) Run(ctx context.Context, events EventSource) {
 	for ctx.Err() == nil {
+		// Destroy events may have been missed while the stream was down.
+		h.forgetAll()
 		if err := events(ctx, h.Handle); err != nil && ctx.Err() == nil {
 			log.Printf("docker events: %v", err)
 		}

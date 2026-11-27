@@ -87,6 +87,80 @@ func TestContainerNamesFiltersPrefix(t *testing.T) {
 	}
 }
 
+func listRunner(missing map[string]bool) *dockertest.Runner {
+	return &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
+		if args[0] == "ps" {
+			return []byte("safeclaw-a\nsafeclaw-b\nsafeclaw-c\n"), nil
+		}
+		var objs []string
+		for _, name := range args[2:] {
+			if missing[name] {
+				return nil, dockertest.NotFound(args)
+			}
+			objs = append(objs, `{"Id":"id-`+name+`","Name":"/`+name+`"}`)
+		}
+		return []byte("[" + strings.Join(objs, ",") + "]"), nil
+	}}
+}
+
+func listNames(cs []docker.Container) []string {
+	var names []string
+	for _, c := range cs {
+		names = append(names, c.ShortName())
+	}
+	return names
+}
+
+func TestListInspectsOnce(t *testing.T) {
+	r := listRunner(nil)
+	cs, err := r.Client().List(context.Background(), "safeclaw-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"safeclaw-a", "safeclaw-b", "safeclaw-c"}; !reflect.DeepEqual(listNames(cs), want) {
+		t.Errorf("List = %v, want %v", listNames(cs), want)
+	}
+	want := []string{"ps -a --filter name=safeclaw- --format {{.Names}}", "container inspect safeclaw-a safeclaw-b safeclaw-c"}
+	if got := r.Commands(); !reflect.DeepEqual(got, want) {
+		t.Errorf("commands = %q, want %q", got, want)
+	}
+}
+
+func TestListSkipsRemovedContainers(t *testing.T) {
+	r := listRunner(map[string]bool{"safeclaw-b": true})
+	cs, err := r.Client().List(context.Background(), "safeclaw-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"safeclaw-a", "safeclaw-c"}; !reflect.DeepEqual(listNames(cs), want) {
+		t.Errorf("List = %v, want %v", listNames(cs), want)
+	}
+	if cs[0].ID != "id-safeclaw-a" || cs[1].ID != "id-safeclaw-c" {
+		t.Errorf("IDs = %q, %q", cs[0].ID, cs[1].ID)
+	}
+	for _, name := range []string{"safeclaw-a", "safeclaw-b", "safeclaw-c"} {
+		if _, ok := r.Find("container inspect " + name); !ok {
+			t.Errorf("%s not inspected on its own: %q", name, r.Commands())
+		}
+	}
+}
+
+func TestListFailsOnOtherErrors(t *testing.T) {
+	boom := &docker.Error{Args: []string{"container"}, Stderr: "Cannot connect to the Docker daemon", Err: io.EOF}
+	r := &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
+		if args[0] == "ps" {
+			return []byte("safeclaw-a\nsafeclaw-b\n"), nil
+		}
+		if len(args) > 3 {
+			return nil, dockertest.NotFound(args)
+		}
+		return nil, boom
+	}}
+	if _, err := r.Client().List(context.Background(), "safeclaw-"); !errors.Is(err, boom) {
+		t.Errorf("List error = %v, want %v", err, boom)
+	}
+}
+
 func TestImageIDMissing(t *testing.T) {
 	r := &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
 		return nil, dockertest.NotFound(args)
@@ -105,7 +179,11 @@ func TestParseEvent(t *testing.T) {
 	if ev.Type != "container" || ev.Container != "" {
 		t.Errorf("container event = %+v", ev)
 	}
-	ev, ok = docker.ParseEvent([]byte(`{"Type":"network","Action":"disconnect","Actor":{"Attributes":{"name":"bridge","container":"abc"}}}`))
+	ev, ok = docker.ParseEvent([]byte(`{"Type":"container","Action":"destroy","Actor":{"ID":"def","Attributes":{"name":"safeclaw-x"}}}`))
+	if !ok || ev.Action != "destroy" || ev.Container != "def" {
+		t.Errorf("container event with ID = %+v, %v", ev, ok)
+	}
+	ev, ok = docker.ParseEvent([]byte(`{"Type":"network","Action":"disconnect","Actor":{"ID":"netid","Attributes":{"name":"bridge","container":"abc"}}}`))
 	if !ok || ev.Type != "network" || ev.Action != "disconnect" || ev.Name != "bridge" || ev.Container != "abc" {
 		t.Errorf("network event = %+v, %v", ev, ok)
 	}

@@ -174,7 +174,7 @@ func TestHubNetworkEvents(t *testing.T) {
 	h := NewHub()
 	ch, unsubscribe := h.Subscribe()
 	defer unsubscribe()
-	h.IsSession = func(id string) bool { return id == "abc" }
+	h.IsSession = func(id string) (bool, error) { return id == "abc", nil }
 
 	h.Handle(docker.Event{Type: "network", Action: "disconnect", Name: "bridge", Container: "other"})
 	h.Handle(docker.Event{Type: "network", Action: "create", Name: "bridge", Container: "abc"})

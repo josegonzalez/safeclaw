@@ -231,12 +231,29 @@ func (c *Client) InspectOne(ctx context.Context, name string) (*Container, error
 }
 
 // List returns inspect data for every container whose name starts with prefix.
+// A container removed between listing and inspecting is left out.
 func (c *Client) List(ctx context.Context, prefix string) ([]Container, error) {
 	names, err := c.ContainerNames(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
-	return c.Inspect(ctx, names...)
+	cs, err := c.Inspect(ctx, names...)
+	if err == nil || !IsNotFound(err) {
+		return cs, err
+	}
+	// One of them is gone, which fails the whole inspect, so inspect each
+	// on its own and skip the missing ones.
+	cs = nil
+	for _, name := range names {
+		ct, err := c.InspectOne(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if ct != nil {
+			cs = append(cs, *ct)
+		}
+	}
+	return cs, nil
 }
 
 // Run runs `docker run` with the given args and returns the container ID.
@@ -357,7 +374,8 @@ type Event struct {
 	// Name is the container's name for container events and the network's
 	// name for network events.
 	Name string
-	// Container is the container ID a network event is about.
+	// Container is the container ID the event is about: the actor of a
+	// container event, or the container attribute of a network event.
 	Container string
 }
 
@@ -365,6 +383,7 @@ type rawEvent struct {
 	Type   string `json:"Type"`
 	Action string `json:"Action"`
 	Actor  struct {
+		ID         string            `json:"ID"`
 		Attributes map[string]string `json:"Attributes"`
 	} `json:"Actor"`
 }
@@ -386,7 +405,7 @@ func ParseEvent(line []byte) (Event, bool) {
 	if typ != "container" && typ != "network" {
 		return Event{}, false
 	}
-	ev := Event{Type: typ, Action: r.Action, Name: r.Actor.Attributes["name"]}
+	ev := Event{Type: typ, Action: r.Action, Name: r.Actor.Attributes["name"], Container: r.Actor.ID}
 	if typ == "network" {
 		ev.Container = r.Actor.Attributes["container"]
 	}
