@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/josegonzalez/safeclaw/internal/hangup"
 	"github.com/josegonzalez/safeclaw/internal/termtext"
 )
 
@@ -20,8 +21,10 @@ type exitCodeError struct{ code int }
 
 func (e exitCodeError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
 
-// forwardedSignals are passed on to the command runChild runs.
-var forwardedSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT}
+// forwardedSignals are passed on to the command runChild runs. SIGHUP is
+// left out when safeclaw was started with it ignored, as under nohup, so it
+// stays ignored by safeclaw and the command, which inherits that.
+var forwardedSignals = hangup.Signals(syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 
 // runEscaped runs argv with its stdout and stderr passed through
 // termtext.Writer, so control characters in them are escaped before they
@@ -50,7 +53,8 @@ type childOptions struct {
 // signal number when it was killed by a signal, as a shell reports it.
 //
 // SIGINT, SIGTERM, SIGHUP and SIGQUIT sent to safeclaw are forwarded to
-// the command instead of killing safeclaw, so its output is still escaped
+// the command instead of killing safeclaw (SIGHUP only when it wasn't
+// ignored at start, see forwardedSignals), so its output is still escaped
 // and flushed when it exits. The command runs in its own process group, so
 // a Ctrl-C at the terminal reaches it once, through safeclaw. When
 // shareGroup is set it stays in safeclaw's group instead, so it can read a
