@@ -99,6 +99,10 @@ func newSandboxRunCommand() *cobra.Command {
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts := f.options(func(name string) bool { return cmd.Flags().Changed(name) })
+			var err error
+			if opts.Name, err = resolveName(cmd, opts.Name); err != nil {
+				return err
+			}
 			if !opts.Remove {
 				_, err := session.NewManager(cmd.OutOrStdout()).EnsureSandbox(cmd.Context(), opts)
 				return err
@@ -180,11 +184,17 @@ func newSandboxExecCommand() *cobra.Command {
 			if ephemeral {
 				opts := f.options(func(name string) bool { return cmd.Flags().Changed(name) })
 				var err error
+				if opts.Name, err = resolveName(cmd, opts.Name); err != nil {
+					return err
+				}
 				argv, _, err = session.NewManager(nil).PrepareEphemeral(cmd.Context(), opts, interactive, tty, args)
 				if err != nil {
 					return err
 				}
 			} else {
+				if err := resolveArg(cmd, args); err != nil {
+					return err
+				}
 				if err := session.NewManager(nil).RequireType(cmd.Context(), args[0], config.TypeSandbox); err != nil {
 					return err
 				}
@@ -263,6 +273,9 @@ func newSandboxCopyInCommand() *cobra.Command {
 		Args:              cobra.MinimumNArgs(2),
 		ValidArgsFunction: completeSandboxFirst,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := resolveArg(cmd, args); err != nil {
+				return err
+			}
 			paths, err := session.NewManager(nil).CopyIn(cmd.Context(), args[0], args[1:], to)
 			if err != nil {
 				return err
@@ -291,6 +304,9 @@ func newSandboxCopyOutCommand() *cobra.Command {
 		Args:              cobra.ExactArgs(3),
 		ValidArgsFunction: completeSandboxFirst,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := resolveArg(cmd, args); err != nil {
+				return err
+			}
 			limit, err := session.ParseSize(maxSize)
 			if err != nil {
 				return fmt.Errorf("--max-size: %w", err)
@@ -354,6 +370,9 @@ func newSandboxStopCommand() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeType(config.TypeSandbox),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := resolveArg(cmd, args); err != nil {
+				return err
+			}
 			m := session.NewManager(nil)
 			if err := m.RequireType(cmd.Context(), args[0], config.TypeSandbox); err != nil {
 				return err
@@ -372,6 +391,9 @@ func newSandboxRemoveCommand() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeType(config.TypeSandbox),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := resolveArg(cmd, args); err != nil {
+				return err
+			}
 			m := session.NewManager(nil)
 			if err := m.RequireType(cmd.Context(), args[0], config.TypeSandbox); err != nil {
 				return err

@@ -58,11 +58,19 @@ The `Host` check (against DNS rebinding) and `http.CrossOriginProtection` (again
 
 ## Session lifecycle
 
+### Session names
+
+Session names are lowercase letters, numbers, `.`, `_`, and `-`, starting with a letter or number, and may not start with `safeclaw-`. Each session is the container `safeclaw-NAME`, the history directory `~/.config/safeclaw/sessions/NAME`, and the state files named after it, so one name never reaches another session's container with different history or state, including on a case-insensitive filesystem. Commands also accept the container name, with its one `safeclaw-` prefix removed, and the CLI lowercases names like the dashboard's create dialog does, so `Work` is the session `work`. The API and the dashboard's session routes refuse names that aren't already lowercase.
+
+Earlier versions accepted uppercase letters. If a container was created with exactly the mixed-case name given, such as `safeclaw-Work`, the CLI refuses the name instead of acting on `work`, and names `docker rm -f safeclaw-Work` to remove it, since `safeclaw rm` would remove the credential and network state that `work` shares with it on a case-insensitive filesystem. It can then be created again as `work`.
+
+### Creating, starting, and refreshing
+
 `safeclaw run` (and the dashboard's create and start) all go through the same code path:
 
 1. Pick the [image variant](#image-variants) and check its image exists and carries no [safeclaw labels](#labels) of its own, pick the [secrets](#choosing-secrets) the session receives, then check that the Claude token is present if the session receives it (prompting for it only in `run`) and that every listed secret exists
 2. Reuse the container's existing port, or pick the lowest port no `safeclaw-*` container reserves and nothing on the host is listening on, on `[::1]` or `127.0.0.1`
-3. Create, start, or refresh the container. With `-v`, a `--variant` other than the container's, a different set of secrets, or a different [`--host-ipc`](#ipc-namespace) choice, an existing container is recreated, keeping its port and whichever of its mount, variant, secrets, and IPC choice were not given again. Every volume is checked before the old container is removed, and if the new one can't be created, the old one is created again with its port, mounts, variant, secrets, and IPC choice, so a failed recreate never loses the session's secret set. A running container has ttyd and tmux restarted so new env vars take effect. An [offline](#offline-sessions) session is never recreated, and starting it keeps it offline
+3. Create, start, or refresh the container. With `-v`, a `--variant` other than the container's, a different set of secrets, a different [`--host-ipc`](#ipc-namespace) choice, or [`--fresh-history`](#reused-history), an existing container is recreated, keeping its port and whichever of its mount, variant, secrets, and IPC choice were not given again. Every volume is checked before the old container is removed, and if the new one can't be created, the old one is created again with its port, mounts, variant, secrets, and IPC choice, so a failed recreate never loses the session's secret set. A running container has ttyd and tmux restarted so new env vars take effect. An [offline](#offline-sessions) session is never recreated, and starting it keeps it offline
 4. Write `/home/sclaw/.env` from the secrets the session receives
 5. Configure git from the GitHub account if the session receives `GH_TOKEN`
 6. Start ttyd with the session's [terminal credential](#terminal-credential), and with `-q`, wait for Claude Code's input prompt before sending the query
@@ -134,7 +142,7 @@ The status comes from docker: a session attached to no network is offline. `safe
 While a session is offline, or held offline but still attached:
 
 - `run` and the dashboard's start still start or refresh it, warning that the web terminal is unreachable, and a started or running held session is disconnected again from any network attached to it
-- `run` refuses to recreate it for a new `-v`, `--variant`, set of secrets, or `--host-ipc` choice, so it can't come back online as a new container
+- `run` refuses to recreate it for a new `-v`, `--variant`, set of secrets, `--host-ipc` choice, or `--fresh-history`, so it can't come back online as a new container
 - `safeclaw build --recreate` skips it, checking under the network lock just before each removal, and the stale report marks it `(offline)`
 - `safeclaw rm` removes its saved state along with the container
 
@@ -180,6 +188,12 @@ The choice is recorded in the `safeclaw.secrets` container label as comma-separa
 `.env` is replaced on every run, so secrets left out of the set are removed from it. Names given on a run must be stored secrets, by the same rule used when `.env` is written, so an entry the store doesn't count as a secret fails the run instead of being skipped (after prompting for the Claude and GitHub tokens, if the session receives them). A remembered name that has since been deleted is skipped with a warning, so the session still starts. Tokens the session doesn't receive are neither required nor prompted for. Without `CLAUDE_CODE_OAUTH_TOKEN`, a warning says Claude Code won't be logged in.
 
 Sandboxes never receive secrets, whatever their labels say.
+
+### Reused history
+
+A session's history directory is kept when its container is removed or recreated, and it holds Claude Code's transcripts and the memory loaded into its system prompt. So a session whose secrets change keeps what its previous container wrote with the old set: a narrowed session can read transcripts written with more secrets, and a session with none can leave memory for a later one with every secret. When a container is created over existing history with a different set of secrets than the container it replaces, or with a chosen set where no earlier container's set is known, `run` prints a warning naming `--fresh-history`.
+
+`--fresh-history` on `run` or `new` renames the history directory to `NAME.old-TIMESTAMP` next to it, with the time in UTC as `20261127T150405+0000`, and recreates an existing container, so the new one starts with an empty history. Nothing is deleted. The `+` and uppercase `T` can't appear in a session name, so a moved directory is never another session's history. If the new container can't be created, the history is moved back before the old container is restored. Like other recreates, it is refused while the session is offline.
 
 ### Claude Code
 
