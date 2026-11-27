@@ -148,7 +148,7 @@ func TestIntegrationSandbox(t *testing.T) {
 	container := config.ContainerName(name)
 	t.Cleanup(func() { _ = d.Remove(ctx, container, true) })
 
-	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name, Volume: in + ":/in", Variant: config.BaseVariant}); err != nil {
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name, Volume: in + ":/in", Variant: config.BaseVariant, Disk: "8m"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -198,25 +198,45 @@ func TestIntegrationSandbox(t *testing.T) {
 		t.Errorf("host config = %q, %v", got, err)
 	}
 
-	// docker cp works into the /sandbox volume.
-	if _, err := d.R.Output(ctx, nil, "cp", filepath.Join(in, "doc.txt"), container+":/sandbox/copied.txt"); err != nil {
-		t.Errorf("docker cp: %v", err)
+	// /sandbox is a tmpfs of --disk bytes owned by the sandbox user, with
+	// no docker volume behind it.
+	if out, err := run("stat", "-f", "-c", "%T", "/sandbox"); err != nil || out != "tmpfs" {
+		t.Errorf("/sandbox filesystem = %q, %v", out, err)
 	}
-	if out, err := run("cat", "/sandbox/copied.txt"); err != nil || out != "untrusted" {
-		t.Errorf("copied file = %q, %v", out, err)
+	if out, err := run("stat", "-c", "%U %a", "/sandbox"); err != nil || out != config.SandboxUser+" 700" {
+		t.Errorf("/sandbox owner and mode = %q, %v", out, err)
+	}
+	if len(c.Mounts) != 1 || c.Mounts[0].Destination != "/in" {
+		t.Errorf("mounts = %+v, want only the -v bind mount", c.Mounts)
+	}
+	// Writes within the size work, and writes past it fail.
+	if _, err := run("dd", "if=/dev/zero", "of=/sandbox/small", "bs=1M", "count=4"); err != nil {
+		t.Errorf("write within --disk: %v", err)
+	}
+	if _, err := run("dd", "if=/dev/zero", "of=/sandbox/big", "bs=1M", "count=16"); err == nil {
+		t.Error("write past --disk succeeded")
+	}
+	if out, err := run("sh", "-c", "rm /sandbox/big && printf x > /sandbox/kept && cat /sandbox/kept"); err != nil || out != "x" {
+		t.Errorf("write after freeing space = %q, %v", out, err)
 	}
 
-	// Removing the sandbox removes its anonymous volume too.
-	out, err = d.R.Output(ctx, nil, "container", "inspect", "--format", `{{range .Mounts}}{{if eq .Destination "/sandbox"}}{{.Name}}{{end}}{{end}}`, container)
-	volume := strings.TrimSpace(string(out))
-	if err != nil || volume == "" {
-		t.Fatalf("sandbox volume = %q, %v", volume, err)
-	}
-	if err := m.Delete(ctx, name, true); err != nil {
+	// Stopping the sandbox empties /sandbox, and starting it again keeps
+	// its size.
+	if err := m.Stop(ctx, name); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.R.Output(ctx, nil, "volume", "inspect", volume); err == nil {
-		t.Errorf("volume %s survived sandbox removal", volume)
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name}); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run("ls", "-A", "/sandbox"); err != nil || out != "" {
+		t.Errorf("/sandbox after a restart = %q, %v", out, err)
+	}
+	if out, err := run("df", "-k", "--output=size", "/sandbox"); err != nil || !strings.HasSuffix(out, "8192") {
+		t.Errorf("/sandbox size after a restart = %q, %v", out, err)
+	}
+
+	if err := m.Delete(ctx, name, true); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -239,7 +259,7 @@ func waitGone(t *testing.T, d *docker.Client, container string) {
 }
 
 // TestIntegrationSandboxRemove checks that a one-off sandbox from
-// `sandbox run --rm` is removed, with its volume, when it stops.
+// `sandbox run --rm` is removed when it stops.
 func TestIntegrationSandboxRemove(t *testing.T) {
 	d := docker.New()
 	ctx := context.Background()
@@ -275,18 +295,10 @@ func TestIntegrationSandboxRemove(t *testing.T) {
 		t.Errorf("exec user = %q, %v", out, err)
 	}
 
-	out, err := d.R.Output(ctx, nil, "container", "inspect", "--format", `{{range .Mounts}}{{if eq .Destination "/sandbox"}}{{.Name}}{{end}}{{end}}`, res.Container)
-	volume := strings.TrimSpace(string(out))
-	if err != nil || volume == "" {
-		t.Fatalf("sandbox volume = %q, %v", volume, err)
-	}
 	if err := m.Stop(ctx, res.Name); err != nil {
 		t.Fatal(err)
 	}
 	waitGone(t, d, res.Container)
-	if _, err := d.R.Output(ctx, nil, "volume", "inspect", volume); err == nil {
-		t.Errorf("volume %s survived one-off sandbox removal", volume)
-	}
 }
 
 // TestIntegrationSandboxEphemeral runs `sandbox exec --ephemeral`'s argv

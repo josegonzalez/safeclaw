@@ -94,8 +94,8 @@ A sandbox is created with none of what an interactive session gets: no secrets a
 - `--network none`, so loopback is the only interface
 - `--user sandbox`, an unprivileged, non-login user (uid 2000) whose home and working directory is `/sandbox`. `/home/sclaw` is mode 1770 with group `sclaw`, so it can't be read
 - `--cap-drop ALL` and `--security-opt no-new-privileges`
-- `--read-only`, with a 256 MB tmpfs at `/tmp` and an anonymous volume at `/sandbox`. Files are copied into the volume with [`sandbox cp-in`](#copying-files), and removing the sandbox removes the volume too
-- `--memory 1g`, `--pids-limit 256`, and `--cpus 1` by default, changeable with flags of the same name
+- `--read-only`, with a 256 MB tmpfs at `/tmp` and a tmpfs at `/sandbox` (see [sandbox disk](#sandbox-disk)). Files are copied into `/sandbox` with [`sandbox cp-in`](#copying-files)
+- `--memory 2g`, `--pids-limit 256`, `--cpus 1`, and `--disk 1g` by default, changeable with flags of the same name
 - `HOME=/sandbox`, an empty `BASH_ENV`, and a `PATH` without sclaw's `~/.local/bin`
 
 `safeclaw sandbox exec`, with or without `--ephemeral`, runs its command as `/bin/sh -c 'umask 022; exec "$@"' sh CMD...`, so files it creates are not world-writable whatever umask docker gives the command. Some Docker versions start `docker exec` processes with a umask of `0000` instead of the container's. The command and its arguments are passed to the shell as positional parameters, so they reach the command exactly as given.
@@ -103,6 +103,16 @@ A sandbox is created with none of what an interactive session gets: no secrets a
 By default `sandbox exec` replaces itself with docker, so the command's output reaches the terminal byte for byte, including any escape sequences that came from the untrusted files: file names in an archive tool's messages, or errors from `pdftotext` or a script that failed on a crafted file. With `--escape-controls`, safeclaw instead runs docker as a child and passes its stdout and stderr, kept apart, through the same escaping as docker errors (see [copying files](#copying-files)): anything `unicode.IsPrint` rejects other than newline and tab, carriage return and invalid UTF-8 included, is written as a Go escape such as `\x1b`. Escaping rather than dropping keeps what the command said visible. A UTF-8 character split across reads is held back until it is whole. safeclaw returns docker's exit code, or 128 plus the signal number when a signal killed docker, and forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT to it. Docker runs in its own process group so a Ctrl-C reaches it once, through safeclaw, except with `-i` and a terminal on stdin, where it must stay in the foreground group to read it; there the terminal signals it directly and only SIGTERM and SIGHUP are forwarded. `--escape-controls` is refused with `-t`, since a TTY merges stdout and stderr and the programs that want one need their control characters. The flag is opt-in because escaping changes the bytes, so binary output should be piped without it.
 
 With `-v`, a host directory is mounted read-only, whatever options the spec carries. Rerunning `sandbox run` starts a stopped sandbox or leaves a running one alone, and `-v`, any limit flag, or a `--variant` other than the sandbox's recreates it. The new sandbox keeps whichever of the old one's mount, variant, and limits were not given again.
+
+### Sandbox disk
+
+`/sandbox` is a tmpfs of `--disk` bytes (default `1g`), mode 0700 and owned by the sandbox user, so a tool that extracts an untrusted archive there gets "No space left on device" once it reaches the limit, whether or not the archive records or tells the truth about its uncompressed size, and a zip bomb can't fill the Docker host's disk. `--disk 0` is refused, since a tmpfs of size 0 has no limit. A docker volume would keep files across a stop, but volume size quotas only work on a few storage drivers (overlay2 on xfs with project quotas, for one) and not on Docker Desktop or OrbStack, so a tmpfs is the limit that works everywhere. This has three consequences:
+
+- tmpfs pages count toward `--memory`, which is why its default is 2g: a full `/sandbox` and `/tmp` still leave about 750 MB for processes. When a sandbox's files and processes together go past `--memory`, the kernel swaps if the host allows it and otherwise kills the process that is writing, so the limit holds either way. Raise `--memory` along with `--disk`
+- Stopping a sandbox empties `/sandbox`, as stopping a one-off sandbox removes it. Its size is kept, and it is still empty, mode 0700, and owned by the sandbox user when the sandbox starts again
+- `docker cp` into `/sandbox` is refused, since docker writes it to the read-only root filesystem rather than the tmpfs. `sandbox cp-in` works
+
+The limit counts blocks actually written, not a file's apparent size, so a sandbox can still create a sparse file far larger than `--disk` (`truncate -s 8E` works, as it does on `/tmp`). Reading such a file only yields zeros, and [`cp-out`](#copying-files) checks each file's declared size against `--max-size` before copying anything, so it never streams one to the host.
 
 Sandboxes run the `sandbox` [image variant](#image-variants) unless the config file or `--variant` says otherwise, so the document extraction tools are already installed and never need the network or root.
 
@@ -120,7 +130,7 @@ The sandbox side also controls what those commands write to stderr, and part of 
 
 ### One-off sandboxes
 
-A one-off sandbox lives for exactly one job, so callers sharing the host need no locking, no detection of a sandbox recreated under the same name, and no per-job cleanup. If something removes one mid-job, the job is simply run again. One-off sandboxes are created with docker's `--rm`, so docker itself removes the container and its `/sandbox` volume when it stops, and they get the same isolation, limits, and read-only `-v` as any other sandbox. Without `-s` they get a random `tmp-<8 hex>` name, and a name any container already has is refused rather than reused.
+A one-off sandbox lives for exactly one job, so callers sharing the host need no locking, no detection of a sandbox recreated under the same name, and no per-job cleanup. If something removes one mid-job, the job is simply run again. One-off sandboxes are created with docker's `--rm`, so docker itself removes the container when it stops, and they get the same isolation, limits, and read-only `-v` as any other sandbox. Without `-s` they get a random `tmp-<8 hex>` name, and a name any container already has is refused rather than reused.
 
 - `safeclaw sandbox exec --ephemeral -- CMD` checks the image and name, then replaces itself with `docker run --rm --init` in the foreground (or, with `--escape-controls`, runs it as a child as described [above](#sandboxes)). Cleanup does not depend on safeclaw staying alive, the command's exit code is returned as is, `--init` forwards signals to the command instead of leaving it as PID 1, and nothing but the command writes to stdout
 - `safeclaw sandbox run --rm` creates a detached one-off sandbox for jobs with several steps (`sandbox cp-in`, several `sandbox exec` calls, then `sandbox cp-out`). Progress goes to stderr and only its name to stdout, and `safeclaw sandbox stop` removes it

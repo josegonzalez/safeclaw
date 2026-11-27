@@ -13,7 +13,7 @@ import (
 )
 
 func TestSandboxFlagsOptions(t *testing.T) {
-	f := sandboxFlags{session: "box", volume: "/in:/in", variant: "base", memory: "2g", pidsLimit: 64, cpus: "0.5"}
+	f := sandboxFlags{session: "box", volume: "/in:/in", variant: "base", memory: "2g", pidsLimit: 64, cpus: "0.5", disk: "4g"}
 	none := func(string) bool { return false }
 	// Unset limits are left for the defaults, or a recreated sandbox's own.
 	want := session.SandboxOptions{Name: "box", Volume: "/in:/in", Variant: "base"}
@@ -21,7 +21,7 @@ func TestSandboxFlagsOptions(t *testing.T) {
 		t.Errorf("options = %+v, want %+v", got, want)
 	}
 	all := func(string) bool { return true }
-	want = session.SandboxOptions{Name: "box", Volume: "/in:/in", Variant: "base", Memory: "2g", PidsLimit: 64, CPUs: "0.5", Recreate: true}
+	want = session.SandboxOptions{Name: "box", Volume: "/in:/in", Variant: "base", Memory: "2g", PidsLimit: 64, CPUs: "0.5", Disk: "4g", Recreate: true}
 	if got := f.options(all); !reflect.DeepEqual(got, want) {
 		t.Errorf("options = %+v, want %+v", got, want)
 	}
@@ -48,8 +48,10 @@ func TestSandboxRunFlags(t *testing.T) {
 	if !cmd.Flags().Changed("memory") || cmd.Flags().Changed("cpus") {
 		t.Error("changed flags wrong")
 	}
-	if got := cmd.Flags().Lookup("pids-limit").DefValue; got != "256" {
-		t.Errorf("pids-limit default = %q", got)
+	for flag, want := range map[string]string{"pids-limit": "256", "memory": "2g", "disk": "1g"} {
+		if got := cmd.Flags().Lookup(flag).DefValue; got != want {
+			t.Errorf("%s default = %q, want %q", flag, got, want)
+		}
 	}
 	cmd = newSandboxRunCommand()
 	cmd.SetArgs([]string{})
@@ -84,6 +86,8 @@ func TestSandboxExecArgs(t *testing.T) {
 		{[]string{"-s", "job"}, []string{"box", "ls"}, "--session can only be used with --ephemeral"},
 		{[]string{"-v", "/in:/in"}, []string{"box", "ls"}, "--volume can only be used with --ephemeral"},
 		{[]string{"--cpus", "2"}, []string{"box", "ls"}, "--cpus can only be used with --ephemeral"},
+		{[]string{"--disk", "2g"}, []string{"box", "ls"}, "--disk can only be used with --ephemeral"},
+		{[]string{"--ephemeral", "--disk", "2g"}, []string{"ls"}, ""},
 		{[]string{"--variant", "base"}, []string{"box", "ls"}, "--variant can only be used with --ephemeral"},
 		{[]string{"--ephemeral", "--variant", "base"}, []string{"ls"}, ""},
 		{[]string{"-i", "-t"}, []string{"box", "ls"}, ""},

@@ -37,14 +37,14 @@ func newSandboxCommand() *cobra.Command {
 }
 
 type sandboxFlags struct {
-	session, volume, variant, memory, cpus string
-	pidsLimit                              int
-	remove                                 bool
+	session, volume, variant, memory, cpus, disk string
+	pidsLimit                                    int
+	remove                                       bool
 }
 
 // limitFlags are the sandbox run flags that recreate an existing sandbox
 // when set.
-var limitFlags = []string{"memory", "pids-limit", "cpus"}
+var limitFlags = []string{"memory", "pids-limit", "cpus", "disk"}
 
 // createFlags are the flags that configure a new sandbox.
 var createFlags = append([]string{"session", "volume", "variant"}, limitFlags...)
@@ -59,6 +59,7 @@ func (f *sandboxFlags) register(cmd *cobra.Command, nameHelp, recreates string) 
 	cmd.Flags().StringVar(&f.memory, "memory", session.DefaultSandboxMemory, "memory limit"+recreates)
 	cmd.Flags().IntVar(&f.pidsLimit, "pids-limit", session.DefaultSandboxPidsLimit, "process limit"+recreates)
 	cmd.Flags().StringVar(&f.cpus, "cpus", session.DefaultSandboxCPUs, "CPU limit"+recreates)
+	cmd.Flags().StringVar(&f.disk, "disk", session.DefaultSandboxDisk, "size of /sandbox, a tmpfs that counts toward --memory"+recreates)
 }
 
 // options maps the flags to SandboxOptions. changed reports whether a flag
@@ -80,6 +81,9 @@ func (f sandboxFlags) options(changed func(name string) bool) session.SandboxOpt
 	if changed("cpus") {
 		opts.CPUs = f.cpus
 	}
+	if changed("disk") {
+		opts.Disk = f.disk
+	}
 	for _, name := range limitFlags {
 		if changed(name) {
 			opts.Recreate = true
@@ -94,7 +98,8 @@ func newSandboxRunCommand() *cobra.Command {
 		Use:   "run [-s NAME] [--rm]",
 		Short: "Create or start a sandbox",
 		Long: "Create or start a sandbox. -s is required unless --rm is set.\n\n" +
-			"With --rm, a new one-off sandbox is created and removed with its /sandbox volume when it stops. " +
+			"/sandbox is a tmpfs of --disk bytes: writes past it fail, its pages count toward --memory, and it is emptied when the sandbox stops.\n\n" +
+			"With --rm, a new one-off sandbox is created and removed when it stops. " +
 			"Without -s it gets a random name. Its name is the only thing printed to stdout, and an existing name is refused.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -367,6 +372,7 @@ func newSandboxStopCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:               "stop NAME",
 		Short:             "Stop a sandbox",
+		Long:              "Stop a sandbox. Its /sandbox is a tmpfs, so the files in it are lost. A one-off sandbox is removed.",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeType(config.TypeSandbox),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -387,7 +393,7 @@ func newSandboxRemoveCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:               "rm NAME",
 		Aliases:           []string{"delete"},
-		Short:             "Delete a sandbox and its /sandbox volume",
+		Short:             "Delete a sandbox",
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeType(config.TypeSandbox),
 		RunE: func(cmd *cobra.Command, args []string) error {
