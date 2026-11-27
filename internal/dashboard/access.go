@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/josegonzalez/safeclaw/internal/dashproof"
 )
 
 // tokenParam is the query parameter carrying the launch token in the URL
@@ -52,6 +54,8 @@ type Access struct {
 	// working when the dashboard stops.
 	session string
 	cookie  string
+	// port is the dashboard's port, which its proofs are bound to.
+	port int
 	// file is where the token is stored for API callers, named in the 401
 	// response.
 	file string
@@ -60,18 +64,24 @@ type Access struct {
 // NewAccess returns an Access for token. The cookie is named after port so
 // dashboards on different ports don't overwrite each other's cookie.
 func NewAccess(token string, port int, file string) *Access {
-	return &Access{token: token, session: rand.Text(), cookie: "safeclaw_dashboard_" + strconv.Itoa(port), file: file}
+	return &Access{token: token, session: rand.Text(), cookie: "safeclaw_dashboard_" + strconv.Itoa(port), port: port, file: file}
 }
 
 // Middleware lets a request through to next only when it carries the
 // session cookie or the token in its Authorization header. A GET carrying
 // the token in the query is answered with the cookie and a redirect to the
-// same URL without the token. Anything else gets 401 without reaching next.
+// same URL without the token. A request for dashproof.Path is answered with
+// the proof that this dashboard holds the token, with no login needed.
+// Anything else gets 401 without reaching next.
 //
 // A handler behind it that forwards requests elsewhere, such as a session's
 // web terminal, must drop the cookie and Authorization header first.
 func (a *Access) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == dashproof.Path {
+			a.prove(w, r)
+			return
+		}
 		q := r.URL.Query()
 		if q.Has(tokenParam) && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 			a.exchange(w, r, q)
@@ -136,6 +146,25 @@ func (a *Access) exchange(w http.ResponseWriter, r *http.Request, q url.Values) 
 	// A path starting with // would redirect to another host.
 	u := url.URL{Path: "/" + strings.TrimLeft(r.URL.Path, "/"), RawQuery: q.Encode()}
 	http.Redirect(w, r, u.RequestURI(), http.StatusSeeOther)
+}
+
+// prove answers the nonce in r with the proof that this dashboard holds the
+// token, so the CLI can tell it from another listener that took over the
+// port of a stale token file without sending the token to it.
+func (a *Access) prove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nonce := r.URL.Query().Get(dashproof.NonceParam)
+	if !dashproof.ValidNonce(nonce) {
+		http.Error(w, "bad nonce", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(dashproof.Header, dashproof.Sign(a.token, a.port, nonce))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *Access) unauthorized(w http.ResponseWriter) {

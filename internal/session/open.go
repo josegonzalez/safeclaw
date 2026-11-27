@@ -3,6 +3,7 @@ package session
 import (
 	"cmp"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -12,9 +13,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
+	"github.com/josegonzalez/safeclaw/internal/dashproof"
 )
 
 // dashboardHost is the host dashboards listen on and set their cookie for,
@@ -39,9 +42,12 @@ func (m *Manager) dashboardDir() string {
 // DashboardTerminalURL returns the URL of a session's terminal page on a
 // running dashboard, which needs the dashboard's login instead of the
 // session's credential. Dashboards are found by their token files, the
-// default port first, and each is asked for the page with its token, so a
-// file left by a dashboard that has exited is skipped. It reports false
-// when no dashboard answers.
+// default port first. The listener on each file's port must prove it holds
+// that file's token (see dashproof), which never sends the token to it, so
+// a file left by a dashboard that has exited is skipped even when another
+// local user took over its port. Such a file is removed when the port
+// refuses the connection or answers without the proof. It reports false
+// when no dashboard proves itself.
 func (m *Manager) DashboardTerminalURL(ctx context.Context, name string) (string, bool) {
 	name = config.SessionName(name)
 	if ValidateName(name) != nil {
@@ -49,7 +55,8 @@ func (m *Manager) DashboardTerminalURL(ctx context.Context, name string) (string
 	}
 	dir := m.dashboardDir()
 	for _, port := range dashboardPorts(dir) {
-		b, err := readRegular(filepath.Join(dir, strconv.Itoa(port)+tokenSuffix))
+		path := filepath.Join(dir, strconv.Itoa(port)+tokenSuffix)
+		b, err := readRegular(path)
 		if err != nil {
 			continue
 		}
@@ -57,12 +64,25 @@ func (m *Manager) DashboardTerminalURL(ctx context.Context, name string) (string
 		if token == "" {
 			continue
 		}
-		u := url.URL{Scheme: "http", Host: net.JoinHostPort(dashboardHost, strconv.Itoa(port)), Path: "/sessions/" + name + "/terminal"}
-		if probeDashboard(ctx, u.String(), token) {
+		switch probeDashboard(ctx, port, token) {
+		case probeProved:
+			u := url.URL{Scheme: "http", Host: net.JoinHostPort(dashboardHost, strconv.Itoa(port)), Path: "/sessions/" + name + "/terminal"}
 			return u.String(), true
+		case probeFailed:
+			removeStaleToken(path, token)
 		}
 	}
 	return "", false
+}
+
+// removeStaleToken removes the token file at path if it still holds token,
+// so a dashboard that started on the same port meanwhile keeps its file.
+func removeStaleToken(path, token string) {
+	b, err := readRegular(path)
+	if err != nil || strings.TrimSpace(string(b)) != token {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // dashboardPorts returns the ports with a token file in dir, the default
@@ -96,17 +116,38 @@ func dashboardPorts(dir string) []int {
 	return ports
 }
 
-// probeDashboard reports whether the dashboard answers a GET of u with
-// token. The request never goes through a proxy, so the token stays on
-// loopback, and redirects are not followed.
-func probeDashboard(ctx context.Context, u, token string) bool {
+// probeResult is what probing a token file's port found.
+type probeResult int
+
+const (
+	// probeUnknown means the port didn't answer in time, so the file is
+	// skipped but kept.
+	probeUnknown probeResult = iota
+	// probeFailed means nothing listens on the port or the listener can't
+	// prove it holds the token, so the file is stale.
+	probeFailed
+	// probeProved means the dashboard holding the token listens there.
+	probeProved
+)
+
+// probeDashboard asks the listener on port to prove it holds token, by
+// answering a random nonce with dashproof.Sign. Only the nonce is sent,
+// never the token, the request never goes through a proxy, and redirects
+// are not followed.
+func probeDashboard(ctx context.Context, port int, token string) probeResult {
 	ctx, cancel := context.WithTimeout(ctx, dashboardProbeTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-	if err != nil {
-		return false
+	nonce := dashproof.NewNonce()
+	u := url.URL{
+		Scheme:   "http",
+		Host:     net.JoinHostPort(dashboardHost, strconv.Itoa(port)),
+		Path:     dashproof.Path,
+		RawQuery: url.Values{dashproof.NonceParam: {nonce}}.Encode(),
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return probeUnknown
+	}
 	tr := &http.Transport{Proxy: nil}
 	defer tr.CloseIdleConnections()
 	client := &http.Client{
@@ -114,12 +155,18 @@ func probeDashboard(ctx context.Context, u, token string) bool {
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	resp, err := client.Do(req)
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return probeFailed
+	}
 	if err != nil {
-		return false
+		return probeUnknown
 	}
 	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-	return resp.StatusCode == http.StatusOK
+	if resp.StatusCode != http.StatusNoContent || !dashproof.Verify(token, port, nonce, resp.Header.Get(dashproof.Header)) {
+		return probeFailed
+	}
+	return probeProved
 }
 
 // OpenTerminal opens a session's terminal in the browser. When a dashboard
