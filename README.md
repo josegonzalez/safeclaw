@@ -145,6 +145,7 @@ safeclaw sandbox exec --ephemeral --variant base -- ls
 - Claude Code 2.1.332
 - GitHub CLI with auto-configured git user
 - Playwright MCP 0.0.86 with Chromium
+- yt-dlp 2026.11.23
 - [DX plugin](https://github.com/ykdojo/claude-code-tips#tip-44-install-the-dx-plugin), [custom status line](https://github.com/ykdojo/claude-code-tips#tip-0-customize-your-status-line), [shell aliases](#aliases)
 - ttyd web terminal + tmux
 - In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, and file

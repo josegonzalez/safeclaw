@@ -1,6 +1,6 @@
 # === BUILD the in-container safeclaw binary ===
 
-FROM golang:1.27 AS build
+FROM golang:1.27@sha256:5f1b98fa02fe396ebce2a0227a0e08309e11792915b9dd2e1f71053d7e7e6666 AS build
 
 ARG VERSION=dev
 ARG COMMIT=none
@@ -19,7 +19,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
 
 # === RUNTIME image ===
 
-FROM ubuntu:26.04
+FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db
 
 ARG DEBIAN_FRONTEND=noninteractive
 ARG TZ=America/Los_Angeles
@@ -27,6 +27,9 @@ ARG NODE_VERSION=26
 ARG PLAYWRIGHT_MCP_VERSION=0.0.86
 ARG CLAUDE_CODE_VERSION=2.1.332
 ARG NODE_LIEF_VERSION=1.3.2
+ARG CLAUDE_CODE_TIPS_VERSION=v0.26.39
+ARG YT_DLP_VERSION=2026.11.23
+ARG YT_DLP_SHA256=e8665ed64d6b9172773e812f891fb707a0cb1ee8d9ef4fc1acb00cabee4c5256
 
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
@@ -37,7 +40,7 @@ RUN apt-get update && \
     # Install Node.js
     apt-get install -y curl wget gpg ca-certificates && \
     mkdir -p /etc/apt/keyrings && \
-    curl -sL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
     echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_VERSION}.x nodistro main" >> /etc/apt/sources.list.d/nodesource.list && \
     apt-get update && \
     apt-get install -y nodejs && \
@@ -91,12 +94,20 @@ RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} && \
     rm -f /tmp/pw-pairs.txt && \
     rm -rf /var/lib/apt/lists/* && \
     rm -rf ~/.npm/ && \
-    chmod -R 777 /ms-playwright
+    chown -R sclaw:sclaw /ms-playwright && \
+    chmod -R go-w /ms-playwright
 
 # === INSTALL node-lief ===
 
 RUN npm install -g node-lief@${NODE_LIEF_VERSION}
 ENV NODE_PATH=/usr/lib/node_modules
+
+# === INSTALL yt-dlp ===
+
+RUN curl -fsSLo /usr/local/bin/yt-dlp \
+      https://github.com/yt-dlp/yt-dlp/releases/download/${YT_DLP_VERSION}/yt-dlp && \
+    echo "${YT_DLP_SHA256}  /usr/local/bin/yt-dlp" | sha256sum -c - && \
+    chmod 755 /usr/local/bin/yt-dlp
 
 # === INSTALL safeclaw (ttyd wrapper) ===
 
@@ -115,14 +126,16 @@ ENV BASH_ENV=/home/sclaw/.env
 # - CLAUDE_CODE_OAUTH_TOKEN: run `safeclaw auth login` (or `claude setup-token`) to generate
 # - GH_TOKEN: run `gh auth token` locally to print current token
 
-# Bake Claude config into image
+# Bake Claude config into image. These are made root-owned and read-only at
+# the end of the build, once Claude Code has finished writing to them.
 COPY --chown=sclaw:sclaw setup/CLAUDE.md /home/sclaw/.claude/CLAUDE.md
 COPY --chown=sclaw:sclaw setup/settings.json /home/sclaw/.claude/settings.json
 
-# Install scripts (context bar status line)
+# Install scripts (context bar status line), from the same claude-code-tips
+# release as the dx plugin
 RUN mkdir -p /home/sclaw/.claude/scripts && \
-    curl -sLo /home/sclaw/.claude/scripts/context-bar.sh \
-      https://raw.githubusercontent.com/ykdojo/claude-code-tips/main/scripts/context-bar.sh && \
+    curl -fsSLo /home/sclaw/.claude/scripts/context-bar.sh \
+      https://raw.githubusercontent.com/ykdojo/claude-code-tips/${CLAUDE_CODE_TIPS_VERSION}/scripts/context-bar.sh && \
     chmod +x /home/sclaw/.claude/scripts/context-bar.sh
 
 RUN curl -fsSL https://claude.ai/install.sh | bash -s -- ${CLAUDE_CODE_VERSION}
@@ -130,7 +143,6 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s -- ${CLAUDE_CODE_VERSION}
 # === SETUP Claude Code ===
 
 # Install DX plugin and Playwright MCP server
-ARG CLAUDE_CODE_TIPS_VERSION=v0.26.39
 RUN claude plugin marketplace add https://github.com/ykdojo/claude-code-tips.git#${CLAUDE_CODE_TIPS_VERSION} && \
     claude plugin install dx@ykdojo && \
     claude mcp add playwright -- playwright-mcp --headless --browser chromium --no-sandbox
@@ -153,4 +165,25 @@ COPY --chown=sclaw:sclaw setup/.bashrc /tmp/.bashrc
 RUN cat /tmp/.bashrc >> /home/sclaw/.bashrc && rm /tmp/.bashrc
 
 # Skills
-COPY --chown=sclaw:sclaw setup/skills /home/sclaw/.claude/skills
+COPY setup/skills /home/sclaw/.claude/skills
+
+# === LOCK DOWN Claude Code config ===
+
+# Make the settings, CLAUDE.md, status line script and skills root-owned and
+# read-only, so the agent cannot rewrite its own config, hooks or skills. An
+# empty settings.local.json and empty agents and commands folders are created
+# the same way, so the agent cannot add them to override the settings or add
+# its own agents and commands.
+# ~/.claude and the home folder become root-owned, group-writable and sticky:
+# sclaw can still create, edit and replace its own files there, but cannot
+# delete or rename the root-owned ones (or ~/.claude itself) to swap them out.
+USER root
+RUN cd /home/sclaw/.claude && \
+    echo '{}' > settings.local.json && \
+    mkdir -p agents commands && \
+    chown -R root:root CLAUDE.md settings.json settings.local.json scripts skills agents commands && \
+    chmod -R u=rwX,go=rX CLAUDE.md settings.json settings.local.json scripts skills agents commands && \
+    chmod 755 scripts/context-bar.sh && \
+    chown root:sclaw /home/sclaw /home/sclaw/.claude && \
+    chmod 1770 /home/sclaw /home/sclaw/.claude
+USER sclaw
