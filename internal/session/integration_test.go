@@ -120,6 +120,19 @@ func TestIntegrationLifecycle(t *testing.T) {
 		t.Errorf("restart changed port %d -> %d", res.Port, res2.Port)
 	}
 	waitHTTP(t, res2.URL)
+	// The restart rotated the credential, so one that an open tab may have
+	// sent to whatever held the released port no longer opens the terminal.
+	if res2.URL == res.URL {
+		t.Errorf("restart kept the credential")
+	}
+	if resp, err := http.Get(res.URL); err != nil {
+		t.Errorf("GET with the credential from before the stop: %v", err)
+	} else {
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET with the credential from before the stop = %d, want 401", resp.StatusCode)
+		}
+	}
 
 	if err := m.Stop(ctx, name); err != nil {
 		t.Fatal(err)
@@ -726,8 +739,9 @@ func TestIntegrationNetwork(t *testing.T) {
 	if err := m.Stop(ctx, name); err != nil {
 		t.Fatal(err)
 	}
-	if res2, err := m.Ensure(ctx, Options{Name: name, NoOpen: true}); err != nil || !res2.Offline {
-		t.Fatalf("restart = %+v, %v", res2, err)
+	before := res.URL
+	if res, err = m.Ensure(ctx, Options{Name: name, NoOpen: true}); err != nil || !res.Offline {
+		t.Fatalf("restart = %+v, %v", res, err)
 	}
 	offline("after restart")
 
@@ -739,6 +753,15 @@ func TestIntegrationNetwork(t *testing.T) {
 		t.Fatalf("net on = %+v, %v", on, err)
 	}
 	waitHTTP(t, res.URL)
+	// The restart rotated the credential.
+	if resp, err := http.Get(before); err != nil {
+		t.Errorf("GET with the credential from before the restart: %v", err)
+	} else {
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("GET with the credential from before the restart = %d, want 401", resp.StatusCode)
+		}
+	}
 }
 
 // TestIntegrationSandboxCopy checks cp-in and cp-out against a real

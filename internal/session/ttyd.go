@@ -160,24 +160,10 @@ func (m *Manager) Credential(name string) (Credential, error) {
 	return Credential{User: user, Password: pass}, nil
 }
 
-// ensureCredential returns the session's ttyd credential, making a random
-// one the first time. It is kept on the host, readable only by the user,
-// so it survives ttyd restarts and container restarts. Ensure replaces it
-// with rotateCredential whenever it creates a container.
-func (m *Manager) ensureCredential(name string) (Credential, error) {
-	c, err := m.Credential(name)
-	if err == nil {
-		return c, nil
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return Credential{}, err
-	}
-	return m.rotateCredential(name)
-}
-
 // rotateCredential replaces the session's ttyd credential with a new random
-// one. The file is replaced in one rename, so it is never missing or
-// partly written.
+// one. It is kept on the host, readable only by the user, where the
+// dashboard's relay and `safeclaw url` read it. The file is replaced in one
+// rename, so it is never missing or partly written.
 func (m *Manager) rotateCredential(name string) (Credential, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
@@ -251,8 +237,13 @@ func writePrivate(path, content string) error {
 	return os.Rename(tmp, path)
 }
 
-// startTTYD starts ttyd requiring the session's credential and refusing
-// WebSocket clients from other origins (-O). The credential goes to the
+// startTTYD starts ttyd requiring a new credential and refusing WebSocket
+// clients from other origins (-O). Every start rotates the credential, so
+// one that an earlier container could read, or that a browser sent to
+// whatever held the session's port while its ttyd was down, never opens the
+// terminal again: a stopped container's published port is released, and
+// another local user can bind it and answer an open tab's reconnect, which
+// carries the browser's cached credential. The credential goes to the
 // container on stdin, and ttyd reads it from a file, so it is on no command
 // line. labels are the container's, which it copied from its image: an
 // image without config.LabelCredentialFileTTYD has a ttyd that takes the
@@ -261,7 +252,7 @@ func writePrivate(path, content string) error {
 // (setup/ttyd), which needs no flag, so older images' ttyd still starts
 // with these arguments.
 func (m *Manager) startTTYD(ctx context.Context, name, container string, native bool, labels map[string]string) (Credential, error) {
-	cred, err := m.ensureCredential(name)
+	cred, err := m.rotateCredential(name)
 	if err != nil {
 		return Credential{}, err
 	}

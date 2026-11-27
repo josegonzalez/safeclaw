@@ -45,7 +45,7 @@ safeclaw run -s work        # safeclaw-work on the next available port
 safeclaw run -s research    # safeclaw-research on the next available port
 ```
 
-On first run, `safeclaw run` prompts you to set up authentication tokens, offering to sign in to Claude Code for you. It then starts a web terminal at http://[::1]:7681 and opens it in your browser. The terminal needs a credential made for each session, so the printed URL carries it, like `http://safeclaw:PASSWORD@[::1]:7681`; the dashboard adds it for you. `safeclaw url NAME` prints that URL again without restarting anything. When a dashboard is running, `run` and `safeclaw url NAME --open` open its terminal page instead, which keeps the credential out of the process list and your browser history; otherwise they open the URL with the credential and warn about it.
+On first run, `safeclaw run` prompts you to set up authentication tokens, offering to sign in to Claude Code for you. It then starts a web terminal at http://[::1]:7681 and opens it in your browser. The terminal needs a credential, made anew each time the session starts or is run again, so the printed URL carries it, like `http://safeclaw:PASSWORD@[::1]:7681`; the dashboard adds it for you. `safeclaw url NAME` prints that URL again without restarting anything. When a dashboard is running, `run` and `safeclaw url NAME --open` open its terminal page instead, which keeps the credential out of the process list and your browser history; otherwise they open the URL with the credential and warn about it.
 
 ## Dashboard
 
