@@ -250,9 +250,7 @@ func TestTerminalsPublishedAwayFromCookieHost(t *testing.T) {
 	if PublishHost == "127.0.0.1" || PublishHost == "localhost" {
 		t.Fatalf("PublishHost = %q shares the dashboard's cookie host", PublishHost)
 	}
-	w := &world{image: "img", containers: map[string]*fakeContainer{
-		"safeclaw-old": {Running: true, Port: 7690, Image: "img"},
-	}, native: true}
+	w := &world{image: "img", containers: map[string]*fakeContainer{}, native: true}
 	m, r := newTestManager(t, w)
 	var out bytes.Buffer
 	m.Out = &out
@@ -268,24 +266,6 @@ func TestTerminalsPublishedAwayFromCookieHost(t *testing.T) {
 		t.Errorf("new session warned about 127.0.0.1: %s", out.String())
 	}
 
-	// Sessions created before keep working on the address they are
-	// published on, with a warning.
-	out.Reset()
-	res, err := m.Ensure(ctx, Options{Name: "old", NoOpen: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "publishes its terminal on 127.0.0.1") {
-		t.Errorf("no warning for a session on 127.0.0.1: %s", out.String())
-	}
-	oldCred, err := m.Credential("old")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := "http://safeclaw:" + oldCred.Password + "@127.0.0.1:7690"; res.URL != want {
-		t.Errorf("legacy url = %q, want %q", res.URL, want)
-	}
-
 	term, err := m.Terminal(ctx, "new")
 	if err != nil {
 		t.Fatal(err)
@@ -296,11 +276,134 @@ func TestTerminalsPublishedAwayFromCookieHost(t *testing.T) {
 	if want := "http://safeclaw:" + term.Credential.Password + "@[::1]:7681"; term.URL() != want {
 		t.Errorf("terminal url = %q, want %q", term.URL(), want)
 	}
-	old, err := m.Terminal(ctx, "old")
-	if err != nil || old.Addr != "127.0.0.1:7690" || old.Host != "localhost:7690" {
-		t.Errorf("legacy terminal = %+v, %v", old, err)
-	} else if want := "http://safeclaw:" + oldCred.Password + "@127.0.0.1:7690"; old.URL() != want {
-		t.Errorf("legacy terminal url = %q, want %q", old.URL(), want)
+}
+
+// legacyWorld has sessions published where terminals were before they
+// moved to [::1], made from an image whose ttyd refused [::1] URLs. oldTTYD
+// says whether the image still refuses them.
+func legacyWorld(oldTTYD bool) *world {
+	labels := map[string]string{"safeclaw.variant": "sandbox", "safeclaw.secrets": "", "safeclaw.ipc": "host", "safeclaw.memory": "off"}
+	return &world{images: map[string]string{"safeclaw": "base-id", "safeclaw:sandbox": "sb-id"}, oldTTYD: oldTTYD, containers: map[string]*fakeContainer{
+		"safeclaw-old": {Running: true, Port: 7690, HostIP: "127.0.0.1", Image: "sb-id", OldTTYD: true, IpcMode: "host", Labels: labels,
+			Mounts: []string{"/hist:/home/sclaw/.claude/projects", "/proj:/home/sclaw/proj"}},
+		"safeclaw-any": {Port: 7691, HostIP: "0.0.0.0", Image: "base-id", OldTTYD: true, Labels: map[string]string{"safeclaw.secrets": ""}},
+	}, native: true}
+}
+
+// A session still published on 127.0.0.1, the dashboard's cookie host, or
+// on every address, is recreated on [::1] once its image's ttyd accepts
+// [::1] URLs, keeping its port, variant, secrets, IPC namespace, auto
+// memory setting, mounts, and history.
+func TestLegacyPublishRecreatedOnPublishHost(t *testing.T) {
+	w := legacyWorld(false)
+	m, r := newTestManager(t, w)
+	var out bytes.Buffer
+	m.Out = &out
+	ctx := context.Background()
+	if err := os.MkdirAll(filepath.Join(m.SessionsDir, "old"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	res, err := m.Ensure(ctx, Options{Name: "old", NoOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasCall(r, "rm -v -f safeclaw-old") || res.Port != 7690 {
+		t.Errorf("not recreated on the old port: %d %v", res.Port, r.Commands())
+	}
+	run, _ := r.Find("run ")
+	for _, want := range []string{" -p [::1]:7690:7681 ", "--ipc=host --label safeclaw.ipc=host ", "--label safeclaw.memory=off ", "--label safeclaw.secrets= ", "--label safeclaw.variant=sandbox ", "-v /proj:/home/sclaw/proj ", filepath.Join(m.SessionsDir, "old") + ":/home/sclaw/.claude/projects "} {
+		if !strings.Contains(run.String(), want) {
+			t.Errorf("run lacks %q: %q", want, run.String())
+		}
+	}
+	if !strings.HasSuffix(run.String(), " safeclaw:sandbox sleep infinity") {
+		t.Errorf("run = %q, want the sandbox variant", run.String())
+	}
+	if _, err := os.Stat(filepath.Join(m.SessionsDir, "old")); err != nil {
+		t.Errorf("history moved: %v", err)
+	}
+	if c := w.containers["safeclaw-old"]; c == nil || c.HostIP != "::1" {
+		t.Errorf("container = %+v, want it published on ::1", c)
+	}
+	if !strings.Contains(out.String(), "Removing existing container to recreate it there") || strings.Contains(out.String(), "Warning: session old publishes") {
+		t.Errorf("output = %s", out.String())
+	}
+	cred, err := m.Credential("old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "http://safeclaw:" + cred.Password + "@[::1]:7690"; res.URL != want {
+		t.Errorf("url = %q, want %q", res.URL, want)
+	}
+	if term, err := m.Terminal(ctx, "old"); err != nil || term.Addr != "[::1]:7690" {
+		t.Errorf("terminal = %+v, %v", term, err)
+	}
+	// The new container runs its image's ttyd, not the old container's.
+	if !strings.Contains(strings.Join(r.Commands(), "\n"), "exec ttyd --credential-file ") {
+		t.Errorf("ttyd not started with the image's --credential-file: %v", r.Commands())
+	}
+
+	// A stopped session published on every address moves too.
+	r.Calls = nil
+	res, err = m.Ensure(ctx, Options{Name: "any", NoOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run, ok := r.Find("run "); !ok || !strings.Contains(run.String(), " -p [::1]:7691:7681 ") || res.Port != 7691 {
+		t.Errorf("run = %q, port = %d", run.String(), res.Port)
+	}
+
+	// Once moved, a plain run keeps it.
+	r.Calls = nil
+	if _, err := m.Ensure(ctx, Options{Name: "old", NoOpen: true}); err != nil {
+		t.Fatal(err)
+	}
+	if hasCall(r, "rm ") || hasCall(r, "run ") {
+		t.Errorf("recreated again: %v", r.Commands())
+	}
+}
+
+// With an image whose ttyd still refuses [::1] URLs, a legacy session is
+// kept where it is, since a [::1] URL would not reach its terminal, and run
+// says how to move it.
+func TestLegacyPublishOnOldTTYDWarns(t *testing.T) {
+	w := legacyWorld(true)
+	m, r := newTestManager(t, w)
+	var out bytes.Buffer
+	m.Out = &out
+	ctx := context.Background()
+	for name, update := range map[string]string{"old": "`safeclaw pull --variant sandbox` or `safeclaw build --variant sandbox`", "any": "`safeclaw pull` or `safeclaw build`"} {
+		out.Reset()
+		r.Calls = nil
+		res, err := m.Ensure(ctx, Options{Name: name, NoOpen: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hasCall(r, "rm ") || hasCall(r, "run ") {
+			t.Errorf("%s: recreated: %v", name, r.Commands())
+		}
+		if !strings.Contains(res.URL, "@127.0.0.1:") {
+			t.Errorf("%s: url = %q", name, res.URL)
+		}
+		want := "publishes its terminal on 127.0.0.1, the dashboard's cookie host"
+		if s := out.String(); !strings.Contains(s, want) || !strings.Contains(s, "Update the image with "+update+", then run `safeclaw run -s "+name+"` again to recreate it on [::1]") {
+			t.Errorf("%s: output = %s", name, s)
+		}
+	}
+}
+
+// An offline legacy session is not recreated, which would bring it back
+// online; run refuses and says how to let it move.
+func TestLegacyPublishOfflineRefused(t *testing.T) {
+	w := legacyWorld(false)
+	w.containers["safeclaw-old"].Offline = true
+	m, r := newTestManager(t, w)
+	_, err := m.Ensure(context.Background(), Options{Name: "old", NoOpen: true})
+	if !errors.Is(err, ErrOffline) || !strings.Contains(err.Error(), "safeclaw net on old") || hasCall(r, "rm ") || hasCall(r, "run ") {
+		t.Errorf("err = %v, commands = %v", err, r.Commands())
+	}
+	if c := w.containers["safeclaw-old"]; c == nil || c.HostIP != "127.0.0.1" {
+		t.Errorf("container = %+v", c)
 	}
 }
 
