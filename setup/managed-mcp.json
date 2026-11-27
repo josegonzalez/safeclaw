@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "type": "stdio",
+      "command": "/usr/bin/playwright-mcp",
+      "args": ["--headless", "--browser", "chromium", "--no-sandbox"]
+    }
+  }
+}

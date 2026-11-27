@@ -162,6 +162,7 @@ safeclaw sandbox exec --ephemeral --variant base -- ls
 - `autoCompactEnabled: false` - prevents automatic context compaction
 - `promptSuggestionEnabled: false` - disables prompt suggestions
 - `--dangerously-skip-permissions` enabled (because it's containerized), with the home folder trust and bypass permissions prompts pre-accepted
+- Claude Code's install, settings, instructions, skills, plugins, MCP servers, and the shell's startup files are root-owned, so the agent can't change them (see [architecture](docs/architecture.md#image))
 
 ## Conversation history and memory
 

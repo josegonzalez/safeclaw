@@ -16,6 +16,7 @@ func TestBuildContextHasEverythingTheDockerfileNeeds(t *testing.T) {
 		"setup/.bashrc",
 		"setup/CLAUDE.md",
 		"setup/settings.json",
+		"setup/managed-mcp.json",
 		"setup/skills/gdoc/SKILL.md",
 		"cmd/safeclaw/main.go",
 		"internal/cli/root.go",
@@ -82,5 +83,40 @@ func TestBuildInputsAreFetchedSafely(t *testing.T) {
 				t.Errorf("%s contains %q", path, bad)
 			}
 		}
+	}
+}
+
+// TestDockerfileRootOwnsWhatClaudeCodeLoads checks that the files and folders
+// Claude Code and the shell load are made root-owned, so the agent cannot
+// rewrite them, and that MCP servers come only from the managed config.
+func TestDockerfileRootOwnsWhatClaudeCodeLoads(t *testing.T) {
+	b, err := fs.ReadFile(BuildContext, "Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(b)
+	owned := map[string]bool{}
+	for _, m := range regexp.MustCompile(`chown -R root:root ([^&]+)&&`).FindAllStringSubmatch(dockerfile, -1) {
+		for _, p := range strings.Fields(m[1]) {
+			owned[p] = true
+		}
+	}
+	for _, p := range []string{
+		// in ~/.claude
+		"CLAUDE.md", "AGENTS.md", "settings.json", "settings.local.json", "scripts", "skills",
+		"agents", "commands", "output-styles", "rules", "workflows", "routines", "plugins",
+		// in the home folder
+		".bashrc", ".profile", ".bash_profile", ".bash_logout", "CLAUDE.local.md",
+		"AGENTS.override.md", "bin", ".local/bin", ".local/share/claude",
+	} {
+		if !owned[p] {
+			t.Errorf("Dockerfile does not root-own %s", p)
+		}
+	}
+	if strings.Contains(dockerfile, "claude mcp add") {
+		t.Error("Dockerfile adds an MCP server to ~/.claude.json, which sclaw can write; use setup/managed-mcp.json")
+	}
+	if !strings.Contains(dockerfile, "COPY setup/managed-mcp.json /etc/claude-code/managed-mcp.json") {
+		t.Error("Dockerfile does not install setup/managed-mcp.json")
 	}
 }

@@ -142,17 +142,22 @@ RUN curl -fsSL https://claude.ai/install.sh | bash -s -- ${CLAUDE_CODE_VERSION}
 
 # === SETUP Claude Code ===
 
-# Install DX plugin and Playwright MCP server
+# Install DX plugin
 RUN claude plugin marketplace add https://github.com/ykdojo/claude-code-tips.git#${CLAUDE_CODE_TIPS_VERSION} && \
-    claude plugin install dx@ykdojo && \
-    claude mcp add playwright -- playwright-mcp --headless --browser chromium --no-sandbox
+    claude plugin install dx@ykdojo
+
+# The Playwright MCP server is the only MCP server. Claude Code's managed MCP
+# config takes exclusive control of the server list, so servers added to
+# ~/.claude.json or a .mcp.json (which sclaw can write) are refused or ignored.
+COPY setup/managed-mcp.json /etc/claude-code/managed-mcp.json
 
 # Skip onboarding so CLAUDE_CODE_OAUTH_TOKEN works in interactive mode
 # See: https://github.com/anthropics/claude-code/issues/8938
 # Newer Claude Code versions also ask to trust the home folder and to accept
 # bypass permissions mode on every start; the container is the sandbox, so
 # pre-accept both.
-RUN jq '. + {hasCompletedOnboarding: true, autoCompactEnabled: false, bypassPermissionsModeAccepted: true} | .projects["/home/sclaw"].hasTrustDialogAccepted = true' /home/sclaw/.claude.json > /tmp/.claude.json.tmp && \
+RUN { [ -f /home/sclaw/.claude.json ] || echo '{}' > /home/sclaw/.claude.json; } && \
+    jq '. + {hasCompletedOnboarding: true, autoCompactEnabled: false, bypassPermissionsModeAccepted: true} | .projects["/home/sclaw"].hasTrustDialogAccepted = true' /home/sclaw/.claude.json > /tmp/.claude.json.tmp && \
     mv /tmp/.claude.json.tmp /home/sclaw/.claude.json
 
 # Set default model (must be after plugin install which rewrites settings.json).
@@ -174,16 +179,41 @@ COPY setup/skills /home/sclaw/.claude/skills
 # empty settings.local.json and empty agents and commands folders are created
 # the same way, so the agent cannot add them to override the settings or add
 # its own agents and commands.
+# The same goes for the empty output-styles, rules, workflows and routines
+# folders and AGENTS.md that Claude Code also reads from ~/.claude, and the
+# plugins (whose hooks and skills Claude Code runs) are root-owned too.
 # ~/.claude and the home folder become root-owned, group-writable and sticky:
 # sclaw can still create, edit and replace its own files there, but cannot
 # delete or rename the root-owned ones (or ~/.claude itself) to swap them out.
 USER root
 RUN cd /home/sclaw/.claude && \
     echo '{}' > settings.local.json && \
-    mkdir -p agents commands && \
-    chown -R root:root CLAUDE.md settings.json settings.local.json scripts skills agents commands && \
-    chmod -R u=rwX,go=rX CLAUDE.md settings.json settings.local.json scripts skills agents commands && \
+    touch AGENTS.md && \
+    mkdir -p agents commands output-styles rules workflows routines && \
+    chown -R root:root CLAUDE.md AGENTS.md settings.json settings.local.json scripts skills agents commands output-styles rules workflows routines plugins && \
+    chmod -R u=rwX,go=rX CLAUDE.md AGENTS.md settings.json settings.local.json scripts skills agents commands output-styles rules workflows routines plugins && \
     chmod 755 scripts/context-bar.sh && \
     chown root:sclaw /home/sclaw /home/sclaw/.claude && \
-    chmod 1770 /home/sclaw /home/sclaw/.claude
+    chmod 1770 /home/sclaw /home/sclaw/.claude && \
+    chmod 644 /etc/claude-code/managed-mcp.json
+
+# Lock down the Claude Code install and the shell's startup files, so the
+# agent cannot replace the claude binary or what each shell runs. Claude Code's
+# auto-updater is disabled, so it never needs to write its install. ~/.local
+# and ~/.local/share stay open to sclaw like the home folder, for other tools'
+# data, but ~/.local/bin, which is early in PATH, is root-owned so nothing can
+# shadow claude, node or the other commands Claude Code runs. Empty, root-owned
+# project instructions are created in the home folder, Claude Code's working
+# directory, so the agent cannot add its own. ~/.bash_profile only sources
+# ~/.profile, and is there so the agent cannot add one that login shells would
+# read instead, and ~/bin, which ~/.profile adds to PATH, is root-owned and
+# empty.
+RUN cd /home/sclaw && \
+    printf '%s\n' '[ -f "$HOME/.profile" ] && . "$HOME/.profile"' > .bash_profile && \
+    touch CLAUDE.md CLAUDE.local.md AGENTS.md AGENTS.override.md && \
+    mkdir -p bin && \
+    chown -R root:root .bashrc .profile .bash_profile .bash_logout CLAUDE.md CLAUDE.local.md AGENTS.md AGENTS.override.md bin .local/bin .local/share/claude && \
+    chmod -R u=rwX,go=rX .bashrc .profile .bash_profile .bash_logout CLAUDE.md CLAUDE.local.md AGENTS.md AGENTS.override.md bin .local/bin .local/share/claude && \
+    chown root:sclaw .local .local/share && \
+    chmod 1770 .local .local/share
 USER sclaw
