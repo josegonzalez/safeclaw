@@ -16,7 +16,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"os/signal"
 	"strconv"
 	"strings"
@@ -62,6 +61,9 @@ type Options struct {
 	// Dev serves templates and static files from disk.
 	Dev bool
 	// DevDir is the directory Dev reads from. Defaults to internal/dashboard.
+	// It and its templates and static directories must be owned by the
+	// current user and not be group- or world-writable, and symlinks out of
+	// it are refused.
 	DevDir string
 	// Token is the launch token every request must carry. Defaults to a
 	// random one.
@@ -80,7 +82,9 @@ type Server struct {
 	port      int
 	files     fs.FS
 	dev       bool
-	tmpl      *template.Template
+	// devDir is the absolute directory dev reads from.
+	devDir string
+	tmpl   *template.Template
 	// token is the launch token, kept in tokenFile while serving.
 	token     string
 	tokenFile string
@@ -134,12 +138,13 @@ func New(opts Options) (*Server, error) {
 	if opts.Dev {
 		dir := opts.DevDir
 		if dir == "" {
-			dir = "internal/dashboard"
+			dir = defaultDevDir
 		}
-		if _, err := os.Stat(dir + "/templates"); err != nil {
-			return nil, fmt.Errorf("--dev needs %s/templates; run it from the repository root: %w", dir, err)
+		root, abs, err := openDevDir(dir)
+		if err != nil {
+			return nil, err
 		}
-		s.files = os.DirFS(dir)
+		s.files, s.devDir = root.FS(), abs
 	} else {
 		s.files = assets
 	}
@@ -345,6 +350,9 @@ func (s *Server) ListenAndServe(ctx context.Context, out io.Writer) error {
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 	}()
+	if s.dev {
+		fmt.Fprintf(out, "Dev files: %s\n", s.devDir)
+	}
 	fmt.Fprintf(out, "Dashboard: %s\n", s.LaunchURL())
 	fmt.Fprintf(out, "API token: %s\n", s.tokenFile)
 	errc := make(chan error, len(lns))
