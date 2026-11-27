@@ -316,24 +316,40 @@ func TestEnsureSandboxRemoveErrors(t *testing.T) {
 	}
 }
 
+func TestSandboxCommand(t *testing.T) {
+	prefix := []string{"/bin/sh", "-c", `umask 022; exec "$@"`, "sh"}
+	for _, cmd := range [][]string{
+		{"ls"},
+		{"pdftotext", "-", "-"},
+		// Leading dashes, empty args, spaces, quotes, and shell syntax are
+		// positional parameters, never parsed by the wrapper.
+		{"-x", "--", "", "a b", `"$HOME"`, "; rm -rf /", "$(id)"},
+	} {
+		if got := SandboxCommand(cmd); !slices.Equal(got, append(slices.Clone(prefix), cmd...)) {
+			t.Errorf("SandboxCommand(%q) = %q", cmd, got)
+		}
+	}
+}
+
 func TestEphemeralRunArgs(t *testing.T) {
 	isolation := strings.TrimPrefix(sandboxRunPrefix, "run -d ")
 	base := strings.Replace(isolation, " --label safeclaw.variant=sandbox", "", 1)
 	limits := " --memory 1g --pids-limit 256 --cpus 1"
+	wrapped := `/bin/sh -c umask 022; exec "$@" sh pdftotext - -`
 	sb := SandboxOptions{Variant: "sandbox"}
 	cases := []struct {
 		i, t bool
 		opts SandboxOptions
 		want string
 	}{
-		{false, false, sb, "--rm --init " + isolation + limits + " safeclaw:sandbox pdftotext - -"},
-		{true, false, sb, "--rm --init -i " + isolation + limits + " safeclaw:sandbox pdftotext - -"},
-		{true, true, sb, "--rm --init -i -t " + isolation + limits + " safeclaw:sandbox pdftotext - -"},
+		{false, false, sb, "--rm --init " + isolation + limits + " safeclaw:sandbox " + wrapped},
+		{true, false, sb, "--rm --init -i " + isolation + limits + " safeclaw:sandbox " + wrapped},
+		{true, true, sb, "--rm --init -i -t " + isolation + limits + " safeclaw:sandbox " + wrapped},
 		{false, false, SandboxOptions{Variant: "sandbox", Volume: "/in:/in:rw", Memory: "2g", PidsLimit: 8, CPUs: "2"},
-			"--rm --init " + isolation + " --memory 2g --pids-limit 8 --cpus 2 -v /in:/in:ro safeclaw:sandbox pdftotext - -"},
+			"--rm --init " + isolation + " --memory 2g --pids-limit 8 --cpus 2 -v /in:/in:ro safeclaw:sandbox " + wrapped},
 		// Already resolved: empty is the base image.
-		{false, false, SandboxOptions{}, "--rm --init " + base + limits + " safeclaw pdftotext - -"},
-		{false, false, SandboxOptions{Variant: "base"}, "--rm --init " + base + limits + " safeclaw pdftotext - -"},
+		{false, false, SandboxOptions{}, "--rm --init " + base + limits + " safeclaw " + wrapped},
+		{false, false, SandboxOptions{Variant: "base"}, "--rm --init " + base + limits + " safeclaw " + wrapped},
 	}
 	for _, tc := range cases {
 		got, err := EphemeralRunArgs("safeclaw-box", tc.opts, tc.i, tc.t, []string{"pdftotext", "-", "-"})

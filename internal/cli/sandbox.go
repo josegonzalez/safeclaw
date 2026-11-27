@@ -115,7 +115,8 @@ func newSandboxRunCommand() *cobra.Command {
 	return cmd
 }
 
-// sandboxExecArgv returns the docker argv for running a command in a sandbox.
+// sandboxExecArgv returns the docker argv for running a command in a
+// sandbox, wrapped with session.SandboxCommand for a fixed umask.
 func sandboxExecArgv(name string, interactive, tty bool, command []string) []string {
 	argv := []string{"docker", "exec"}
 	if interactive {
@@ -125,7 +126,7 @@ func sandboxExecArgv(name string, interactive, tty bool, command []string) []str
 		argv = append(argv, "-t")
 	}
 	argv = append(argv, "--user", config.SandboxUser, "--workdir", config.SandboxDir, config.ContainerName(name))
-	return append(argv, command...)
+	return append(argv, session.SandboxCommand(command)...)
 }
 
 // sandboxExecArgs validates exec's arguments: COMMAND with --ephemeral,

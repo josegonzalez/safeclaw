@@ -24,7 +24,18 @@ const (
 	// sandboxPath leaves out sclaw's ~/.local/bin, which the sandbox user
 	// cannot read anyway.
 	sandboxPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+	// sandboxUmaskScript sets the umask, then replaces the shell with the
+	// command given as its positional parameters, leaving them untouched.
+	sandboxUmaskScript = `umask 022; exec "$@"`
 )
+
+// SandboxCommand wraps cmd so it runs with a umask of 022 instead of
+// whatever docker gives it: `docker exec` does not inherit the container's
+// umask on every engine, and some run commands with 0000. The arguments
+// reach cmd exactly as given.
+func SandboxCommand(cmd []string) []string {
+	return append([]string{"/bin/sh", "-c", sandboxUmaskScript, "sh"}, cmd...)
+}
 
 // ErrIsSandbox is returned when an interactive-session operation targets a
 // sandbox.
@@ -313,7 +324,8 @@ func SandboxRunArgs(container string, opts SandboxOptions) ([]string, error) {
 
 // EphemeralRunArgs returns the `docker run` arguments that run cmd in a
 // one-off sandbox in the foreground. --init forwards signals to cmd, which
-// would otherwise run as PID 1 and ignore them.
+// would otherwise run as PID 1 and ignore them. cmd is wrapped with
+// SandboxCommand so it gets the same umask as `sandbox exec NAME`.
 func EphemeralRunArgs(container string, opts SandboxOptions, interactive, tty bool, cmd []string) ([]string, error) {
 	args := []string{"--rm", "--init"}
 	if interactive {
@@ -328,7 +340,7 @@ func EphemeralRunArgs(container string, opts SandboxOptions, interactive, tty bo
 	}
 	args = append(args, shared...)
 	args = append(args, variant.Image(opts.Variant))
-	return append(args, cmd...), nil
+	return append(args, SandboxCommand(cmd)...), nil
 }
 
 // sandboxArgs returns the `docker run` flags every sandbox gets: its name,
