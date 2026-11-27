@@ -5,6 +5,7 @@ package variant
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -302,8 +303,29 @@ func Label(name string) string {
 	return name
 }
 
+// runInstruction returns the arguments of a RUN instruction that runs cmd
+// with /bin/sh -c, as the shell form would, in exec (JSON) form. In shell
+// form, a command ending in a backslash would continue into the next line
+// and a heredoc (`cat <<EOF`) would take the following lines as its body,
+// either of which can swallow the trailing USER line. The JSON form always
+// ends the line with `"]`, and '<' is escaped as \u003c so no builder can
+// read a heredoc in it, which leaves no part of the command for the
+// Dockerfile parser to read as syntax.
+func runInstruction(cmd string) string {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode([]string{"/bin/sh", "-c", cmd}); err != nil {
+		panic(err) // a []string always encodes
+	}
+	// '<' only appears inside the JSON strings, where \u003c decodes to it.
+	return strings.ReplaceAll(strings.TrimSuffix(b.String(), "\n"), "<", "\\u003c")
+}
+
 // Dockerfile returns the Dockerfile that builds the variant on top of the
 // image named by the BASE build argument (the local base image by default).
+// Run commands are emitted in exec form (see runInstruction), so the trailing
+// USER sclaw line is always in effect.
 func Dockerfile(v Variant) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# safeclaw image variant %q\n", v.Name)
@@ -315,7 +337,7 @@ func Dockerfile(v Variant) string {
 		fmt.Fprintf(&b, "RUN apt-get update && \\\n    apt-get install -y --no-install-recommends %s && \\\n    rm -rf /var/lib/apt/lists/*\n", strings.Join(v.Packages, " "))
 	}
 	for _, r := range v.Run {
-		fmt.Fprintf(&b, "RUN %s\n", r)
+		fmt.Fprintf(&b, "RUN %s\n", runInstruction(r))
 	}
 	b.WriteString("USER sclaw\n")
 	fmt.Fprintf(&b, "LABEL %s=%q\n", config.LabelVariant, v.Name)

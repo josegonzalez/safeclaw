@@ -1,9 +1,12 @@
 package variant
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -164,8 +167,8 @@ USER root
 RUN apt-get update && \
     apt-get install -y --no-install-recommends pandoc file && \
     rm -rf /var/lib/apt/lists/*
-RUN echo one
-RUN echo two
+RUN ["/bin/sh","-c","echo one"]
+RUN ["/bin/sh","-c","echo two"]
 USER sclaw
 LABEL safeclaw.variant="docs"
 `
@@ -173,7 +176,145 @@ LABEL safeclaw.variant="docs"
 		t.Errorf("Dockerfile =\n%s\nwant\n%s", got, want)
 	}
 	runOnly := Dockerfile(Variant{Name: "x", Run: []string{"true"}})
-	if strings.Contains(runOnly, "apt-get") || !strings.Contains(runOnly, "RUN true\n") {
+	if strings.Contains(runOnly, "apt-get") || !strings.Contains(runOnly, `RUN ["/bin/sh","-c","true"]`+"\n") {
 		t.Errorf("run-only Dockerfile =\n%s", runOnly)
+	}
+}
+
+// Patterns from the Dockerfile parser (moby/buildkit frontend/dockerfile/parser).
+var (
+	directiveRe    = regexp.MustCompile(`^#\s*([a-zA-Z][a-zA-Z0-9]*)\s*=\s*(.+?)\s*$`)
+	continuationRe = regexp.MustCompile(`\\[ \t]*$`)
+	heredocRe      = regexp.MustCompile(`^(\d*)<<(-?)\s*(?:"([^"]*)"|'([^']*)'|([^<\s]*))$`)
+)
+
+// instructions splits a Dockerfile into its instructions the way the docker
+// parser does: comments and blank lines are skipped, a line ending in a
+// backslash continues into the next one, and a shell-form RUN with a heredoc
+// takes the following lines up to the delimiter as its body. It errors on a
+// heredoc that is never closed, which docker refuses to build.
+func instructions(dockerfile string) ([]string, error) {
+	lines := strings.Split(dockerfile, "\n")
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		for continuationRe.MatchString(line) && i+1 < len(lines) {
+			i++
+			line = continuationRe.ReplaceAllString(line, "") + strings.TrimSpace(lines[i])
+		}
+		out = append(out, line)
+		if !strings.HasPrefix(line, "RUN ") || strings.HasPrefix(line, "RUN [") {
+			continue
+		}
+		for _, word := range strings.Fields(line) {
+			m := heredocRe.FindStringSubmatch(word)
+			if m == nil {
+				continue
+			}
+			delim := m[3] + m[4] + m[5]
+			for {
+				i++
+				if i >= len(lines) {
+					return nil, fmt.Errorf("unterminated heredoc %q", delim)
+				}
+				if strings.TrimSpace(lines[i]) == delim {
+					break
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// trickyRuns are run commands that, in shell form, could reach the next line
+// or be read as Dockerfile syntax.
+var trickyRuns = []string{
+	`echo hi \`,
+	`echo hi \   `,
+	"echo hi \\\t",
+	`echo hi \\`,
+	`cat <<USER`,
+	`cat <<-EOF`,
+	`cat <<"sclaw"`,
+	`<<USER`,
+	`echo $((1 <<2))`,
+	`cat <<< hello`,
+	`echo '"]' \`,
+	`echo "\"], \"x\"]"`,
+	"# escape=`",
+	`echo a > /tmp/b && echo c >> /tmp/b & wait`,
+	"echo \u2028 done",
+	`printf '\0'`,
+}
+
+func TestDockerfileEndsAsSclaw(t *testing.T) {
+	for _, run := range trickyRuns {
+		v := Variant{Name: "x", Packages: []string{"file"}, Run: []string{run, "true"}}
+		if err := v.Validate(); err != nil {
+			t.Errorf("%q: refused: %v", run, err)
+			continue
+		}
+		df := Dockerfile(v)
+		got, err := instructions(df)
+		if err != nil {
+			t.Errorf("%q: %v in\n%s", run, err, df)
+			continue
+		}
+		n := len(got)
+		if n < 2 || got[n-2] != "USER sclaw" || !strings.HasPrefix(got[n-1], "LABEL ") {
+			t.Errorf("%q: instructions end %q, want USER sclaw then LABEL", run, got)
+		}
+		var runs [][]string
+		for _, ins := range got {
+			args, ok := strings.CutPrefix(ins, "RUN [")
+			if !ok {
+				continue
+			}
+			var argv []string
+			if err := json.Unmarshal([]byte("["+args), &argv); err != nil {
+				t.Errorf("%q: RUN [%s is not exec form: %v", run, args, err)
+			}
+			runs = append(runs, argv)
+		}
+		if len(runs) != 2 || !slices.Equal(runs[0], []string{"/bin/sh", "-c", run}) || !slices.Equal(runs[1], []string{"/bin/sh", "-c", "true"}) {
+			t.Errorf("%q: run instructions = %q", run, runs)
+		}
+		for i, line := range strings.Split(df, "\n") {
+			if strings.HasPrefix(line, "RUN [") && (strings.Contains(line, "<") || continuationRe.MatchString(line)) {
+				t.Errorf("%q: line %d %q could be read as a heredoc or continuation", run, i+1, line)
+			}
+		}
+	}
+}
+
+// TestInstructionsCatchesShellForm checks that the parser model above sees
+// the problem the exec form avoids, so TestDockerfileEndsAsSclaw would fail
+// if run commands went back to shell form.
+func TestInstructionsCatchesShellForm(t *testing.T) {
+	for _, run := range []string{`echo hi \`, `echo hi \  `, `cat <<USER`, `cat <<-sclaw`, `echo $((1 <<2))`} {
+		df := "FROM x\nUSER root\nRUN " + run + "\nUSER sclaw\nLABEL a=b\n"
+		got, err := instructions(df)
+		if err == nil && len(got) > 1 && got[len(got)-2] == "USER sclaw" {
+			t.Errorf("%q: shell form not caught: %q", run, got)
+		}
+	}
+	got, err := instructions("FROM x\nRUN cat <<<hi\nUSER sclaw\n")
+	if err != nil || got[len(got)-1] != "USER sclaw" {
+		t.Errorf("here-string: %q, %v", got, err)
+	}
+}
+
+// TestDockerfileHeaderNotDirective checks that the generated header comment
+// can't be read as a parser directive (such as escape), which would change
+// how the rest of the file is parsed.
+func TestDockerfileHeaderNotDirective(t *testing.T) {
+	for _, name := range []string{"x", "escape", "syntax.1", "0-_."} {
+		first, _, _ := strings.Cut(Dockerfile(Variant{Name: name, Run: []string{"true"}}), "\n")
+		if directiveRe.MatchString(first) {
+			t.Errorf("%q: header %q reads as a parser directive", name, first)
+		}
 	}
 }
