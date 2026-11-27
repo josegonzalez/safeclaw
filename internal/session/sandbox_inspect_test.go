@@ -35,6 +35,7 @@ func goodSandbox() map[string]any {
 			"ReadonlyRootfs": true,
 			"CapDrop":        []string{"ALL"},
 			"SecurityOpt":    []string{"no-new-privileges"},
+			"LogConfig":      map[string]any{"Type": "none", "Config": map[string]string{}},
 			"Tmpfs": map[string]string{
 				"/tmp":     "rw,nosuid,nodev,size=256m",
 				"/sandbox": "rw,nosuid,nodev,exec,size=1073741824,uid=2000,gid=2000,mode=0700",
@@ -101,7 +102,7 @@ func TestInspectSandbox(t *testing.T) {
 	want := `{"schema":1,"name":"box","container":"safeclaw-box","id":"abc","status":"running","running":true,"one_off":false,` +
 		`"variant":"sandbox","image":"safeclaw:sandbox","image_id":"sha256:img","network_mode":"none","networks":["none"],` +
 		`"user":"sandbox","read_only_root":true,"privileged":false,"cap_drop":["ALL"],"cap_add":[],"no_new_privileges":true,` +
-		`"ipc_mode":"private","pid_mode":"","limits":{"memory_bytes":2147483648,"cpus":1,"pids":256,"disk_bytes":1073741824},` +
+		`"ipc_mode":"private","pid_mode":"","log_driver":"none","limits":{"memory_bytes":2147483648,"cpus":1,"pids":256,"disk_bytes":1073741824},` +
 		`"tmpfs":[{"path":"/sandbox","options":"rw,nosuid,nodev,exec,size=1073741824,uid=2000,gid=2000,mode=0700","size_bytes":1073741824},` +
 		`{"path":"/tmp","options":"rw,nosuid,nodev,size=256m","size_bytes":268435456}],` +
 		`"mounts":[{"type":"bind","source":"/host/in","destination":"/in","read_only":true}],` +
@@ -168,7 +169,7 @@ func TestVerifySandboxPasses(t *testing.T) {
 		names = append(names, c.Name)
 	}
 	want := []string{"network", "user", "capabilities", "no-new-privileges", "read-only-root", "mounts-read-only", "no-secrets",
-		"namespaces", "limits", "disk", "tmp", "running", "live-user", "live-home", "live-network", "live-capabilities",
+		"namespaces", "limits", "logs", "disk", "tmp", "running", "live-user", "live-home", "live-network", "live-capabilities",
 		"live-read-only-root", "live-mounts", "live-disk"}
 	if !slices.Equal(names, want) {
 		t.Errorf("checks = %q\nwant     %q", names, want)
@@ -222,6 +223,10 @@ func TestVerifySandboxStaticFailures(t *testing.T) {
 		{"host pid", func(_, _, hc map[string]any) { hc["PidMode"] = "host" }, []string{"namespaces"}},
 		{"no memory", func(_, _, hc map[string]any) { hc["Memory"] = 0 }, []string{"limits"}},
 		{"no pids", func(_, _, hc map[string]any) { hc["PidsLimit"] = nil }, []string{"limits"}},
+		{"default log driver", func(_, _, hc map[string]any) {
+			hc["LogConfig"] = map[string]any{"Type": "json-file", "Config": map[string]string{}}
+		}, []string{"logs"}},
+		{"no log config", func(_, _, hc map[string]any) { delete(hc, "LogConfig") }, []string{"logs"}},
 		{"no disk tmpfs", func(_, _, hc map[string]any) {
 			hc["Tmpfs"] = map[string]string{"/tmp": "rw,size=256m"}
 		}, []string{"disk", "live-disk"}},

@@ -19,7 +19,7 @@ var sandboxLabels = map[string]string{"safeclaw.type": "sandbox"}
 // variant.
 const sandboxRunPrefix = "run -d --name safeclaw-box --label safeclaw.type=sandbox --label safeclaw.variant=sandbox --network none --user sandbox --workdir /sandbox" +
 	" --env HOME=/sandbox --env BASH_ENV= --env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" +
-	" --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m" +
+	" --cap-drop ALL --security-opt no-new-privileges --log-driver none --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m" +
 	" --tmpfs " + sandboxDirTmpfs
 
 // sandboxDirTmpfs is the default /sandbox tmpfs: 1g, owned by the sandbox

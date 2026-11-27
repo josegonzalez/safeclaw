@@ -21,6 +21,10 @@ const SandboxSchema = 1
 // sandboxTmpDir is the sandbox's scratch tmpfs.
 const sandboxTmpDir = "/tmp"
 
+// sandboxLogDriver is every sandbox's logging driver, so nothing a sandbox
+// writes to its main stdout or stderr is kept on the docker host.
+const sandboxLogDriver = "none"
+
 // SandboxInfo is what `safeclaw sandbox inspect` prints: a sandbox's
 // isolation settings as docker reports them. Lists are never null.
 type SandboxInfo struct {
@@ -50,9 +54,11 @@ type SandboxInfo struct {
 	CapAdd          []string `json:"cap_add"`
 	NoNewPrivileges bool     `json:"no_new_privileges"`
 	// IPCMode and PIDMode are docker's IPC and PID namespace modes.
-	IPCMode string        `json:"ipc_mode"`
-	PIDMode string        `json:"pid_mode"`
-	Limits  SandboxLimits `json:"limits"`
+	IPCMode string `json:"ipc_mode"`
+	PIDMode string `json:"pid_mode"`
+	// LogDriver is docker's logging driver, "none" for every sandbox.
+	LogDriver string        `json:"log_driver"`
+	Limits    SandboxLimits `json:"limits"`
 	// Tmpfs are the tmpfs mounts, sorted by path.
 	Tmpfs []SandboxTmpfs `json:"tmpfs"`
 	// Mounts are the bind mounts and volumes, in docker's order.
@@ -137,6 +143,7 @@ func sandboxInfo(name string, c docker.Container) SandboxInfo {
 		NoNewPrivileges: noNewPrivileges(h.SecurityOpt),
 		IPCMode:         h.IpcMode,
 		PIDMode:         h.PidMode,
+		LogDriver:       h.LogConfig.Type,
 		Limits: SandboxLimits{
 			MemoryBytes: h.Memory,
 			CPUs:        float64(h.NanoCpus) / 1e9,
@@ -353,6 +360,8 @@ func staticChecks(info SandboxInfo, c docker.Container, secretNames map[string]b
 
 	checks = append(checks, check("limits", info.Limits.MemoryBytes > 0 && info.Limits.CPUs > 0 && info.Limits.Pids > 0,
 		"memory %d bytes, %g cpus, %d pids", info.Limits.MemoryBytes, info.Limits.CPUs, info.Limits.Pids))
+
+	checks = append(checks, check("logs", info.LogDriver == sandboxLogDriver, "log driver %q", info.LogDriver))
 
 	disk := c.HostConfig.Tmpfs[config.SandboxDir]
 	owned := hasOption(disk, "uid="+strconv.Itoa(sandboxUID)) && hasOption(disk, "mode=0700")
