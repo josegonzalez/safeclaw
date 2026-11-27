@@ -155,7 +155,8 @@ func (m *Manager) Credential(name string) (Credential, error) {
 
 // ensureCredential returns the session's ttyd credential, making a random
 // one the first time. It is kept on the host, readable only by the user,
-// so it survives ttyd restarts and container recreates.
+// so it survives ttyd restarts and container restarts. Ensure replaces it
+// with rotateCredential whenever it creates a container.
 func (m *Manager) ensureCredential(name string) (Credential, error) {
 	c, err := m.Credential(name)
 	if err == nil {
@@ -164,11 +165,18 @@ func (m *Manager) ensureCredential(name string) (Credential, error) {
 	if !errors.Is(err, os.ErrNotExist) {
 		return Credential{}, err
 	}
+	return m.rotateCredential(name)
+}
+
+// rotateCredential replaces the session's ttyd credential with a new random
+// one. The file is replaced in one rename, so it is never missing or
+// partly written.
+func (m *Manager) rotateCredential(name string) (Credential, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return Credential{}, err
 	}
-	c = Credential{User: config.TTYDUser, Password: base64.RawURLEncoding.EncodeToString(b)}
+	c := Credential{User: config.TTYDUser, Password: base64.RawURLEncoding.EncodeToString(b)}
 	if err := writePrivate(m.credentialPath(name), c.String()+"\n"); err != nil {
 		return Credential{}, fmt.Errorf("write ttyd credential: %w", err)
 	}

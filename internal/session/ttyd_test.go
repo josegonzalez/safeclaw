@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/josegonzalez/safeclaw/internal/docker"
+	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
 )
 
 func TestTTYDRequiresCredentialAndOrigin(t *testing.T) {
@@ -96,6 +97,146 @@ func TestCredentialFileIsPrivateAndPersists(t *testing.T) {
 	}
 	if _, err := m.Credential("work"); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("credential after delete: %v", err)
+	}
+}
+
+// lastCredentialWrite returns what was last written to a container's
+// credential file.
+func lastCredentialWrite(t *testing.T, r *dockertest.Runner, container string) string {
+	t.Helper()
+	prefix := "exec -i " + container + " sh -c umask 077 && cat > /home/sclaw/.ttyd-credential"
+	for _, c := range slices.Backward(r.Calls) {
+		if strings.HasPrefix(c.String(), prefix) {
+			return c.Stdin
+		}
+	}
+	t.Fatalf("credential not written to %s: %v", container, r.Commands())
+	return ""
+}
+
+// A new container for a session's name gets a new credential, which its
+// ttyd is started with; restarting a container keeps it.
+func TestCredentialRotatesWithContainer(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name    string
+		replace func(t *testing.T, w *world, m *Manager) Options
+		rotated bool
+	}{
+		{"plain run", func(*testing.T, *world, *Manager) Options {
+			return Options{Name: "work"}
+		}, false},
+		{"start", func(_ *testing.T, w *world, _ *Manager) Options {
+			w.containers["safeclaw-work"].Running = false
+			return Options{Name: "work"}
+		}, false},
+		{"same secrets", func(*testing.T, *world, *Manager) Options {
+			return Options{Name: "work", Secrets: ptr(AllSecrets())}
+		}, false},
+		{"secrets", func(*testing.T, *world, *Manager) Options {
+			return Options{Name: "work", Secrets: ptr(NoSecrets())}
+		}, true},
+		{"fresh history", func(*testing.T, *world, *Manager) Options {
+			return Options{Name: "work", FreshHistory: true}
+		}, true},
+		{"volume", func(*testing.T, *world, *Manager) Options {
+			return Options{Name: "work", Volume: "/host/proj:/home/sclaw/proj"}
+		}, true},
+		{"build recreate", func(t *testing.T, _ *world, m *Manager) Options {
+			c, err := m.Docker.InspectOne(ctx, "safeclaw-work")
+			if err != nil || c == nil {
+				t.Fatal(c, err)
+			}
+			if removed, err := m.RemoveStale(ctx, *c); !removed || err != nil {
+				t.Fatalf("removed %v, err %v", removed, err)
+			}
+			return Options{Name: "work"}
+		}, true},
+		{"removed outside safeclaw", func(_ *testing.T, w *world, _ *Manager) Options {
+			delete(w.containers, "safeclaw-work")
+			return Options{Name: "work"}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := &world{image: "img", containers: map[string]*fakeContainer{}, native: true}
+			m, r := newTestManager(t, w)
+			if _, err := m.Ensure(ctx, Options{Name: "work", NoOpen: true}); err != nil {
+				t.Fatal(err)
+			}
+			old, err := m.Credential("work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			opts := tc.replace(t, w, m)
+			opts.NoOpen = true
+			r.Calls = nil
+			res, err := m.Ensure(ctx, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cred, err := m.Credential("work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rotated := cred != old; rotated != tc.rotated {
+				t.Errorf("credential rotated = %v, want %v", rotated, tc.rotated)
+			}
+			if got := lastCredentialWrite(t, r, "safeclaw-work"); got != cred.String() {
+				t.Errorf("ttyd started with %q, host has %q", got, cred.String())
+			}
+			if res.URL != URLWithCredential(res.Port, cred) {
+				t.Errorf("url = %q, want the current credential", res.URL)
+			}
+		})
+	}
+}
+
+// A container restored after a failed recreate starts its ttyd with the
+// host's credential, which no container that could read the old one has.
+func TestCredentialAfterFailedRecreate(t *testing.T) {
+	ctx := context.Background()
+	runFailed := errors.New("docker run failed")
+	for _, leaveCreated := range []bool{false, true} {
+		w := &world{image: "img", containers: map[string]*fakeContainer{}, native: true}
+		m, r := newTestManager(t, w)
+		if _, err := m.Ensure(ctx, Options{Name: "work", NoOpen: true}); err != nil {
+			t.Fatal(err)
+		}
+		old, err := m.Credential("work")
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.runErrs = []runErr{{err: runFailed, leaveCreated: leaveCreated}}
+		if _, err := m.Ensure(ctx, Options{Name: "work", Secrets: ptr(NoSecrets()), FreshHistory: true, NoOpen: true}); !errors.Is(err, runFailed) {
+			t.Fatalf("err = %v", err)
+		}
+		c, err := m.Docker.InspectOne(ctx, "safeclaw-work")
+		if err != nil || c == nil || !c.State.Running || !secretsOf(*c).Equal(AllSecrets()) {
+			t.Fatalf("container not restored: %+v", c)
+		}
+		restored, err := m.Credential("work")
+		if err != nil || restored == old {
+			t.Errorf("credential after a failed recreate = %+v, %v; want a new one", restored, err)
+		}
+
+		r.Calls = nil
+		res, err := m.Ensure(ctx, Options{Name: "work", NoOpen: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hasCall(r, "run ") {
+			t.Errorf("plain run recreated the restored container: %v", r.Commands())
+		}
+		cred, err := m.Credential("work")
+		if err != nil || cred != restored {
+			t.Errorf("credential changed on a plain run: %+v, %+v (%v)", restored, cred, err)
+		}
+		if got := lastCredentialWrite(t, r, "safeclaw-work"); got != cred.String() {
+			t.Errorf("ttyd started with %q, host has %q", got, cred.String())
+		}
+		if res.URL != URLWithCredential(res.Port, cred) {
+			t.Errorf("url = %q, want the current credential", res.URL)
+		}
 	}
 }
 
