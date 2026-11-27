@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
         -X github.com/josegonzalez/safeclaw/internal/version.Date=${DATE}" \
       -o /out/safeclaw ./cmd/safeclaw
 
-# === BUILD ttyd, patched to accept a bracketed IPv6 Host ===
+# === BUILD ttyd, patched to accept a bracketed IPv6 Host and refuse framing ===
 
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS ttyd
 
@@ -31,13 +31,17 @@ RUN apt-get update && \
       libjson-c-dev libwebsockets-dev libuv1-dev zlib1g-dev libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 COPY setup/ttyd/bracketed-ipv6-origin.patch /tmp/bracketed-ipv6-origin.patch
+COPY setup/ttyd/refuse-framing.patch /tmp/refuse-framing.patch
 # Session URLs name [::1]:PORT, and ttyd's -O origin check otherwise never
-# matches a bracketed Host
+# matches a bracketed Host. Every response says X-Frame-Options DENY and
+# frame-ancestors 'none', so no other page can frame a logged-in terminal
+# and pass the user's keystrokes through
 RUN git init -q /src && cd /src && \
     git fetch -q --depth 1 https://github.com/tsl0922/ttyd.git "${TTYD_COMMIT}" && \
     git checkout -q FETCH_HEAD && \
     test "$(git rev-parse HEAD)" = "${TTYD_COMMIT}" && \
     git apply /tmp/bracketed-ipv6-origin.patch && \
+    git apply /tmp/refuse-framing.patch && \
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build -j "$(nproc)" && \
     install -D -m 755 build/ttyd /out/ttyd

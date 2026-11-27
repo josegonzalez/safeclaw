@@ -69,11 +69,19 @@ func TestIntegrationLifecycle(t *testing.T) {
 		t.Errorf("history dir: %v, %v", info, err)
 	}
 	// Without the credential, ttyd refuses the request, and nothing
-	// answers on the dashboard cookie's host.
-	if resp, err := http.Get(URLFor(res.Port)); err != nil || resp.StatusCode != http.StatusUnauthorized {
-		t.Errorf("ttyd without the credential: %v, %v", resp, err)
-	} else {
+	// answers on the dashboard cookie's host. Every response, the refusal
+	// and the logged-in page alike, refuses to be framed.
+	for url, code := range map[string]int{URLFor(res.Port): http.StatusUnauthorized, res.URL: http.StatusOK, res.URL + "/token": http.StatusOK} {
+		resp, err := http.Get(url)
+		if err != nil {
+			t.Errorf("GET ttyd: %v", err)
+			continue
+		}
 		_ = resp.Body.Close()
+		xfo, csp := resp.Header.Values("X-Frame-Options"), resp.Header.Values("Content-Security-Policy")
+		if resp.StatusCode != code || len(xfo) != 1 || xfo[0] != "DENY" || len(csp) != 1 || csp[0] != "frame-ancestors 'none'" {
+			t.Errorf("GET %s = %d, X-Frame-Options %q, Content-Security-Policy %q; want %d, DENY, frame-ancestors 'none'", resp.Request.URL.Redacted(), resp.StatusCode, xfo, csp, code)
+		}
 	}
 	if resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", res.Port)); err == nil {
 		_ = resp.Body.Close()

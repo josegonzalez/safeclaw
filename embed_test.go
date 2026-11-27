@@ -124,9 +124,9 @@ func TestDockerfilePinsClaudeCodeTipsByCommit(t *testing.T) {
 }
 
 // TestDockerfileBuildsPatchedTTYD checks that ttyd is built from a pinned
-// commit with the patch that lets its origin check accept a bracketed IPv6
-// Host, rather than installed from apt, and that the image carries the
-// label safeclaw reads to name [::1] in session URLs.
+// commit with the patches that let its origin check accept a bracketed IPv6
+// Host and make it refuse framing, rather than installed from apt, and that
+// the image carries the label safeclaw reads to name [::1] in session URLs.
 func TestDockerfileBuildsPatchedTTYD(t *testing.T) {
 	b, err := fs.ReadFile(BuildContext, "Dockerfile")
 	if err != nil {
@@ -141,6 +141,8 @@ func TestDockerfileBuildsPatchedTTYD(t *testing.T) {
 		`git fetch -q --depth 1 https://github.com/tsl0922/ttyd.git "${TTYD_COMMIT}"`,
 		`test "$(git rev-parse HEAD)" = "${TTYD_COMMIT}"`,
 		"git apply /tmp/bracketed-ipv6-origin.patch",
+		"COPY setup/ttyd/refuse-framing.patch /tmp/refuse-framing.patch\n",
+		"git apply /tmp/refuse-framing.patch",
 		"COPY --from=ttyd /out/ttyd /usr/local/bin/ttyd\n",
 		"LABEL " + config.LabelBracketedHostTTYD + `="1"` + "\n",
 	} {
@@ -157,6 +159,26 @@ func TestDockerfileBuildsPatchedTTYD(t *testing.T) {
 	}
 	if !strings.Contains(string(patch), "+++ b/src/protocol.c") || !strings.Contains(string(patch), `"[%s]:%d"`) {
 		t.Errorf("patch does not bracket IPv6 origins in src/protocol.c:\n%s", patch)
+	}
+	framing, err := fs.ReadFile(BuildContext, "setup/ttyd/refuse-framing.patch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"+++ b/src/http.c",
+		`"x-frame-options:"`,
+		`"DENY"`,
+		`"content-security-policy:"`,
+		`"frame-ancestors 'none'"`,
+	} {
+		if !strings.Contains(string(framing), want) {
+			t.Errorf("refuse-framing patch is missing %q:\n%s", want, framing)
+		}
+	}
+	// Every response ttyd builds headers for gets them: the index (built in
+	// and -I), /token, the base-path redirect, and the 401.
+	if n := strings.Count(string(framing), "add_frame_headers(wsi, &p, end)"); n != 5 {
+		t.Errorf("refuse-framing patch adds the headers to %d responses, want 5", n)
 	}
 }
 
