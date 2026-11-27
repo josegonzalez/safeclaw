@@ -17,17 +17,41 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 env:
   IMAGE: ghcr.io/josegonzalez/safeclaw
 
 jobs:
-  bump:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test -race ./...
+
+  # Tags the tested commit, so a failed test run leaves no tag behind.
+  tag:
+    needs: test
     runs-on: ubuntu-24.04
     outputs:
       new_version: ${{ steps.new_version.outputs.new_version }}
     steps:
       - uses: actions/checkout@v7
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Get latest tag
@@ -75,32 +99,17 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$NEW_VERSION"
+          git tag "$NEW_VERSION" "$GITHUB_SHA"
           git push origin "$NEW_VERSION"
 
-  test:
-    needs: bump
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.bump.outputs.new_version }}
-
-      - uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-
-      - name: Run tests
-        run: go test -race ./...
-
   release:
-    needs: [bump, test]
+    needs: tag
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ needs.bump.outputs.new_version }}
+          ref: ${{ needs.tag.outputs.new_version }}
 
       - uses: actions/setup-go@v7
         with:
@@ -116,7 +125,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   image:
-    needs: [bump, test]
+    needs: tag
     strategy:
       matrix:
         include:
@@ -128,7 +137,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.bump.outputs.new_version }}
+          ref: ${{ needs.tag.outputs.new_version }}
 
       - name: Resolve commit
         id: commit
@@ -148,7 +157,7 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           build-args: |
-            VERSION=${{ needs.bump.outputs.new_version }}
+            VERSION=${{ needs.tag.outputs.new_version }}
             COMMIT=${{ steps.commit.outputs.sha }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
@@ -166,7 +175,7 @@ jobs:
           retention-days: 1
 
   manifest:
-    needs: [bump, image]
+    needs: [tag, image]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v8
@@ -186,7 +195,7 @@ jobs:
       - name: Create multi-arch manifest
         working-directory: /tmp/digests
         env:
-          NEW_VERSION: ${{ needs.bump.outputs.new_version }}
+          NEW_VERSION: ${{ needs.tag.outputs.new_version }}
         run: |
           sources=()
           for digest in *; do
@@ -200,7 +209,7 @@ jobs:
   # Built-in image variants, built on the multi-arch image the manifest job
   # just published.
   variant-image:
-    needs: [bump, manifest]
+    needs: [tag, manifest]
     strategy:
       matrix:
         variant: [sandbox]
@@ -214,7 +223,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.bump.outputs.new_version }}
+          ref: ${{ needs.tag.outputs.new_version }}
 
       - uses: actions/setup-go@v7
         with:
@@ -223,7 +232,7 @@ jobs:
       - name: Resolve base image
         id: base
         env:
-          NEW_VERSION: ${{ needs.bump.outputs.new_version }}
+          NEW_VERSION: ${{ needs.tag.outputs.new_version }}
         run: echo "ref=${IMAGE}:${NEW_VERSION#v}" >> "$GITHUB_OUTPUT"
 
       - name: Generate Dockerfile
@@ -266,7 +275,7 @@ jobs:
           retention-days: 1
 
   variant-manifest:
-    needs: [bump, variant-image]
+    needs: [tag, variant-image]
     strategy:
       matrix:
         variant: [sandbox]
@@ -289,7 +298,7 @@ jobs:
       - name: Create multi-arch manifest
         working-directory: /tmp/digests
         env:
-          NEW_VERSION: ${{ needs.bump.outputs.new_version }}
+          NEW_VERSION: ${{ needs.tag.outputs.new_version }}
           VARIANT: ${{ matrix.variant }}
         run: |
           sources=()
