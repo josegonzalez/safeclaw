@@ -29,6 +29,9 @@ const (
 	// DefaultCopyMaxSize is cp-out's default limit on the total size of the
 	// files it keeps.
 	DefaultCopyMaxSize = "1g"
+	// DefaultCopyMaxFiles is cp-out's default limit on the number of files
+	// it keeps.
+	DefaultCopyMaxFiles = 1000
 
 	// The in-container tools copies use. Absolute paths, so nothing on the
 	// sandbox's PATH is consulted.
@@ -54,6 +57,10 @@ var ErrNoGlob = errors.New("at least one --only glob is required")
 
 // ErrTooLarge is returned when the files cp-out keeps exceed its limit.
 var ErrTooLarge = errors.New("exceeds the --max-size limit")
+
+// ErrTooManyFiles is returned when cp-out would keep more files than its
+// limit.
+var ErrTooManyFiles = errors.New("exceeds the --max-files limit")
 
 // ErrFileExists is returned when cp-out would overwrite a host file.
 var ErrFileExists = errors.New("already exists (--force overwrites)")
@@ -285,6 +292,8 @@ type CopyOutOptions struct {
 	Force bool
 	// MaxSize caps the total size of the files kept. 0 means no limit.
 	MaxSize int64
+	// MaxFiles caps the number of files kept. 0 means no limit.
+	MaxFiles int
 }
 
 // CopyOut copies the regular files directly in a running sandbox's src
@@ -305,6 +314,9 @@ func (m *Manager) CopyOut(ctx context.Context, name, src, hostDir string, opts C
 	}
 	if opts.MaxSize < 0 {
 		return nil, errors.New("--max-size must not be negative")
+	}
+	if opts.MaxFiles < 0 {
+		return nil, errors.New("--max-files must not be negative")
 	}
 	if src == "" {
 		return nil, errors.New("a sandbox directory is required")
@@ -333,7 +345,7 @@ func (m *Manager) CopyOut(ctx context.Context, name, src, hostDir string, opts C
 	if err != nil {
 		return nil, err
 	}
-	names, err := extractTop(out, tmp, opts.Only, opts.MaxSize)
+	names, err := extractTop(out, tmp, opts)
 	if err == nil {
 		// Read to the end so tar can exit.
 		_, err = io.Copy(io.Discard, out)
@@ -390,10 +402,13 @@ func QuotePath(p string) string {
 }
 
 // extractTop writes the top-level regular files of a tar stream whose
-// names match one of globs into dir, returning their names. A limit above
-// zero caps their total size. Two entries with the same name, or a kept
-// name that safeName refuses, are an error.
-func extractTop(r io.Reader, dir string, globs []string, limit int64) ([]string, error) {
+// names match one of opts.Only into dir, returning their names. Sparse
+// entries are dropped, so a small stream can't expand into a large file. A
+// MaxSize above zero caps the files' total size and a MaxFiles above zero
+// their number. Two entries with the same name, or a kept name that
+// safeName refuses, are an error.
+func extractTop(r io.Reader, dir string, opts CopyOutOptions) ([]string, error) {
+	globs, limit := opts.Only, opts.MaxSize
 	tr := tar.NewReader(r)
 	var names []string
 	seen := map[string]bool{}
@@ -407,7 +422,7 @@ func extractTop(r io.Reader, dir string, globs []string, limit int64) ([]string,
 			return nil, err
 		}
 		name, ok := topLevel(hdr.Name)
-		if !ok || hdr.Typeflag != tar.TypeReg || !matchAny(globs, name) {
+		if !ok || hdr.Typeflag != tar.TypeReg || sparse(hdr) || !matchAny(globs, name) {
 			continue
 		}
 		if !safeName(name) {
@@ -415,6 +430,9 @@ func extractTop(r io.Reader, dir string, globs []string, limit int64) ([]string,
 		}
 		if seen[name] {
 			return nil, fmt.Errorf("%q appears more than once", name)
+		}
+		if opts.MaxFiles > 0 && len(names) >= opts.MaxFiles {
+			return nil, fmt.Errorf("files matching --only %w (%d files)", ErrTooManyFiles, opts.MaxFiles)
 		}
 		seen[name] = true
 		// Compare against what is left rather than adding first: total never
@@ -437,6 +455,19 @@ func extractTop(r io.Reader, dir string, globs []string, limit int64) ([]string,
 		}
 		names = append(names, name)
 	}
+}
+
+// sparse reports whether a regular-file entry is a GNU sparse file in PAX
+// form, which the reader expands to its logical size. The old GNU form has
+// its own type flag and is dropped with the other non-regular types. The
+// tar cp-out runs never writes either, since it isn't given --sparse.
+func sparse(hdr *tar.Header) bool {
+	for k := range hdr.PAXRecords {
+		if strings.HasPrefix(k, "GNU.sparse.") {
+			return true
+		}
+	}
+	return false
 }
 
 // matchAny reports whether name matches one of globs. As in a shell, a

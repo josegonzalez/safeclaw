@@ -5,6 +5,7 @@ import (
 	"io"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -180,6 +181,9 @@ func TestSandboxCopyCommands(t *testing.T) {
 	}
 	if got := out.Flags().Lookup("max-size").DefValue; got != session.DefaultCopyMaxSize {
 		t.Errorf("--max-size default = %q", got)
+	}
+	if got := out.Flags().Lookup("max-files").DefValue; got != strconv.Itoa(session.DefaultCopyMaxFiles) {
+		t.Errorf("--max-files default = %q", got)
 	}
 
 	out = newSandboxCopyOutCommand()

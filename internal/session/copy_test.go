@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"math"
@@ -402,7 +403,7 @@ func TestExtractTopHugeSize(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	_, err := extractTop(bytes.NewReader(buf.Bytes()), dir, []string{"*"}, 1024)
+	_, err := extractTop(bytes.NewReader(buf.Bytes()), dir, CopyOutOptions{Only: []string{"*"}, MaxSize: 1024})
 	if !errors.Is(err, ErrTooLarge) {
 		t.Errorf("err = %v, want %v", err, ErrTooLarge)
 	}
@@ -458,6 +459,116 @@ func TestCopyOutExisting(t *testing.T) {
 	}
 }
 
+func TestCopyOutMaxFiles(t *testing.T) {
+	// Empty files are free against --max-size, so only the count limits them.
+	var entries []entry
+	for i := range 5 {
+		entries = append(entries, entry{fmt.Sprintf("./%d.txt", i), tar.TypeReg, "", 0})
+	}
+	entries = append(entries, entry{"./skip.log", tar.TypeReg, "", 0})
+	stream := makeTar(t, entries...)
+
+	host := t.TempDir()
+	m, _ := newCopyManager(t, &copyFake{tarOut: stream})
+	_, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{Only: []string{"*.txt"}, MaxFiles: 4})
+	if !errors.Is(err, ErrTooManyFiles) || !strings.Contains(err.Error(), "(4 files)") {
+		t.Errorf("over the limit: err = %v, want ErrTooManyFiles", err)
+	}
+	if got := dirContents(t, host); len(got) != 0 {
+		t.Errorf("over the limit left %v in the host dir", got)
+	}
+
+	// Exactly at the limit, and files --only drops don't count.
+	for _, limit := range []int{5, 0} {
+		host = t.TempDir()
+		m, _ = newCopyManager(t, &copyFake{tarOut: stream})
+		paths, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{Only: []string{"*.txt"}, MaxFiles: limit})
+		if err != nil || len(paths) != 5 {
+			t.Errorf("MaxFiles %d: got %d files, err = %v", limit, len(paths), err)
+		}
+	}
+}
+
+// paxRecord formats one PAX record, whose length counts itself.
+func paxRecord(k, v string) string {
+	body := " " + k + "=" + v + "\n"
+	n := len(body) + 1
+	for len(strconv.Itoa(n))+len(body) != n {
+		n++
+	}
+	return strconv.Itoa(n) + body
+}
+
+// setTypeflag rewrites a tar header block's type flag and checksum.
+func setTypeflag(block []byte, flag byte) {
+	block[156] = flag
+	copy(block[148:156], "        ")
+	sum := 0
+	for _, c := range block {
+		sum += int(c)
+	}
+	copy(block[148:156], fmt.Sprintf("%06o\x00 ", sum))
+}
+
+// TestCopyOutDropsSparse checks that a GNU sparse entry, which the tar
+// reader would expand to its logical size, is dropped even without a size
+// limit.
+func TestCopyOutDropsSparse(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	// A PAX GNU sparse 0.1 entry: one byte of data at the end of a 1 GiB
+	// file, so the stream stays tiny while the logical size is huge. Go's
+	// writer won't write GNU.sparse records, so the extended header is
+	// written as a plain entry whose type flag is then patched to x.
+	var records string
+	for _, kv := range [][2]string{
+		{"GNU.sparse.major", "0"}, {"GNU.sparse.minor", "1"},
+		{"GNU.sparse.size", "1073741824"}, {"GNU.sparse.numblocks", "1"},
+		{"GNU.sparse.map", "1073741823,1"},
+	} {
+		records += paxRecord(kv[0], kv[1])
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "PaxHeaders/sparse.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: int64(len(records)), Format: tar.FormatUSTAR}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte(records)); err != nil {
+		t.Fatal(err)
+	}
+	setTypeflag(buf.Bytes()[:512], tar.TypeXHeader)
+	if err := tw.WriteHeader(&tar.Header{Name: "./sparse.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1, Format: tar.FormatUSTAR}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Name: "./plain.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("ok")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The reader does see it as a 1 GiB regular file.
+	tr := tar.NewReader(bytes.NewReader(buf.Bytes()))
+	got, err := tr.Next()
+	if err != nil || got.Typeflag != tar.TypeReg || got.Size != 1<<30 || !sparse(got) {
+		t.Fatalf("sparse header = %+v, %v", got, err)
+	}
+
+	host := t.TempDir()
+	m, _ := newCopyManager(t, &copyFake{tarOut: buf.Bytes()})
+	paths, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{Only: []string{"*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 1 || !reflect.DeepEqual(dirContents(t, host), map[string]string{"plain.txt": "ok"}) {
+		t.Errorf("paths = %v, host dir = %v", paths, dirContents(t, host))
+	}
+}
+
 func TestCopyOutArgs(t *testing.T) {
 	host := t.TempDir()
 	file := writeFile(t, filepath.Join(t.TempDir(), "file"), "x")
@@ -471,6 +582,7 @@ func TestCopyOutArgs(t *testing.T) {
 		{"no glob", "out", host, CopyOutOptions{}, ErrNoGlob.Error()},
 		{"bad glob", "out", host, CopyOutOptions{Only: []string{"["}}, "syntax error"},
 		{"negative", "out", host, CopyOutOptions{Only: []string{"*"}, MaxSize: -1}, "negative"},
+		{"negative files", "out", host, CopyOutOptions{Only: []string{"*"}, MaxFiles: -1}, "--max-files must not be negative"},
 		{"no src", "", host, CopyOutOptions{Only: []string{"*"}}, "sandbox directory is required"},
 		{"missing host dir", "out", filepath.Join(host, "missing"), CopyOutOptions{Only: []string{"*"}}, "no such file"},
 		{"host file", "out", file, CopyOutOptions{Only: []string{"*"}}, "not a directory"},
@@ -645,11 +757,11 @@ func TestCopyOutQuotesNames(t *testing.T) {
 		t.Errorf("placeError = %v", err)
 	}
 	dup := makeTar(t, entry{"./a.txt", tar.TypeReg, "1", 0}, entry{"a.txt", tar.TypeReg, "2", 0})
-	if _, err := extractTop(bytes.NewReader(dup), t.TempDir(), []string{"*"}, 0); err == nil || err.Error() != `"a.txt" appears more than once` {
+	if _, err := extractTop(bytes.NewReader(dup), t.TempDir(), CopyOutOptions{Only: []string{"*"}}); err == nil || err.Error() != `"a.txt" appears more than once` {
 		t.Errorf("duplicate err = %v", err)
 	}
 	short := makeTar(t, entry{"./a.txt", tar.TypeReg, "12345", 0})[:514]
-	if _, err := extractTop(bytes.NewReader(short), t.TempDir(), []string{"*"}, 0); err == nil || !strings.HasPrefix(err.Error(), `"a.txt": `) {
+	if _, err := extractTop(bytes.NewReader(short), t.TempDir(), CopyOutOptions{Only: []string{"*"}}); err == nil || !strings.HasPrefix(err.Error(), `"a.txt": `) {
 		t.Errorf("short read err = %v", err)
 	}
 }

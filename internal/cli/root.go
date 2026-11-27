@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/session"
+	"github.com/josegonzalez/safeclaw/internal/termtext"
 	"github.com/josegonzalez/safeclaw/internal/version"
 )
 
@@ -20,10 +22,17 @@ func Execute() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := NewRootCommand().ExecuteContext(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "Error:", err)
+		printError(os.Stderr, err)
 		return 1
 	}
 	return 0
+}
+
+// printError prints a command's error with control characters escaped.
+// Errors can carry text from inside a container, such as docker's stderr
+// or a sandbox file name, which must not reach the terminal as escapes.
+func printError(w io.Writer, err error) {
+	_, _ = fmt.Fprintln(w, "Error:", termtext.Escape(err.Error()))
 }
 
 // NewRootCommand builds the command tree.

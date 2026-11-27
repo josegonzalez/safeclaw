@@ -242,15 +242,16 @@ func newSandboxCopyOutCommand() *cobra.Command {
 	var only []string
 	var force bool
 	var maxSize string
+	var maxFiles int
 	cmd := &cobra.Command{
 		Use:   "cp-out NAME CONTAINER_DIR HOST_DIR --only GLOB...",
 		Short: "Copy matching files out of a running sandbox",
 		Long: "Copy the regular files directly in CONTAINER_DIR whose names match an --only glob into the existing HOST_DIR.\n\n" +
-			"Symbolic links, hard links, directories, other file types, and anything in subdirectories are dropped. " +
+			"Symbolic links, hard links, directories, sparse files, other file types, and anything in subdirectories are dropped. " +
 			"A kept file whose name is not printable UTF-8 or starts with - refuses the whole copy, and as in a shell, " +
 			"names starting with . only match a glob that starts with . too. " +
 			"Files are read as the sandbox user and written with mode 0644, less the umask. Nothing is written unless every file arrives, " +
-			"and existing files are refused unless --force is set. The host path of each file is printed, quoted when it is not printable text.",
+			"and existing files are refused unless --force is set. More files than --max-files, or more bytes than --max-size, refuse the whole copy. The host path of each file is printed, quoted when it is not printable text.",
 		Args:              cobra.ExactArgs(3),
 		ValidArgsFunction: completeSandboxFirst,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -259,9 +260,10 @@ func newSandboxCopyOutCommand() *cobra.Command {
 				return fmt.Errorf("--max-size: %w", err)
 			}
 			paths, err := session.NewManager(nil).CopyOut(cmd.Context(), args[0], args[1], args[2], session.CopyOutOptions{
-				Only:    only,
-				Force:   force,
-				MaxSize: limit,
+				Only:     only,
+				Force:    force,
+				MaxSize:  limit,
+				MaxFiles: maxFiles,
 			})
 			if err != nil {
 				return err
@@ -273,6 +275,7 @@ func newSandboxCopyOutCommand() *cobra.Command {
 	_ = cmd.MarkFlagRequired("only")
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "overwrite existing host files")
 	cmd.Flags().StringVar(&maxSize, "max-size", session.DefaultCopyMaxSize, "limit on the total size of the files kept, with a k, m, g, or t suffix (0 for none)")
+	cmd.Flags().IntVar(&maxFiles, "max-files", session.DefaultCopyMaxFiles, "limit on the number of files kept (0 for none)")
 	return cmd
 }
 
