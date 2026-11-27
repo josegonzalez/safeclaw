@@ -8,9 +8,10 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -116,8 +117,9 @@ func ParseSetupToken(typescript []byte) (string, error) {
 
 // SetupToken runs `claude setup-token` in a short-lived container from the
 // base image, attached to this terminal, and returns the token it prints.
-// The container gets no secrets, mounts, or ports, and is removed
-// afterwards.
+// The container gets no secrets, mounts, ports, or capabilities, and is
+// removed afterwards, whether the sign-in succeeds, fails, or ctx is
+// cancelled.
 func (m *Manager) SetupToken(ctx context.Context) (string, error) {
 	if err := m.checkImage(ctx, ""); err != nil {
 		return "", err
@@ -125,8 +127,23 @@ func (m *Manager) SetupToken(ctx context.Context) (string, error) {
 	cleanup := context.WithoutCancel(ctx)
 	m.RemoveStaleAuthContainers(cleanup)
 
-	id, err := m.Docker.Run(ctx, "-d", "--name", authName(), "--label", config.LabelAuth+"="+strconv.Itoa(os.Getpid()), config.ImageName, "sleep", "infinity")
+	// The owner lock is held for as long as the container may exist, so
+	// other safeclaw processes can tell this login is still running. It is
+	// released after the container is removed.
+	owner := authOwner()
+	release, err := m.holdAuthOwner(owner)
 	if err != nil {
+		return "", fmt.Errorf("start the sign-in: %w", err)
+	}
+	defer release()
+
+	name := authName()
+	args := append([]string{"-d", "--name", name, "--label", config.LabelAuth + "=" + owner}, hardenArgs...)
+	id, err := m.Docker.Run(ctx, append(args, config.ImageName, "sleep", "infinity")...)
+	if err != nil {
+		// A cancelled run may have created the container before docker
+		// printed its ID.
+		_ = m.Docker.Remove(cleanup, name, true)
 		return "", fmt.Errorf("start the sign-in container: %w", err)
 	}
 	defer func() { _ = m.Docker.Remove(cleanup, id, true) }()
@@ -148,12 +165,18 @@ func (m *Manager) SetupToken(ctx context.Context) (string, error) {
 }
 
 // RemoveStaleAuthContainers removes sign-in containers left by an earlier
-// login that was killed before it could clean up. Each is labeled with the
-// PID of the safeclaw process that started it, so another login still
-// running is left alone. Docker copies image labels onto containers, so a
-// container counts only when its name is a sign-in container's too, and a
-// session made from an image carrying the label is never removed. It is
-// best effort and costs one `docker ps`.
+// login that was killed before it could clean up. Each is labeled with a
+// random owner ID, and the login that started it holds a lock on a host
+// file named after that ID until the container is gone. The kernel drops
+// the lock when that process exits, however it exits, so a container whose
+// lock can be taken, or whose file is missing, is stale, and another login
+// still running is left alone. Unlike a PID, the ID is never reused.
+// Containers labeled by versions that recorded a PID instead are stale
+// too, since their PID can't tell a live login from a reused one. Docker
+// copies image labels onto containers, so a container counts only when its
+// name is a sign-in container's too, and a session made from an image
+// carrying the label is never removed. It is best effort and costs one
+// `docker ps`.
 func (m *Manager) RemoveStaleAuthContainers(ctx context.Context) {
 	out, err := m.Docker.R.Output(ctx, nil, "ps", "-a", "--filter", "label="+config.LabelAuth, "--format", `{{.ID}} {{.Names}} {{.Label "`+config.LabelAuth+`"}}`)
 	if err != nil {
@@ -161,12 +184,28 @@ func (m *Manager) RemoveStaleAuthContainers(ctx context.Context) {
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		id, rest, _ := strings.Cut(line, " ")
-		name, pid, _ := strings.Cut(rest, " ")
-		if id == "" || !strings.HasPrefix(name, config.AuthContainerPrefix) || m.processAlive(pid) {
+		name, owner, _ := strings.Cut(rest, " ")
+		if id == "" || !strings.HasPrefix(name, config.AuthContainerPrefix) {
+			continue
+		}
+		release, stale := m.claimStaleAuthOwner(owner)
+		if !stale {
 			continue
 		}
 		_ = m.Docker.Remove(ctx, id, true)
+		release()
 	}
+}
+
+// authOwnerRe matches the owner IDs authOwner makes. Owner IDs name files
+// on the host, so nothing else is ever used as one.
+var authOwnerRe = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// authOwner returns a new random owner ID for a sign-in container.
+var authOwner = func() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // authName returns a name for a sign-in container.
@@ -176,15 +215,71 @@ var authName = func() string {
 	return config.AuthContainerPrefix + hex.EncodeToString(b)
 }
 
-// processAlive reports whether pid names a running process.
-func (m *Manager) processAlive(pid string) bool {
-	if m.ProcessAlive != nil {
-		return m.ProcessAlive(pid)
+func (m *Manager) authDir() string {
+	if m.AuthDir != "" {
+		return m.AuthDir
 	}
-	n, err := strconv.Atoi(pid)
-	if err != nil || n <= 0 {
-		return false
+	return config.AuthDir()
+}
+
+func (m *Manager) authOwnerPath(owner string) string {
+	return filepath.Join(m.authDir(), owner+".lock")
+}
+
+// holdAuthOwner creates the owner file for a new sign-in container and
+// locks it. The returned function removes the file and releases the lock.
+func (m *Manager) holdAuthOwner(owner string) (func(), error) {
+	if !authOwnerRe.MatchString(owner) {
+		return nil, fmt.Errorf("invalid sign-in owner %q", owner)
 	}
-	err = syscall.Kill(n, 0)
-	return err == nil || errors.Is(err, syscall.EPERM)
+	if err := os.MkdirAll(m.authDir(), 0o700); err != nil {
+		return nil, err
+	}
+	path := m.authOwnerPath(owner)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("lock %s: %w", path, err)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			_ = os.Remove(path)
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			_ = f.Close()
+		})
+	}, nil
+}
+
+// claimStaleAuthOwner reports whether the login that owns a sign-in
+// container is gone. When it is and its owner file is still there, the
+// file stays locked, so no other process removes the container at the same
+// time, until the returned function removes the file and unlocks it. A
+// file that can't be checked for another reason counts as a live owner.
+func (m *Manager) claimStaleAuthOwner(owner string) (release func(), stale bool) {
+	none := func() {}
+	if !authOwnerRe.MatchString(owner) {
+		return none, true
+	}
+	path := m.authOwnerPath(owner)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return none, true
+	}
+	if err != nil {
+		return none, false
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return none, false
+	}
+	return func() {
+		_ = os.Remove(path)
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, true
 }
