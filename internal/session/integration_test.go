@@ -1018,3 +1018,79 @@ func TestIntegrationTTYDCredentialNotInArgv(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegrationTTYDRestart checks stopTTYD and checkTTYDAnswers against
+// the image's ttyd in a throwaway container with no network: the running
+// ttyd answers its own credential and refuses another, stopTTYD leaves no
+// ttyd and nothing on its port, and a new ttyd then takes the port.
+func TestIntegrationTTYDRestart(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+	id, err := d.Run(ctx, "-d", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", config.ImageName, "sleep", "infinity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Remove(context.Background(), id, true) })
+	m := &Manager{Docker: d}
+
+	start := func(c Credential) {
+		t.Helper()
+		if _, err := d.Exec(ctx, id, docker.ExecOptions{Stdin: strings.NewReader(c.String())}, "sh", "-c", writeCredentialScript); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.Exec(ctx, id, docker.ExecOptions{Detach: true}, "sh", "-c", startTTYDScript, "ttyd", "-W", "-O", "-p", strconv.Itoa(config.TTYDPort), "sleep", "infinity"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := Credential{User: config.TTYDUser, Password: "integration-old"}
+	other := Credential{User: config.TTYDUser, Password: "integration-new"}
+
+	// Nothing to stop yet.
+	if err := m.stopTTYD(ctx, "itest", id); err != nil {
+		t.Fatalf("stop with no ttyd: %v", err)
+	}
+	start(old)
+	if err := m.checkTTYDAnswers(ctx, "itest", id, old); err != nil {
+		t.Fatalf("ttyd refused its own credential: %v", err)
+	}
+	if err := m.checkTTYDAnswers(ctx, "itest", id, other); !errors.Is(err, ErrTTYDRestart) || !strings.Contains(err.Error(), "refused the new credential") {
+		t.Fatalf("ttyd with another credential = %v", err)
+	}
+	if out, err := d.Exec(ctx, id, docker.ExecOptions{}, "sh", "-c", ttydGoneScript); err != nil || !strings.Contains(string(out), "still running") {
+		t.Fatalf("running ttyd reported as %q, %v", out, err)
+	}
+
+	if err := m.stopTTYD(ctx, "itest", id); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if out, err := d.Exec(ctx, id, docker.ExecOptions{}, "sh", "-c", ttydGoneScript); err != nil || len(out) != 0 {
+		t.Fatalf("stopped ttyd reported as %q, %v", out, err)
+	}
+	start(other)
+	if err := m.checkTTYDAnswers(ctx, "itest", id, other); err != nil {
+		t.Fatalf("new ttyd: %v", err)
+	}
+
+	// Something else holding the port counts as not gone, even with no
+	// ttyd process. SO_REUSEADDR lets it bind past the checks' connections
+	// in TIME_WAIT, as ttyd's own listener does.
+	if err := m.stopTTYD(ctx, "itest", id); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if _, err := d.Exec(ctx, id, docker.ExecOptions{Detach: true}, "python3", "-c", "import socket,time;s=socket.socket(socket.AF_INET6);s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('::',"+strconv.Itoa(config.TTYDPort)+"));s.listen();time.sleep(600)"); err != nil {
+		t.Fatal(err)
+	}
+	var out []byte
+	for range 50 {
+		if out, err = d.Exec(ctx, id, docker.ExecOptions{}, "sh", "-c", ttydGoneScript); err != nil || len(out) != 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil || !strings.Contains(string(out), "listens on port") {
+		t.Fatalf("held port reported as %q, %v", out, err)
+	}
+}
