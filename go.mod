@@ -4,9 +4,12 @@ go 1.27
 
 require (
 	charm.land/huh/v2 v2.0.3
+	github.com/charmbracelet/x/ansi v0.12.0
 	github.com/spf13/cobra v1.10.2
+	github.com/zalando/go-keyring v0.2.8
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/sys v0.50.0
+	golang.org/x/term v0.48.0
 )
 
 require (
@@ -17,7 +20,6 @@ require (
 	github.com/catppuccin/go v0.3.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20261125122737-8ed499892fb4 // indirect
-	github.com/charmbracelet/x/ansi v0.12.0 // indirect
 	github.com/charmbracelet/x/exp/ordered v0.1.0 // indirect
 	github.com/charmbracelet/x/exp/strings v0.1.0 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
@@ -36,7 +38,5 @@ require (
 	github.com/rivo/uniseg v0.4.8-0.20261110175422-3a370411ca06 // indirect
 	github.com/spf13/pflag v1.1.0 // indirect
 	github.com/xo/terminfo v1.3.1 // indirect
-	github.com/zalando/go-keyring v0.2.8 // indirect
 	golang.org/x/sync v0.25.0 // indirect
-	golang.org/x/term v0.48.0 // indirect
 )
