@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strconv"
 	"strings"
 )
@@ -14,6 +16,17 @@ import (
 // Client offers the docker operations safeclaw needs on top of a Runner.
 type Client struct {
 	R Runner
+	// Warnf reports a problem that does not fail the operation, such as a
+	// container List leaves out. Nil logs it with the log package.
+	Warnf func(format string, args ...any)
+}
+
+func (c *Client) warnf(format string, args ...any) {
+	if c.Warnf != nil {
+		c.Warnf(format, args...)
+		return
+	}
+	log.Printf(format, args...)
 }
 
 // New returns a Client backed by the real docker CLI.
@@ -283,21 +296,27 @@ func (c *Client) InspectOne(ctx context.Context, name string) (*Container, error
 }
 
 // List returns inspect data for every container whose name starts with prefix.
-// A container removed between listing and inspecting is left out.
+// A container removed between listing and inspecting is left out, and so
+// is one whose inspect output alone is over MaxOutput, with a warning.
 func (c *Client) List(ctx context.Context, prefix string) ([]Container, error) {
 	names, err := c.ContainerNames(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
 	cs, err := c.Inspect(ctx, names...)
-	if err == nil || !IsNotFound(err) {
+	if err == nil || !retryEach(err) {
 		return cs, err
 	}
-	// One of them is gone, which fails the whole inspect, so inspect each
-	// on its own and skip the missing ones.
+	// One of them is gone, or the containers' labels, which include their
+	// images', add up to too much output, either of which fails the whole
+	// inspect. So inspect each on its own and skip the missing ones.
 	cs = nil
 	for _, name := range names {
 		ct, err := c.InspectOne(ctx, name)
+		if errors.Is(err, ErrOutputTooLarge) {
+			c.warnf("Warning: leaving out container %s: %v", name, err)
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -306,6 +325,12 @@ func (c *Client) List(ctx context.Context, prefix string) ([]Container, error) {
 		}
 	}
 	return cs, nil
+}
+
+// retryEach reports whether a failed inspect of several containers should
+// be retried one container at a time.
+func retryEach(err error) bool {
+	return IsNotFound(err) || errors.Is(err, ErrOutputTooLarge)
 }
 
 // Run runs `docker run` with the given args and returns the container ID.
@@ -429,7 +454,19 @@ type Event struct {
 	// Container is the container ID the event is about: the actor of a
 	// container event, or the container attribute of a network event.
 	Container string
+	// Err is set, and the other fields are empty, for a line that could not
+	// be read as an event, such as one longer than MaxEventLine. The event
+	// it held is lost.
+	Err error
 }
+
+// MaxEventLine is the longest `docker events` line Events reads. Longer
+// lines are skipped.
+const MaxEventLine = 1 << 20
+
+// ErrEventTooLarge is the Err of an Event for a line longer than
+// MaxEventLine.
+var ErrEventTooLarge = fmt.Errorf("event exceeds %d bytes", MaxEventLine)
 
 type rawEvent struct {
 	Type   string `json:"Type"`
@@ -442,41 +479,89 @@ type rawEvent struct {
 
 // ParseEvent parses one line of `docker events --format '{{json .}}'`.
 func ParseEvent(line []byte) (Event, bool) {
+	ev, ok, _ := parseEvent(line)
+	return ev, ok
+}
+
+// parseEvent is ParseEvent, with an error for a line that is not JSON.
+func parseEvent(line []byte) (Event, bool, error) {
 	line = bytes.TrimSpace(line)
 	if len(line) == 0 {
-		return Event{}, false
+		return Event{}, false, nil
 	}
 	var r rawEvent
 	if err := json.Unmarshal(line, &r); err != nil {
-		return Event{}, false
+		return Event{}, false, fmt.Errorf("parse docker event: %w", err)
 	}
 	typ := r.Type
 	if typ == "" {
 		typ = "container"
 	}
 	if typ != "container" && typ != "network" {
-		return Event{}, false
+		return Event{}, false, nil
 	}
 	ev := Event{Type: typ, Action: r.Action, Name: r.Actor.Attributes["name"], Container: r.Actor.ID}
 	if typ == "network" {
 		ev.Container = r.Actor.Attributes["container"]
 	}
-	return ev, true
+	return ev, true, nil
 }
 
 // Events streams container and network events until ctx is done or docker
-// exits. It returns when the stream ends.
+// exits. A line too long or garbled to parse is passed to fn as an Event
+// with Err set, and the stream goes on. If reading the stream fails,
+// docker is killed and the read error returned.
 func (c *Client) Events(ctx context.Context, fn func(Event)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	out, wait, err := c.R.Stream(ctx, "events", "--filter", "type=container", "--filter", "type=network", "--format", "{{json .}}")
 	if err != nil {
 		return err
 	}
-	sc := bufio.NewScanner(out)
-	sc.Buffer(make([]byte, 64*1024), 1024*1024)
-	for sc.Scan() {
-		if ev, ok := ParseEvent(sc.Bytes()); ok {
+	rerr := readEvents(out, fn)
+	if rerr != nil {
+		// Docker may still be writing, so wait would block until it
+		// exits on its own.
+		cancel()
+	}
+	werr := wait()
+	if rerr != nil {
+		return fmt.Errorf("read docker events: %w", rerr)
+	}
+	return werr
+}
+
+// readEvents passes each event line in r to fn until r ends, keeping at
+// most MaxEventLine bytes of any one line. It returns nil at EOF.
+func readEvents(r io.Reader, fn func(Event)) error {
+	br := bufio.NewReaderSize(r, 64<<10)
+	var line []byte
+	tooLong := false
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if !tooLong && len(line)+len(chunk) > MaxEventLine {
+			tooLong, line = true, line[:0]
+		}
+		if !tooLong {
+			line = append(line, chunk...)
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		switch ev, ok, perr := parseEvent(line); {
+		case tooLong:
+			fn(Event{Err: ErrEventTooLarge})
+		case perr != nil:
+			fn(Event{Err: perr})
+		case ok:
 			fn(ev)
 		}
+		line, tooLong = line[:0], false
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	}
-	return wait()
 }

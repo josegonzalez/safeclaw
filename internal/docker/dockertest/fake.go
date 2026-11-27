@@ -30,6 +30,9 @@ type Runner struct {
 	Handler Handler
 	// Events is returned by Stream when Handler gives no output.
 	Events string
+	// StreamHandler, when set, answers Stream calls in place of Handler
+	// and Events, for streams that block or fail partway.
+	StreamHandler func(ctx context.Context, args []string) (io.ReadCloser, func() error, error)
 }
 
 // Output implements docker.Runner.
@@ -55,9 +58,19 @@ func (r *Runner) Passthrough(ctx context.Context, args ...string) error {
 	return err
 }
 
-// Stream implements docker.Runner. It returns Handler's output, or Events
-// when there is none, and the wait function returns Handler's error.
+// Stream implements docker.Runner. It returns StreamHandler's answer when
+// it is set. Otherwise it returns Handler's output, or Events when there is
+// none, and the wait function returns Handler's error.
 func (r *Runner) Stream(ctx context.Context, args ...string) (io.ReadCloser, func() error, error) {
+	r.mu.Lock()
+	sh := r.StreamHandler
+	if sh != nil {
+		r.Calls = append(r.Calls, Call{Args: append([]string(nil), args...)})
+	}
+	r.mu.Unlock()
+	if sh != nil {
+		return sh(ctx, args)
+	}
 	out, err := r.Output(ctx, nil, args...)
 	if out == nil {
 		out = []byte(r.Events)

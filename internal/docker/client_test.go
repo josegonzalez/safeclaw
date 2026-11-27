@@ -3,10 +3,14 @@ package docker_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
@@ -161,6 +165,34 @@ func TestListFailsOnOtherErrors(t *testing.T) {
 	}
 }
 
+func TestListSkipsOversizedContainers(t *testing.T) {
+	tooLarge := func(args []string) error {
+		return &docker.Error{Args: args, Err: docker.ErrOutputTooLarge}
+	}
+	r := &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
+		switch {
+		case args[0] == "ps":
+			return []byte("safeclaw-a\nsafeclaw-b\n"), nil
+		case len(args) > 3, args[2] == "safeclaw-b":
+			return nil, tooLarge(args)
+		}
+		return []byte(`[{"Id":"id-a","Name":"/safeclaw-a"}]`), nil
+	}}
+	c := r.Client()
+	var warnings []string
+	c.Warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	cs, err := c.List(context.Background(), "safeclaw-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"safeclaw-a"}; !reflect.DeepEqual(listNames(cs), want) {
+		t.Errorf("List = %v, want %v", listNames(cs), want)
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "safeclaw-b") {
+		t.Errorf("warnings = %q, want one naming safeclaw-b", warnings)
+	}
+}
+
 func TestImageIDMissing(t *testing.T) {
 	r := &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
 		return nil, dockertest.NotFound(args)
@@ -208,6 +240,77 @@ func TestEventsStream(t *testing.T) {
 	}
 	if want := "events --filter type=container --filter type=network --format {{json .}}"; r.Commands()[0] != want {
 		t.Errorf("events = %q, want %q", r.Commands()[0], want)
+	}
+}
+
+const startEvent = `{"Type":"container","Action":"start","Actor":{"Attributes":{"name":"safeclaw-a"}}}`
+
+func TestEventsSkipsUnreadableLines(t *testing.T) {
+	huge := `{"Type":"container","Action":"start","Actor":{"Attributes":{"name":"` + strings.Repeat("x", docker.MaxEventLine) + `"}}}`
+	r := &dockertest.Runner{Events: huge + "\nnot json\n\n" + startEvent + "\n" + huge}
+	var got []docker.Event
+	if err := r.Client().Events(context.Background(), func(e docker.Event) { got = append(got, e) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("events = %d, want 4: %+v", len(got), got)
+	}
+	if !errors.Is(got[0].Err, docker.ErrEventTooLarge) || got[0].Name != "" {
+		t.Errorf("oversized line = %+v, want ErrEventTooLarge", got[0])
+	}
+	if got[1].Err == nil {
+		t.Errorf("garbled line = %+v, want an error", got[1])
+	}
+	if got[2].Err != nil || got[2].Action != "start" || got[2].Name != "safeclaw-a" {
+		t.Errorf("event after the bad lines = %+v", got[2])
+	}
+	if !errors.Is(got[3].Err, docker.ErrEventTooLarge) {
+		t.Errorf("oversized last line = %+v, want ErrEventTooLarge", got[3])
+	}
+}
+
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
+
+func TestEventsKillsDockerOnReadError(t *testing.T) {
+	boom := errors.New("read failed")
+	r := &dockertest.Runner{StreamHandler: func(ctx context.Context, _ []string) (io.ReadCloser, func() error, error) {
+		out := io.MultiReader(strings.NewReader(startEvent+"\n"), failingReader{boom})
+		// Like docker, the stream only ends when the process is killed.
+		return io.NopCloser(out), func() error { <-ctx.Done(); return ctx.Err() }, nil
+	}}
+	done := make(chan error, 1)
+	var got []docker.Event
+	go func() {
+		done <- r.Client().Events(context.Background(), func(e docker.Event) { got = append(got, e) })
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, boom) {
+			t.Errorf("Events = %v, want the read error", err)
+		}
+		if len(got) != 1 || got[0].Action != "start" {
+			t.Errorf("events = %+v, want the one before the error", got)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Events is still waiting for docker after a read error")
+	}
+}
+
+func TestEventsFromProcess(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "docker")
+	body := "#!/bin/sh\nhead -c 3000000 /dev/zero | tr '\\0' x\necho\necho '" + startEvent + "'\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := &docker.Client{R: docker.ExecRunner{Binary: script}}
+	var got []docker.Event
+	if err := c.Events(context.Background(), func(e docker.Event) { got = append(got, e) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || !errors.Is(got[0].Err, docker.ErrEventTooLarge) || got[1].Name != "safeclaw-a" {
+		t.Errorf("events = %+v, want a skipped line then safeclaw-a", got)
 	}
 }
 
