@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"path"
 	"slices"
 	"sort"
 	"strconv"
@@ -90,6 +91,10 @@ type SandboxMount struct {
 	Source      string `json:"source"`
 	Destination string `json:"destination"`
 	ReadOnly    bool   `json:"read_only"`
+	// RecursiveReadOnly is set for a read-only bind made with
+	// bind-recursive=readonly, whose submounts docker makes read-only too
+	// or refuses to create.
+	RecursiveReadOnly bool `json:"recursive_read_only"`
 }
 
 // getSandbox returns the named sandbox's inspect data, or an error wrapping
@@ -171,7 +176,8 @@ func sandboxInfo(name string, c docker.Container) SandboxInfo {
 	}
 	sort.Slice(info.Tmpfs, func(i, j int) bool { return info.Tmpfs[i].Path < info.Tmpfs[j].Path })
 	for _, mt := range c.Mounts {
-		info.Mounts = append(info.Mounts, SandboxMount{Type: mt.Type, Source: mt.Source, Destination: mt.Destination, ReadOnly: !mt.RW})
+		info.Mounts = append(info.Mounts, SandboxMount{Type: mt.Type, Source: mt.Source, Destination: mt.Destination, ReadOnly: !mt.RW,
+			RecursiveReadOnly: !mt.RW && forcedRecursive(h.Mounts, mt.Destination)})
 	}
 	for k, v := range c.Config.Labels {
 		if strings.HasPrefix(k, config.LabelPrefix) {
@@ -179,6 +185,17 @@ func sandboxInfo(name string, c docker.Container) SandboxInfo {
 		}
 	}
 	return info
+}
+
+// forcedRecursive reports whether the --mount bind at dst was made with
+// bind-recursive=readonly.
+func forcedRecursive(mounts []docker.HostMount, dst string) bool {
+	for _, hm := range mounts {
+		if hm.Type == "bind" && path.Clean(hm.Target) == dst {
+			return hm.ReadOnly && hm.BindOptions != nil && hm.BindOptions.ReadOnlyForceRecursive
+		}
+	}
+	return false
 }
 
 func nonNil(s []string) []string {
@@ -334,13 +351,19 @@ func staticChecks(info SandboxInfo, c docker.Container, secretNames map[string]b
 
 	checks = append(checks, check("read-only-root", info.ReadOnlyRoot, "read-only root %t", info.ReadOnlyRoot))
 
-	var writable []string
+	// A bind must also be forced recursively read-only: a plain :ro bind
+	// leaves submounts writable where docker can't make them read-only.
+	var writable, notRecursive []string
 	for _, mt := range info.Mounts {
-		if !mt.ReadOnly {
+		switch {
+		case !mt.ReadOnly:
 			writable = append(writable, mt.Destination)
+		case mt.Type == "bind" && !mt.RecursiveReadOnly:
+			notRecursive = append(notRecursive, mt.Destination)
 		}
 	}
-	checks = append(checks, check("mounts-read-only", len(writable) == 0, "%d mounts, writable: %q", len(info.Mounts), nonNil(writable)))
+	checks = append(checks, check("mounts-read-only", len(writable) == 0 && len(notRecursive) == 0,
+		"%d mounts, writable: %q, not recursively read-only: %q", len(info.Mounts), nonNil(writable), nonNil(notRecursive)))
 
 	if secretNames == nil {
 		checks = append(checks, check("no-secrets", false, "could not list the stored secrets"))
@@ -422,6 +445,19 @@ func parseProbe(out string) probe {
 	return p
 }
 
+// below returns the mount points strictly below dir, sorted.
+func (p probe) below(dir string) []string {
+	prefix := strings.TrimSuffix(dir, "/") + "/"
+	var out []string
+	for point := range p.mounts {
+		if strings.HasPrefix(point, prefix) {
+			out = append(out, point)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // unescapeMount undoes the octal escapes /proc/self/mounts uses for spaces,
 // tabs, newlines, and backslashes in paths.
 func unescapeMount(s string) string {
@@ -471,14 +507,24 @@ func liveChecks(info SandboxInfo, p probe) []SandboxCheck {
 	rootMode, _, _ := strings.Cut(root.options, ",")
 	checks = append(checks, check("live-read-only-root", ok && hasOption(root.options, "ro"), "/ mounted %q", rootMode))
 
+	// Every filesystem mounted below a mount must be read-only too: a
+	// writable submount is as writable as the mount itself would be.
 	var bad []string
+	submounts := 0
 	for _, mt := range info.Mounts {
 		e, ok := p.mounts[mt.Destination]
 		if !ok || !hasOption(e.options, "ro") {
 			bad = append(bad, mt.Destination)
 		}
+		for _, point := range p.below(mt.Destination) {
+			submounts++
+			if !hasOption(p.mounts[point].options, "ro") {
+				bad = append(bad, point)
+			}
+		}
 	}
-	checks = append(checks, check("live-mounts", len(bad) == 0, "%d mounts, missing or writable: %q", len(info.Mounts), nonNil(bad)))
+	checks = append(checks, check("live-mounts", len(bad) == 0, "%d mounts, %d submounts, missing or writable: %q",
+		len(info.Mounts), submounts, nonNil(bad)))
 
 	disk, ok := p.mounts[config.SandboxDir]
 	size, _ := ParseSize(tmpfsSize(disk.options))

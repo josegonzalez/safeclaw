@@ -95,6 +95,8 @@ safeclaw sandbox cp-out triage /sandbox/out ./results --only '*.txt'
 safeclaw sandbox rm -f triage
 ```
 
+Each `-v` is mounted recursively read-only: any filesystem mounted below the host directory is read-only in the sandbox too. This needs Docker Engine 25 or later on Linux 5.12 or later, and docker refuses to create the sandbox where it can't do it, rather than leave those filesystems writable. SELinux relabeling (`z`, `Z`), propagation modes other than `rprivate`, and `nocopy` are refused, since a recursively read-only mount can't take them. See [sandboxes](docs/architecture.md#sandboxes).
+
 `/sandbox` is a tmpfs of `--disk` bytes (default `1g`), so an extractor writing past it fails instead of filling the host's disk. Its files count toward `--memory` (default `2g`), so raise both together, and they are lost when the sandbox stops. See [sandbox disk](docs/architecture.md#sandbox-disk).
 
 A one-off sandbox lives for exactly one job, so jobs never share files, locks, or cleanup. Without `-s` it gets a random name, and a name that already exists is refused.
@@ -277,7 +279,7 @@ The choice is remembered for the session like its secrets, and changing it recre
 | `safeclaw attach NAME` | Attach to a session's tmux session in this terminal. Clipboard writes, passthrough, hyperlinks to anything but http and https sites off localhost, and other sequences that act on the host terminal are filtered out ([details](docs/architecture.md#attaching-from-the-host)) |
 | `safeclaw net off NAME` | Save a session's networks and disconnect it from them. `--owner` names the hold and `--reason` says why. |
 | `safeclaw net on NAME` | Release the hold for `--owner` (or the unnamed hold) and reconnect the session once none remain. `--force` releases every hold. |
-| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory read-only and can be repeated, `--variant` picks the image variant, `--memory`, `--pids-limit`, `--cpus`, and `--disk` (the size of `/sandbox`) set limits. |
+| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory recursively read-only and can be repeated, `--variant` picks the image variant, `--memory`, `--pids-limit`, `--cpus`, and `--disk` (the size of `/sandbox`) set limits. |
 | `safeclaw sandbox run --rm [-s NAME]` | Create a one-off sandbox that is removed when it stops, and print its name |
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY, `--escape-controls` to escape control characters in its output, `--timeout DUR` to stop it after DUR and exit 124, `-e NAME=VALUE` or `-e NAME` to set an environment variable for the command without putting the value in docker's arguments) |
 | `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`, and the same `--timeout` and `-e` as `sandbox exec`. |

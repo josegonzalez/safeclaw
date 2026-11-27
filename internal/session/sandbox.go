@@ -1,12 +1,15 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/csv"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -159,7 +162,7 @@ type SandboxOptions struct {
 	// optional for PrepareEphemeral.
 	Name string
 	// Volumes are host:container bind mounts, each always mounted
-	// read-only. Setting any recreates an existing sandbox with exactly
+	// recursively read-only (see ReadOnlyVolume). Setting any recreates an existing sandbox with exactly
 	// these mounts.
 	Volumes []string
 	// Variant is the image variant, config.BaseVariant for the base image.
@@ -471,13 +474,14 @@ func EphemeralRunArgs(container string, opts SandboxOptions, exec ExecOptions, c
 }
 
 // sandboxArgs returns the `docker run` flags every sandbox gets: its name,
-// label, isolation, limits, and optional read-only volume. /sandbox is a
-// tmpfs of opts.Disk bytes owned by the sandbox user, since docker volumes
-// can't be size-limited on most storage drivers. The container keeps no
-// log, whatever the daemon's default driver: any sandbox process can write
-// to PID 1's stdout through /proc/1/fd/1, and a log would keep those bytes
-// on the docker host's disk outside every limit. Nothing reads a sandbox's
-// log, since a one-off sandbox's output reaches the caller attached.
+// label, isolation, limits, and optional recursively read-only volumes.
+// /sandbox is a tmpfs of opts.Disk bytes owned by the sandbox user, since
+// docker volumes can't be size-limited on most storage drivers. The
+// container keeps no log, whatever the daemon's default driver: any sandbox
+// process can write to PID 1's stdout through /proc/1/fd/1, and a log would
+// keep those bytes on the docker host's disk outside every limit. Nothing
+// reads a sandbox's log, since a one-off sandbox's output reaches the
+// caller attached.
 func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 	opts = opts.withDefaults()
 	disk, err := diskBytes(opts.Disk)
@@ -510,26 +514,17 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 	// helpful error, after the image checks.
 	seen := map[string]string{"/tmp": "the /tmp tmpfs", config.SandboxDir: "the " + config.SandboxDir + " tmpfs"}
 	for _, volume := range opts.volumes() {
-		v, err := ReadOnlyVolume(volume)
+		b, err := ReadOnlyVolume(volume)
 		if err != nil {
 			return nil, err
 		}
-		dst := path.Clean(volumeDestination(v))
-		if other, ok := seen[dst]; ok {
-			return nil, fmt.Errorf("volume %q: %s is already used by %s", volume, dst, other)
+		if other, ok := seen[b.Target]; ok {
+			return nil, fmt.Errorf("volume %q: %s is already used by %s", volume, b.Target, other)
 		}
-		seen[dst] = fmt.Sprintf("volume %q", volume)
-		args = append(args, "-v", v)
+		seen[b.Target] = fmt.Sprintf("volume %q", volume)
+		args = append(args, "--mount", b.Mount())
 	}
 	return args, nil
-}
-
-// volumeDestination returns the container path of a host:container[:options]
-// spec.
-func volumeDestination(v string) string {
-	_, rest, _ := strings.Cut(v, ":")
-	dst, _, _ := strings.Cut(rest, ":")
-	return dst
 }
 
 func (m *Manager) createSandbox(ctx context.Context, container string, opts SandboxOptions) error {
@@ -538,34 +533,84 @@ func (m *Manager) createSandbox(ctx context.Context, container string, opts Sand
 		return err
 	}
 	for _, volume := range opts.volumes() {
-		v, _ := ReadOnlyVolume(volume)
-		m.printf("Mounting volume read-only: %s\n", v)
+		b, _ := ReadOnlyVolume(volume)
+		m.printf("Mounting volume recursively read-only: %s:%s\n", b.Source, b.Target)
 	}
 	_, err = m.Docker.Run(ctx, args...)
 	return err
 }
 
+// ReadOnlyBind is a sandbox volume: a host directory bind mounted
+// recursively read-only.
+type ReadOnlyBind struct {
+	Source, Target string
+	// Consistency is a Docker Desktop consistency option, e.g. "cached",
+	// which docker ignores on Linux.
+	Consistency string
+}
+
 // ReadOnlyVolume expands a host:container[:options] volume spec like
-// ExpandVolume and forces it read-only.
-func ReadOnlyVolume(v string) (string, error) {
-	v, err := ExpandVolume(v)
+// ExpandVolume and returns the read-only bind a sandbox gets for it.
+//
+// ro, readonly, rw, and rprivate are accepted and change nothing, and
+// consistent, cached, delegated, and default are kept. Options that a
+// recursively read-only bind can't take are refused: z and Z, since docker
+// only relabels -v mounts, other propagation modes, which docker refuses
+// with bind-recursive=readonly, and nocopy, which only applies to named
+// volumes. The host path must be absolute after expansion, since a bare
+// name would be a named volume.
+func ReadOnlyVolume(v string) (ReadOnlyBind, error) {
+	expanded, err := ExpandVolume(v)
 	if err != nil {
-		return "", err
+		return ReadOnlyBind{}, err
 	}
-	host, rest, _ := strings.Cut(v, ":")
+	host, rest, _ := strings.Cut(expanded, ":")
 	dst, optStr, _ := strings.Cut(rest, ":")
 	if dst == "" {
-		return "", fmt.Errorf("invalid volume %q: expected /host/path:/container/path", v)
+		return ReadOnlyBind{}, fmt.Errorf("invalid volume %q: expected /host/path:/container/path", v)
 	}
-	opts := []string{"ro"}
-	if optStr != "" {
-		for _, o := range strings.Split(optStr, ",") {
-			if o != "" && o != "ro" && o != "rw" {
-				opts = append(opts, o)
-			}
+	if !filepath.IsAbs(host) {
+		return ReadOnlyBind{}, fmt.Errorf("invalid volume %q: the host path must be absolute, or start with ~/ or ./; sandboxes mount host directories, not named volumes", v)
+	}
+	if !path.IsAbs(dst) {
+		return ReadOnlyBind{}, fmt.Errorf("invalid volume %q: the container path must be absolute", v)
+	}
+	b := ReadOnlyBind{Source: host, Target: path.Clean(dst)}
+	for _, o := range strings.Split(optStr, ",") {
+		switch o {
+		case "", "ro", "readonly", "rw", "rprivate":
+		case "consistent", "cached", "delegated", "default":
+			b.Consistency = o
+		case "z", "Z":
+			return ReadOnlyBind{}, fmt.Errorf("volume %q: SELinux relabeling (%s) is not supported, since docker only relabels -v mounts, which can't be made recursively read-only; label the host directory yourself, for example with chcon -Rt container_file_t", v, o)
+		case "private", "shared", "rshared", "slave", "rslave":
+			return ReadOnlyBind{}, fmt.Errorf("volume %q: %s propagation is not supported, since docker makes a mount recursively read-only only with rprivate propagation", v, o)
+		case "nocopy":
+			return ReadOnlyBind{}, fmt.Errorf("volume %q: nocopy only applies to named volumes, and sandboxes mount host directories", v)
+		default:
+			return ReadOnlyBind{}, fmt.Errorf("volume %q: unsupported option %q", v, o)
 		}
 	}
-	return host + ":" + dst + ":" + strings.Join(opts, ","), nil
+	return b, nil
+}
+
+// Mount returns the `docker run --mount` value for the bind. With
+// bind-recursive=readonly every filesystem mounted below the host directory
+// is read-only in the sandbox too, and docker refuses to create the
+// container where it can't do that: on Docker Engine before 25, a kernel
+// before 5.12, or a runtime without recursive read-only mounts. A -v :ro
+// bind leaves those submounts writable there instead. Docker reads the
+// value as CSV, so a path with a comma or quote is quoted.
+func (b ReadOnlyBind) Mount() string {
+	fields := []string{"type=bind", "src=" + b.Source, "dst=" + b.Target, "readonly", "bind-propagation=rprivate", "bind-recursive=readonly"}
+	if b.Consistency != "" {
+		fields = append(fields, "consistency="+b.Consistency)
+	}
+	var buf bytes.Buffer
+	w := csv.NewWriter(&buf)
+	_ = w.Write(fields)
+	w.Flush()
+	return strings.TrimSuffix(buf.String(), "\n")
 }
 
 // Get returns one session, or an error wrapping ErrNotFound.

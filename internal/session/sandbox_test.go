@@ -65,13 +65,13 @@ func TestEnsureSandboxLimitsAndVolume(t *testing.T) {
 	w := &world{image: "img", containers: map[string]*fakeContainer{}}
 	m, r := newTestManager(t, w)
 	_, err := m.EnsureSandbox(context.Background(), SandboxOptions{
-		Name: "box", Volumes: []string{"/in:/in:rw,z"}, Memory: "512m", PidsLimit: 64, CPUs: "0.5", Disk: "256m",
+		Name: "box", Volumes: []string{"/in:/in:rw,cached"}, Memory: "512m", PidsLimit: 64, CPUs: "0.5", Disk: "256m",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	run, _ := r.Find("run ")
-	want := strings.Replace(sandboxRunPrefix, "size=1073741824,", "size=268435456,", 1) + " --memory 512m --pids-limit 64 --cpus 0.5 -v /in:/in:ro,z safeclaw:sandbox sleep infinity"
+	want := strings.Replace(sandboxRunPrefix, "size=1073741824,", "size=268435456,", 1) + " --memory 512m --pids-limit 64 --cpus 0.5 --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly,consistency=cached safeclaw:sandbox sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -207,24 +207,75 @@ func TestRequireType(t *testing.T) {
 
 func TestReadOnlyVolume(t *testing.T) {
 	home, _ := os.UserHomeDir()
+	wd, _ := os.Getwd()
+	const flags = ",readonly,bind-propagation=rprivate,bind-recursive=readonly"
 	cases := map[string]string{
-		"/in:/in":          "/in:/in:ro",
-		"/in:/in:ro":       "/in:/in:ro",
-		"/in:/in:rw":       "/in:/in:ro",
-		"/in:/in:rw,z":     "/in:/in:ro,z",
-		"/in:/in:z,ro":     "/in:/in:ro,z",
-		"~/inbox:/in":      filepath.Join(home, "inbox") + ":/in:ro",
-		"/in:/in:cached,Z": "/in:/in:ro,cached,Z",
+		"/in:/in":                   "type=bind,src=/in,dst=/in" + flags,
+		"/in:/in:ro":                "type=bind,src=/in,dst=/in" + flags,
+		"/in:/in:rw":                "type=bind,src=/in,dst=/in" + flags,
+		"/in:/in:readonly,rprivate": "type=bind,src=/in,dst=/in" + flags,
+		"/in:/in/:ro":               "type=bind,src=/in,dst=/in" + flags,
+		"/in:/in:cached":            "type=bind,src=/in,dst=/in" + flags + ",consistency=cached",
+		"/in:/in:rw,delegated":      "type=bind,src=/in,dst=/in" + flags + ",consistency=delegated",
+		"~/inbox:/in":               "type=bind,src=" + filepath.Join(home, "inbox") + ",dst=/in" + flags,
+		"./inbox:/in":               "type=bind,src=" + filepath.Join(wd, "inbox") + ",dst=/in" + flags,
+		// Docker reads --mount as CSV, so a comma in a path is quoted.
+		"/b,c:/in":   `type=bind,"src=/b,c",dst=/in` + flags,
+		`/a"b:/in`:   `type=bind,"src=/a""b",dst=/in` + flags,
+		"/a=b:/in=x": "type=bind,src=/a=b,dst=/in=x" + flags,
 	}
 	for in, want := range cases {
-		if got, err := ReadOnlyVolume(in); err != nil || got != want {
-			t.Errorf("ReadOnlyVolume(%q) = %q, %v; want %q", in, got, err, want)
+		b, err := ReadOnlyVolume(in)
+		if got := b.Mount(); err != nil || got != want {
+			t.Errorf("ReadOnlyVolume(%q).Mount() = %q, %v; want %q", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"/in", ":/in", "/in:", "/in::ro"} {
-		if _, err := ReadOnlyVolume(bad); err == nil {
-			t.Errorf("ReadOnlyVolume(%q) should fail", bad)
+	bad := map[string]string{
+		"/in":              "expected /host/path:/container/path",
+		":/in":             "expected /host/path:/container/path",
+		"/in:":             "expected /host/path:/container/path",
+		"/in::ro":          "expected /host/path:/container/path",
+		"inbox:/in":        "not named volumes",
+		"inbox/sub:/in":    "not named volumes",
+		"/in:in":           "container path must be absolute",
+		"/in:/in:z":        "SELinux relabeling (z)",
+		"/in:/in:ro,Z":     "SELinux relabeling (Z)",
+		"/in:/in:rshared":  "rshared propagation",
+		"/in:/in:slave":    "slave propagation",
+		"/in:/in:private":  "private propagation",
+		"/in:/in:nocopy":   "nocopy only applies to named volumes",
+		"/in:/in:ro,bogus": `unsupported option "bogus"`,
+	}
+	for in, want := range bad {
+		if _, err := ReadOnlyVolume(in); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("ReadOnlyVolume(%q) = %v, want an error with %q", in, err, want)
 		}
+	}
+}
+
+// Each -v form becomes a recursively read-only --mount in the docker run
+// arguments, and a refused option stops the run before docker is called.
+func TestSandboxRunArgsMounts(t *testing.T) {
+	const flags = ",readonly,bind-propagation=rprivate,bind-recursive=readonly"
+	args, err := SandboxRunArgs("safeclaw-box", SandboxOptions{Volumes: []string{"/in:/in", "/tools:/opt/tools:rw,cached"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(args, " ")
+	want := " --mount type=bind,src=/in,dst=/in" + flags + " --mount type=bind,src=/tools,dst=/opt/tools" + flags + ",consistency=cached safeclaw sleep infinity"
+	if !strings.HasSuffix(got, want) || slices.Contains(args, "-v") {
+		t.Errorf("args = %q, want suffix %q and no -v", got, want)
+	}
+	if _, err := SandboxRunArgs("safeclaw-box", SandboxOptions{Volumes: []string{"/in:/in", "/x:/x:z"}}); err == nil {
+		t.Error("a z option should be refused")
+	}
+
+	m, r := newTestManager(t, &world{})
+	if _, err := m.EnsureSandbox(context.Background(), SandboxOptions{Name: "box", Volumes: []string{"/in:/in:rshared"}}); err == nil {
+		t.Fatal("rshared should be refused")
+	}
+	if _, ok := r.Find("run"); ok {
+		t.Error("docker run was called for a refused volume")
 	}
 }
 
@@ -366,7 +417,7 @@ func TestEphemeralRunArgs(t *testing.T) {
 		{true, false, sb, "--rm --init -i " + isolation + limits + " safeclaw:sandbox " + wrapped},
 		{true, true, sb, "--rm --init -i -t " + isolation + limits + " safeclaw:sandbox " + wrapped},
 		{false, false, SandboxOptions{Variant: "sandbox", Volumes: []string{"/in:/in:rw"}, Memory: "4g", PidsLimit: 8, CPUs: "2", Disk: "2g"},
-			"--rm --init " + strings.Replace(isolation, "size=1073741824,", "size=2147483648,", 1) + " --memory 4g --pids-limit 8 --cpus 2 -v /in:/in:ro safeclaw:sandbox " + wrapped},
+			"--rm --init " + strings.Replace(isolation, "size=1073741824,", "size=2147483648,", 1) + " --memory 4g --pids-limit 8 --cpus 2 --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly safeclaw:sandbox " + wrapped},
 		// Already resolved: empty is the base image.
 		{false, false, SandboxOptions{}, "--rm --init " + base + limits + " safeclaw " + wrapped},
 		{false, false, SandboxOptions{Variant: "base"}, "--rm --init " + base + limits + " safeclaw " + wrapped},
