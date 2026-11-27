@@ -1,10 +1,12 @@
 {{/* Action buttons. The first click on stop/delete returns the confirm
      state, which reverts to the normal button after 3 seconds. */}}
 {{define "action"}}
-{{- $cls := printf "%s-btn" .Kind}}{{if eq .Variant "link"}}{{$cls = "link-btn frame-stop"}}{{end}}
+{{- $cls := printf "%s-btn" .Kind}}{{if eq .Variant "link"}}{{$cls = printf "link-btn frame-%s" .Kind}}{{end}}
 {{- $revert := printf "/sessions/%s/actions?kind=%s&variant=%s" .Name .Kind .Variant}}
 {{- if .Failed -}}
 <button type="button" class="{{$cls}}" title="{{.Failed}}" disabled>failed<span hx-get="{{$revert}}" hx-trigger="load delay:3s" hx-target="closest button" hx-swap="outerHTML"></span></button>
+{{- else if .Force -}}
+<button type="button" class="{{$cls}}" title="{{.Title}}" hx-post="/sessions/{{.Name}}/{{.Kind}}" hx-vals='{"force": "1", "variant": "{{.Variant}}"}' hx-swap="outerHTML" hx-disable="this"><span class="idle">force {{.Kind}}?</span><span class="busy">{{busy .Kind}}</span><span hx-get="{{$revert}}" hx-trigger="load delay:3s" hx-target="closest button" hx-swap="outerHTML"></span></button>
 {{- else if .Confirm -}}
 <button type="button" class="{{$cls}}" hx-post="/sessions/{{.Name}}/{{.Kind}}" hx-vals='{"confirm": "1", "variant": "{{.Variant}}"}' hx-swap="outerHTML" hx-disable="this"><span class="idle">{{.Kind}}?</span><span class="busy">{{busy .Kind}}</span><span hx-get="{{$revert}}" hx-trigger="load delay:3s" hx-target="closest button" hx-swap="outerHTML"></span></button>
 {{- else -}}

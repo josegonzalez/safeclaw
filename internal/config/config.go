@@ -81,6 +81,13 @@ func SessionsDir() string {
 	return filepath.Join(Dir(), "sessions")
 }
 
+// NetworkDir returns the directory holding the saved networks and holders
+// of offline sessions. It is kept apart from SessionsDir, which is mounted
+// into the containers.
+func NetworkDir() string {
+	return filepath.Join(Dir(), "network")
+}
+
 // ContainerName returns the container name for a session name. Names that
 // already carry the prefix are returned unchanged.
 func ContainerName(session string) string {

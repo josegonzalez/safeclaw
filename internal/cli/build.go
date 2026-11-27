@@ -216,6 +216,11 @@ func reportStale(ctx context.Context, d *docker.Client, out io.Writer, recreate 
 	}
 	if recreate {
 		for _, c := range stale {
+			if session.Offline(c) {
+				name := config.SessionName(c.ShortName())
+				fmt.Fprintf(out, "Skipping offline session: %s (run `safeclaw net on %s`, then rebuild with --recreate)\n", name, name)
+				continue
+			}
 			fmt.Fprintf(out, "Removing old container: %s\n", c.ShortName())
 			if err := d.Remove(ctx, c.ShortName(), true); err != nil {
 				return err
@@ -230,6 +235,9 @@ func reportStale(ctx context.Context, d *docker.Client, out io.Writer, recreate 
 		if session.TypeOf(c) == config.TypeSandbox {
 			sandboxes = true
 			name += " (sandbox)"
+		}
+		if session.Offline(c) {
+			name += " (offline)"
 		}
 		fmt.Fprintf(out, "  %s\n", name)
 	}

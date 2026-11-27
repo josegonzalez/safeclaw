@@ -56,7 +56,7 @@ safeclaw dashboard
 Opens at http://localhost:7680 with:
 
 - Create new sessions with volume mounts, image variants, secrets, and initial queries
-- All sessions listed with start/stop/delete controls
+- All sessions listed with start/stop/delete and offline/online controls
 - Live iframe views of active sessions, updated as containers change
 
 ## Sandboxes for untrusted files
@@ -94,6 +94,18 @@ name=$(safeclaw sandbox run --rm -v ~/inbox:/in)
 safeclaw sandbox exec "$name" -- unzip -d /sandbox/out /in/report.zip
 safeclaw sandbox stop "$name"
 ```
+
+## Taking a session offline
+
+While an interactive session handles something untrusted, take it offline. `safeclaw net off` saves the session's networks and disconnects it from them, and `safeclaw net on` reconnects it to exactly those networks. Its web terminal is unreachable while it is offline, and it stays offline across restarts.
+
+```bash
+safeclaw net off work --owner triage --reason "opening an emailed pdf"
+safeclaw ls                      # NETWORK shows: offline (triage)
+safeclaw net on work --owner triage
+```
+
+Each `net off` records a hold for its `--owner` (or one shared unnamed hold without it), and the session is reconnected only once every hold is released, so one job can't bring a session back online while another still relies on it being offline. `--force` releases every hold. The saved state is tied to the container, so a session recreated under the same name starts online. See [architecture](docs/architecture.md#offline-sessions) for details.
 
 ## Image variants
 
@@ -183,7 +195,7 @@ The choice is remembered for the session, so rerunning `safeclaw run -s chat` or
 
 | Command | Description |
 |---------|-------------|
-| `safeclaw build` | Build the image from the build context embedded in the binary (`--context .` for a checkout), then each `--variant` and every variant already built. Warns about sessions on an older image; `--recreate` removes them. |
+| `safeclaw build` | Build the image from the build context embedded in the binary (`--context .` for a checkout), then each `--variant` and every variant already built. Warns about sessions on an older image; `--recreate` removes them, skipping offline sessions. |
 | `safeclaw pull` | Pull `ghcr.io/josegonzalez/safeclaw` for this version and tag it `safeclaw`, then fetch each `--variant` and every variant already present |
 | `safeclaw run` | Start/reuse a container, inject auth, start ttyd. `-s name` for named sessions, `-v` for volumes, `--variant` for an image variant, `--secrets`, `--no-secrets`, or `--all-secrets` to choose the secrets it receives, `-n` to skip opening the browser, `-q "question"` to start with a query. |
 | `safeclaw new` | Same as `run` but never prompts (used by the dashboard) |
@@ -193,6 +205,8 @@ The choice is remembered for the session, so rerunning `safeclaw run -s chat` or
 | `safeclaw stop NAME` | Stop a session |
 | `safeclaw rm NAME` | Delete a session container (history is kept) |
 | `safeclaw attach NAME` | Attach to a session's tmux session in this terminal |
+| `safeclaw net off NAME` | Save a session's networks and disconnect it from them. `--owner` names the hold and `--reason` says why. |
+| `safeclaw net on NAME` | Release the hold for `--owner` (or the unnamed hold) and reconnect the session once none remain. `--force` releases every hold. |
 | `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory read-only, `--variant` picks the image variant, `--memory`, `--pids-limit`, and `--cpus` set limits. |
 | `safeclaw sandbox run --rm [-s NAME]` | Create a one-off sandbox that is removed when it stops, and print its name |
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY) |

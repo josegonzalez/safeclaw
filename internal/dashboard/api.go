@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/session"
@@ -28,6 +29,32 @@ type apiSession struct {
 	// Secrets are the secrets the session receives: null for every secret,
 	// otherwise the names, empty for none.
 	Secrets *[]string `json:"secrets"`
+	// Network is online, offline, none, host, or shared.
+	Network string `json:"network"`
+	// Holds are the holds keeping the session offline.
+	Holds []apiHold `json:"holds"`
+}
+
+type apiHold struct {
+	Owner  string `json:"owner"`
+	Reason string `json:"reason"`
+	Since  string `json:"since"`
+}
+
+func apiHolds(holds []session.Hold) []apiHold {
+	out := make([]apiHold, len(holds))
+	for i, h := range holds {
+		out[i] = apiHold{Owner: h.Owner, Reason: h.Reason, Since: h.Since.UTC().Format(time.RFC3339)}
+	}
+	return out
+}
+
+// apiNetResult is the response of /api/net/off and /api/net/on.
+type apiNetResult struct {
+	Success bool      `json:"success"`
+	Offline bool      `json:"offline"`
+	Holds   []apiHold `json:"holds"`
+	Error   string    `json:"error,omitempty"`
 }
 
 type apiResult struct {
@@ -42,6 +69,10 @@ type apiRequest struct {
 	Variant string     `json:"variant"`
 	Secrets apiSecrets `json:"secrets"`
 	Query   string     `json:"query"`
+	// Owner, Reason, and Force are used by /api/net/off and /api/net/on.
+	Owner  string `json:"owner"`
+	Reason string `json:"reason"`
+	Force  bool   `json:"force"`
 }
 
 // apiSecrets is the secrets field of a create request: absent or null keeps
@@ -106,7 +137,8 @@ func (s *Server) apiSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]apiSession, 0, len(list))
 	for _, x := range list {
-		a := apiSession{Name: x.Container, Volume: x.Volume, Active: x.Active, Type: x.Type, Variant: x.Variant, AutoRemove: x.IsOneOff()}
+		a := apiSession{Name: x.Container, Volume: x.Volume, Active: x.Active, Type: x.Type, Variant: x.Variant, AutoRemove: x.IsOneOff(),
+			Network: x.Network, Holds: apiHolds(x.Holds)}
 		if !x.Secrets.All() {
 			names := append([]string{}, x.Secrets.Names...)
 			a.Secrets = &names
@@ -174,6 +206,35 @@ func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, apiResult{Success: true, URL: res.URL})
+}
+
+func (s *Server) apiNetOff(w http.ResponseWriter, r *http.Request) {
+	req, err := readRequest(r)
+	if err != nil {
+		writeJSON(w, apiNetResult{Holds: []apiHold{}, Error: err.Error()})
+		return
+	}
+	res, err := s.sessions.NetOff(r.Context(), config.SessionName(req.Name), session.NetOffOptions{Owner: req.Owner, Reason: req.Reason})
+	writeNetResult(w, res, err)
+}
+
+func (s *Server) apiNetOn(w http.ResponseWriter, r *http.Request) {
+	req, err := readRequest(r)
+	if err != nil {
+		writeJSON(w, apiNetResult{Holds: []apiHold{}, Error: err.Error()})
+		return
+	}
+	res, err := s.sessions.NetOn(r.Context(), config.SessionName(req.Name), session.NetOnOptions{Owner: req.Owner, Force: req.Force})
+	writeNetResult(w, res, err)
+}
+
+func writeNetResult(w http.ResponseWriter, res *session.NetResult, err error) {
+	out := apiNetResult{Success: err == nil, Holds: []apiHold{}, Error: errString(err)}
+	if res != nil {
+		out.Offline = res.Offline
+		out.Holds = apiHolds(res.Holds)
+	}
+	writeJSONStatus(w, errStatus(err, http.StatusOK), out)
 }
 
 // apiEvents streams raw docker actions in upstream's `data: <action>` format.

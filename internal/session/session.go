@@ -123,6 +123,9 @@ type Manager struct {
 	Docker      *docker.Client
 	Secrets     secrets.Store
 	SessionsDir string
+	// NetworkDir holds the saved state of offline sessions. Defaults to
+	// config.NetworkDir().
+	NetworkDir string
 	// Out receives progress messages. Defaults to io.Discard.
 	Out io.Writer
 	// Prompter is used for interactive runs.
@@ -151,6 +154,7 @@ func NewManager(out io.Writer) *Manager {
 		Docker:      docker.New(),
 		Secrets:     secrets.Store{Dir: config.SecretsDir()},
 		SessionsDir: config.SessionsDir(),
+		NetworkDir:  config.NetworkDir(),
 		Out:         out,
 		LoadVariants: func() (*variant.Set, error) {
 			return variant.Load(config.File())
@@ -283,6 +287,9 @@ type Result struct {
 	Container string
 	Port      int
 	URL       string
+	// Offline is set when the session is disconnected from every network,
+	// so its web terminal is unreachable.
+	Offline bool
 }
 
 // URLFor returns the session URL for a host port.
@@ -305,6 +312,14 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 	container := config.ContainerName(name)
+
+	// The network lock keeps `net off` and `net on` from changing the
+	// container between the offline check and the remove or start below.
+	unlock, err := m.netLock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 
 	existing, err := m.Docker.InspectOne(ctx, container)
 	if err != nil {
@@ -351,7 +366,12 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if opts.Volume != "" {
 		volumes = []string{opts.Volume}
 	}
+	// A held session stays offline even if something reconnected it.
+	offline := existing != nil && (Offline(*existing) || len(m.holdsFor(name, *existing)) > 0)
 	if existing != nil && (opts.Volume != "" || changed || secretsChanged) {
+		if offline {
+			return nil, fmt.Errorf("session %q %w: run `safeclaw net on %s` before changing its volume, variant, or secrets", name, ErrOffline, name)
+		}
 		switch {
 		case opts.Volume != "":
 			m.printf("Volume mount requested. Removing existing container...\n")
@@ -379,6 +399,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	switch {
 	case existing != nil && existing.State.Running:
 		m.printf("Reusing running container: %s\n", container)
+		offline = Offline(*existing)
 		// Restart ttyd/tmux so fresh env vars take effect.
 		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "pkill", "-f", "ttyd")
 		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "tmux", "kill-server")
@@ -388,12 +409,22 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		if err := m.Docker.Start(ctx, container); err != nil {
 			return nil, err
 		}
+		if offline {
+			if err := m.keepOffline(ctx, container); err != nil {
+				return nil, err
+			}
+		}
 	default:
 		m.printf("Creating container: %s\n", container)
 		if err := m.create(ctx, name, container, port, want, set, volumes); err != nil {
 			return nil, err
 		}
+		// Any saved state belonged to an earlier container.
+		if err := m.removeState(name); err != nil {
+			return nil, err
+		}
 	}
+	unlock()
 
 	written, err := m.writeEnv(ctx, container, set)
 	if err != nil {
@@ -412,8 +443,11 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
-	res := &Result{Name: name, Container: container, Port: port, URL: URLFor(port)}
+	res := &Result{Name: name, Container: container, Port: port, URL: URLFor(port), Offline: offline}
 	m.printf("\nSafeClaw is running at: %s\n", res.URL)
+	if offline {
+		m.printf("Warning: this session is offline, so its web terminal is unreachable until: safeclaw net on %s\n", name)
+	}
 
 	if opts.Query != "" {
 		m.printf("Starting session and sending query...\n")
@@ -643,6 +677,15 @@ type Session struct {
 	AutoRemove bool `json:"autoRemove"`
 	// Secrets are the secrets the session receives. Sandboxes receive none.
 	Secrets SecretSet `json:"-"`
+	// Network is NetOnline, NetOffline, NetNone, NetHost, or NetShared.
+	Network string `json:"network"`
+	// Holds are the holds keeping an interactive session offline.
+	Holds []Hold `json:"-"`
+}
+
+// IsOffline reports whether the session is disconnected from every network.
+func (s Session) IsOffline() bool {
+	return s.Network == NetOffline
 }
 
 // IsOneOff reports whether the session is a one-off sandbox.
@@ -686,6 +729,8 @@ func (m *Manager) List(ctx context.Context) ([]Session, error) {
 			Variant:    variantOf(c),
 			AutoRemove: c.HostConfig.AutoRemove,
 			Secrets:    sessionSecrets(c),
+			Network:    NetworkStatus(c),
+			Holds:      m.holdsFor(config.SessionName(name), c),
 		}
 		if mounts := c.BindMounts(config.ProjectsMount); len(mounts) > 0 {
 			s.Volume = strings.Join(mounts, ", ")
@@ -718,7 +763,16 @@ func (m *Manager) Stop(ctx context.Context, name string) error {
 	return m.Docker.Stop(ctx, config.ContainerName(name), 1)
 }
 
-// Delete removes a session container. Its history stays on the host.
+// Delete removes a session container and its saved network state. Its
+// history stays on the host.
 func (m *Manager) Delete(ctx context.Context, name string, force bool) error {
-	return m.Docker.Remove(ctx, config.ContainerName(name), force)
+	if err := m.Docker.Remove(ctx, config.ContainerName(name), force); err != nil {
+		return err
+	}
+	unlock, err := m.netLock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return m.removeState(config.SessionName(name))
 }

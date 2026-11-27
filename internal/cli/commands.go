@@ -230,7 +230,7 @@ func newListCommand() *cobra.Command {
 // writeSessions writes the `safeclaw ls` table.
 func writeSessions(out io.Writer, list []session.Session) error {
 	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
-	fmt.Fprintln(w, "SESSION\tTYPE\tVARIANT\tSTATUS\tURL\tVOLUME")
+	fmt.Fprintln(w, "SESSION\tTYPE\tVARIANT\tSTATUS\tNETWORK\tURL\tVOLUME")
 	for _, s := range list {
 		url := s.URL
 		if url == "" {
@@ -240,7 +240,7 @@ func writeSessions(out io.Writer, list []session.Session) error {
 		if s.IsOneOff() {
 			typ += " (one-off)"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", s.Name, typ, variantColumn(s), s.Status, url, s.Volume)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", s.Name, typ, variantColumn(s), s.Status, networkColumn(s), url, s.Volume)
 	}
 	return w.Flush()
 }

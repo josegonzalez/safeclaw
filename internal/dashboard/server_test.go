@@ -31,6 +31,12 @@ type fakeSessions struct {
 	// secretNames is returned by SecretNames.
 	secretNames []string
 	secretErr   error
+	// netOffs and netOns record network calls, answered by the optional
+	// netOffFn and netOnFn.
+	netOffs  []session.NetOffOptions
+	netOns   []session.NetOnOptions
+	netOffFn func(string, session.NetOffOptions) (*session.NetResult, error)
+	netOnFn  func(string, session.NetOnOptions) (*session.NetResult, error)
 }
 
 func (f *fakeSessions) SecretNames() ([]string, error) {
@@ -71,6 +77,26 @@ func (f *fakeSessions) Stop(_ context.Context, n string) error {
 func (f *fakeSessions) Delete(_ context.Context, n string, _ bool) error {
 	f.deleted = append(f.deleted, n)
 	return nil
+}
+
+func (f *fakeSessions) NetOff(_ context.Context, n string, o session.NetOffOptions) (*session.NetResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.netOffs = append(f.netOffs, o)
+	if f.netOffFn != nil {
+		return f.netOffFn(n, o)
+	}
+	return &session.NetResult{Name: n, Offline: true, Holds: []session.Hold{{Owner: o.Owner}}}, nil
+}
+
+func (f *fakeSessions) NetOn(_ context.Context, n string, o session.NetOnOptions) (*session.NetResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.netOns = append(f.netOns, o)
+	if f.netOnFn != nil {
+		return f.netOnFn(n, o)
+	}
+	return &session.NetResult{Name: n}, nil
 }
 
 func sampleSessions() []session.Session {

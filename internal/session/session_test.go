@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
 	"github.com/josegonzalez/safeclaw/internal/secrets"
 )
@@ -29,6 +30,26 @@ type fakeContainer struct {
 	Memory, NanoCPUs, PidsLimit int64
 	// AutoRemove is set for containers run with --rm.
 	AutoRemove bool
+	// ID is the container ID. Defaults to "id-" plus the name.
+	ID string
+	// NetworkMode defaults to "bridge".
+	NetworkMode string
+	// Nets are the attached networks. Nil means only "bridge", unless
+	// Offline is set.
+	Nets map[string]docker.Endpoint
+	// Offline means no attached networks.
+	Offline bool
+}
+
+// networks returns the attached networks, materializing the default.
+func (c *fakeContainer) networks() map[string]docker.Endpoint {
+	if c.Nets == nil {
+		c.Nets = map[string]docker.Endpoint{}
+		if !c.Offline {
+			c.Nets["bridge"] = docker.Endpoint{}
+		}
+	}
+	return c.Nets
 }
 
 // world is a tiny fake docker daemon.
@@ -40,6 +61,11 @@ type world struct {
 	containers map[string]*fakeContainer
 	native     bool
 	prompt     bool
+	// attachOnStart makes start reconnect a container to bridge, as if
+	// docker restored its network.
+	attachOnStart bool
+	// runs counts docker run calls, to give each container a new ID.
+	runs int
 }
 
 func (w *world) inspectJSON(names []string) []byte {
@@ -67,13 +93,24 @@ func (w *world) inspectJSON(names []string) []byte {
 		if c.Running {
 			status = "running"
 		}
+		id := c.ID
+		if id == "" {
+			id = "id-" + n
+		}
+		mode := c.NetworkMode
+		if mode == "" {
+			mode = "bridge"
+		}
+		nets := c.networks()
 		out = append(out, map[string]any{
-			"Name":       "/" + n,
-			"Image":      c.Image,
-			"Config":     map[string]any{"Labels": c.Labels},
-			"State":      map[string]any{"Status": status, "Running": c.Running},
-			"HostConfig": map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit},
-			"Mounts":     mounts,
+			"Id":              id,
+			"Name":            "/" + n,
+			"Image":           c.Image,
+			"Config":          map[string]any{"Labels": c.Labels},
+			"State":           map[string]any{"Status": status, "Running": c.Running},
+			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode},
+			"NetworkSettings": map[string]any{"Networks": nets},
+			"Mounts":          mounts,
 		})
 	}
 	b, _ := json.Marshal(out)
@@ -110,6 +147,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		var mounts []string
 		var autoRemove bool
 		var memory, cpus, pids int64
+		mode := ""
 		labels := map[string]string{}
 		image := ""
 		if i := slices.Index(args, "sleep"); i > 0 {
@@ -138,19 +176,53 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 				cpus = int64(f * 1e9)
 			case "--pids-limit":
 				pids, _ = strconv.ParseInt(args[i+1], 10, 64)
+			case "--network":
+				mode = args[i+1]
 			}
 		}
 		id := w.image
 		if w.images != nil {
 			id = w.images[image]
 		}
+		w.runs++
 		w.containers[name] = &fakeContainer{Running: true, Port: port, Mounts: mounts, Image: id, RunImage: image, Labels: labels, AutoRemove: autoRemove,
-			Memory: memory, NanoCPUs: cpus, PidsLimit: pids}
+			Memory: memory, NanoCPUs: cpus, PidsLimit: pids, ID: fmt.Sprintf("id-%s-%d", name, w.runs), NetworkMode: mode, Offline: mode == "none"}
 		return []byte("id\n"), nil
 	case args[0] == "rm":
 		delete(w.containers, args[len(args)-1])
 	case args[0] == "start":
-		w.containers[args[1]].Running = true
+		c := w.containers[args[1]]
+		c.Running = true
+		if w.attachOnStart {
+			c.networks()["bridge"] = docker.Endpoint{}
+		}
+	case args[0] == "network" && args[1] == "disconnect":
+		c := w.containers[args[3]]
+		nets := c.networks()
+		if _, ok := nets[args[2]]; !ok {
+			return nil, errors.New("not connected")
+		}
+		delete(nets, args[2])
+	case args[0] == "network" && args[1] == "connect":
+		c := w.containers[args[len(args)-1]]
+		network := args[len(args)-2]
+		nets := c.networks()
+		if _, ok := nets[network]; ok {
+			return nil, errors.New("already connected")
+		}
+		var ep docker.Endpoint
+		for i := 2; i < len(args)-2; i++ {
+			switch args[i] {
+			case "--alias":
+				if network == "bridge" {
+					return nil, errors.New("network-scoped alias is supported only for containers in user defined networks")
+				}
+				ep.Aliases = append(ep.Aliases, args[i+1])
+			case "--ip":
+				ep.IPAMConfig = &docker.IPAMConfig{IPv4Address: args[i+1]}
+			}
+		}
+		nets[network] = ep
 	case args[0] == "stop":
 		name := args[len(args)-1]
 		if w.containers[name].AutoRemove {
@@ -182,6 +254,7 @@ func newTestManager(t *testing.T, w *world) (*Manager, *dockertest.Runner) {
 		Docker:        r.Client(),
 		Secrets:       store,
 		SessionsDir:   filepath.Join(dir, "sessions"),
+		NetworkDir:    filepath.Join(dir, "network"),
 		PortFree:      func(int) bool { return true },
 		Sleep:         func(time.Duration) {},
 		OpenBrowser:   func(string) error { return nil },

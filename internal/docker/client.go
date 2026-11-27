@@ -35,8 +35,22 @@ type PortBinding struct {
 	HostPort string `json:"HostPort"`
 }
 
+// IPAMConfig holds the static addresses an endpoint was given.
+type IPAMConfig struct {
+	IPv4Address string `json:"IPv4Address"`
+	IPv6Address string `json:"IPv6Address"`
+}
+
+// Endpoint is a container's connection to one network.
+type Endpoint struct {
+	Aliases    []string    `json:"Aliases"`
+	Links      []string    `json:"Links"`
+	IPAMConfig *IPAMConfig `json:"IPAMConfig"`
+}
+
 // Container is the subset of `docker inspect` output safeclaw uses.
 type Container struct {
+	ID     string `json:"Id"`
 	Name   string `json:"Name"`
 	Image  string `json:"Image"`
 	Config struct {
@@ -56,7 +70,14 @@ type Container struct {
 		NanoCpus int64 `json:"NanoCpus"`
 		// PidsLimit is the process limit, nil or 0 for none.
 		PidsLimit *int64 `json:"PidsLimit"`
+		// NetworkMode is the network the container was created with, e.g.
+		// "bridge", "default", "host", "none", or "container:ID".
+		NetworkMode string `json:"NetworkMode"`
 	} `json:"HostConfig"`
+	NetworkSettings struct {
+		// Networks are the networks the container is connected to, by name.
+		Networks map[string]Endpoint `json:"Networks"`
+	} `json:"NetworkSettings"`
 	Mounts []Mount `json:"Mounts"`
 }
 
@@ -233,6 +254,39 @@ func (c *Client) Remove(ctx context.Context, name string, force bool) error {
 	return err
 }
 
+// ConnectOptions configures NetworkConnect.
+type ConnectOptions struct {
+	Aliases []string
+	Links   []string
+	IPv4    string
+	IPv6    string
+}
+
+// NetworkConnect connects a container to a network.
+func (c *Client) NetworkConnect(ctx context.Context, network, container string, opts ConnectOptions) error {
+	args := []string{"network", "connect"}
+	for _, a := range opts.Aliases {
+		args = append(args, "--alias", a)
+	}
+	for _, l := range opts.Links {
+		args = append(args, "--link", l)
+	}
+	if opts.IPv4 != "" {
+		args = append(args, "--ip", opts.IPv4)
+	}
+	if opts.IPv6 != "" {
+		args = append(args, "--ip6", opts.IPv6)
+	}
+	_, err := c.R.Output(ctx, nil, append(args, network, container)...)
+	return err
+}
+
+// NetworkDisconnect disconnects a container from a network.
+func (c *Client) NetworkDisconnect(ctx context.Context, network, container string) error {
+	_, err := c.R.Output(ctx, nil, "network", "disconnect", network, container)
+	return err
+}
+
 // ExecOptions configures Exec.
 type ExecOptions struct {
 	Detach bool
@@ -259,10 +313,16 @@ func (c *Client) Tag(ctx context.Context, src, dst string) error {
 	return err
 }
 
-// Event is a docker container event.
+// Event is a docker container or network event.
 type Event struct {
+	// Type is "container" or "network".
+	Type   string
 	Action string
-	Name   string
+	// Name is the container's name for container events and the network's
+	// name for network events.
+	Name string
+	// Container is the container ID a network event is about.
+	Container string
 }
 
 type rawEvent struct {
@@ -283,16 +343,24 @@ func ParseEvent(line []byte) (Event, bool) {
 	if err := json.Unmarshal(line, &r); err != nil {
 		return Event{}, false
 	}
-	if r.Type != "" && r.Type != "container" {
+	typ := r.Type
+	if typ == "" {
+		typ = "container"
+	}
+	if typ != "container" && typ != "network" {
 		return Event{}, false
 	}
-	return Event{Action: r.Action, Name: r.Actor.Attributes["name"]}, true
+	ev := Event{Type: typ, Action: r.Action, Name: r.Actor.Attributes["name"]}
+	if typ == "network" {
+		ev.Container = r.Actor.Attributes["container"]
+	}
+	return ev, true
 }
 
-// Events streams container events until ctx is done or docker exits. It
-// returns when the stream ends.
+// Events streams container and network events until ctx is done or docker
+// exits. It returns when the stream ends.
 func (c *Client) Events(ctx context.Context, fn func(Event)) error {
-	out, wait, err := c.R.Stream(ctx, "events", "--filter", "type=container", "--format", "{{json .}}")
+	out, wait, err := c.R.Stream(ctx, "events", "--filter", "type=container", "--filter", "type=network", "--format", "{{json .}}")
 	if err != nil {
 		return err
 	}
