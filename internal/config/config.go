@@ -37,8 +37,15 @@ const (
 	// TTYDUser is the user name of every session's ttyd credential.
 	TTYDUser = "safeclaw"
 
+	// LabelPrefix starts every label safeclaw sets. Images may carry only
+	// their own LabelVariant, so every other safeclaw label on a container
+	// was written by safeclaw rather than inherited from its image.
+	LabelPrefix = "safeclaw."
+
 	// LabelType is the container label that records a session's type.
-	// Containers without it are interactive sessions.
+	// safeclaw sets it on every session and sandbox; containers without it,
+	// created by versions that left it off sessions, are interactive
+	// sessions.
 	LabelType = "safeclaw.type"
 	// TypeSession is the type of an interactive Claude Code session.
 	TypeSession = "session"
@@ -70,8 +77,13 @@ const (
 	IPCHost = "host"
 
 	// LabelAuth marks the short-lived container `safeclaw auth login` runs
-	// `claude setup-token` in.
+	// `claude setup-token` in, with the PID of the safeclaw process that
+	// started it.
 	LabelAuth = "safeclaw.auth"
+	// AuthContainerPrefix starts the name of every sign-in container. It is
+	// outside ContainerPrefix, so sign-in containers are never listed as
+	// sessions, and sessions are never mistaken for sign-in containers.
+	AuthContainerPrefix = "safeclaw.auth."
 )
 
 // Dir returns the safeclaw config directory, honoring XDG_CONFIG_HOME.

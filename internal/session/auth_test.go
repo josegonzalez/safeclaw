@@ -120,6 +120,8 @@ type authWorld struct {
 	catErr   error
 	log      string
 	leftover string
+	// imageLabels is the image's labels as a JSON object, if any.
+	imageLabels string
 }
 
 func (w *authWorld) handle(args []string, _ string) ([]byte, error) {
@@ -128,7 +130,11 @@ func (w *authWorld) handle(args []string, _ string) ([]byte, error) {
 		if w.noImage {
 			return nil, dockertest.NotFound(args)
 		}
-		return []byte("sha256:img\n"), nil
+		labels := w.imageLabels
+		if labels == "" {
+			labels = "null"
+		}
+		return []byte(`{"Id":"sha256:img","Config":{"Labels":` + labels + "}}\n"), nil
 	case "ps":
 		return []byte(w.leftover), nil
 	case "run":
@@ -147,11 +153,12 @@ func (w *authWorld) handle(args []string, _ string) ([]byte, error) {
 
 func newAuthManager(w *authWorld) (*Manager, *dockertest.Runner) {
 	r := &dockertest.Runner{Handler: w.handle}
+	authName = func() string { return "safeclaw.auth.test" }
 	return &Manager{Docker: r.Client(), ProcessAlive: func(pid string) bool { return pid == "4242" }}, r
 }
 
 func TestSetupToken(t *testing.T) {
-	w := &authWorld{log: "\x1b[1m" + fakeToken + "\x1b[0m\r\n", leftover: "deadid 999999\nliveid 4242\n"}
+	w := &authWorld{log: "\x1b[1m" + fakeToken + "\x1b[0m\r\n", leftover: "deadid safeclaw.auth.dead 999999\nliveid safeclaw.auth.live 4242\n"}
 	m, r := newAuthManager(w)
 	tok, err := m.SetupToken(context.Background())
 	if err != nil {
@@ -161,10 +168,10 @@ func TestSetupToken(t *testing.T) {
 		t.Errorf("token = %q", tok)
 	}
 	want := []string{
-		"image inspect --format {{.Id}} safeclaw",
-		`ps -a --filter label=safeclaw.auth --format {{.ID}} {{.Label "safeclaw.auth"}}`,
+		"image inspect --format {{json .}} safeclaw",
+		`ps -a --filter label=safeclaw.auth --format {{.ID}} {{.Names}} {{.Label "safeclaw.auth"}}`,
 		"rm -v -f deadid",
-		"run -d --label safeclaw.auth=" + strconv.Itoa(os.Getpid()) + " safeclaw sleep infinity",
+		"run -d --name safeclaw.auth.test --label safeclaw.auth=" + strconv.Itoa(os.Getpid()) + " safeclaw sleep infinity",
 		"exec -it authid script -qec claude setup-token /tmp/setup-token.log",
 		"exec authid cat /tmp/setup-token.log",
 		"exec authid rm -f /tmp/setup-token.log",
@@ -214,17 +221,30 @@ func TestSetupTokenRemovesLogAfterReading(t *testing.T) {
 	}
 }
 
+// Only containers named like sign-in containers are removed, since docker
+// copies an image's safeclaw.auth label onto every container made from it.
 func TestRemoveStaleAuthContainers(t *testing.T) {
-	w := &authWorld{leftover: "deadid 999999\nliveid 4242\nnolabel \n"}
+	w := &authWorld{leftover: "deadid safeclaw.auth.dead 999999\nliveid safeclaw.auth.live 4242\nnolabel safeclaw.auth.empty \n" +
+		"sessionid safeclaw-work 999999\nolderid eager_turing 999999\nunnamed\n"}
 	m, r := newAuthManager(w)
 	m.RemoveStaleAuthContainers(context.Background())
 	want := []string{
-		`ps -a --filter label=safeclaw.auth --format {{.ID}} {{.Label "safeclaw.auth"}}`,
+		`ps -a --filter label=safeclaw.auth --format {{.ID}} {{.Names}} {{.Label "safeclaw.auth"}}`,
 		"rm -v -f deadid",
 		"rm -v -f nolabel",
 	}
 	if got := r.Commands(); !slices.Equal(got, want) {
 		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestSetupTokenRefusesLabeledImage(t *testing.T) {
+	m, r := newAuthManager(&authWorld{imageLabels: `{"safeclaw.type":"sandbox"}`})
+	if _, err := m.SetupToken(context.Background()); !errors.Is(err, ErrImageLabel) {
+		t.Errorf("err = %v, want ErrImageLabel", err)
+	}
+	if hasCall(r, "run") {
+		t.Error("started a container from a labeled image")
 	}
 }
 

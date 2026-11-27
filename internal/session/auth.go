@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -123,7 +125,7 @@ func (m *Manager) SetupToken(ctx context.Context) (string, error) {
 	cleanup := context.WithoutCancel(ctx)
 	m.RemoveStaleAuthContainers(cleanup)
 
-	id, err := m.Docker.Run(ctx, "-d", "--label", config.LabelAuth+"="+strconv.Itoa(os.Getpid()), config.ImageName, "sleep", "infinity")
+	id, err := m.Docker.Run(ctx, "-d", "--name", authName(), "--label", config.LabelAuth+"="+strconv.Itoa(os.Getpid()), config.ImageName, "sleep", "infinity")
 	if err != nil {
 		return "", fmt.Errorf("start the sign-in container: %w", err)
 	}
@@ -148,19 +150,30 @@ func (m *Manager) SetupToken(ctx context.Context) (string, error) {
 // RemoveStaleAuthContainers removes sign-in containers left by an earlier
 // login that was killed before it could clean up. Each is labeled with the
 // PID of the safeclaw process that started it, so another login still
-// running is left alone. It is best effort and costs one `docker ps`.
+// running is left alone. Docker copies image labels onto containers, so a
+// container counts only when its name is a sign-in container's too, and a
+// session made from an image carrying the label is never removed. It is
+// best effort and costs one `docker ps`.
 func (m *Manager) RemoveStaleAuthContainers(ctx context.Context) {
-	out, err := m.Docker.R.Output(ctx, nil, "ps", "-a", "--filter", "label="+config.LabelAuth, "--format", `{{.ID}} {{.Label "`+config.LabelAuth+`"}}`)
+	out, err := m.Docker.R.Output(ctx, nil, "ps", "-a", "--filter", "label="+config.LabelAuth, "--format", `{{.ID}} {{.Names}} {{.Label "`+config.LabelAuth+`"}}`)
 	if err != nil {
 		return
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		id, pid, _ := strings.Cut(line, " ")
-		if id == "" || m.processAlive(pid) {
+		id, rest, _ := strings.Cut(line, " ")
+		name, pid, _ := strings.Cut(rest, " ")
+		if id == "" || !strings.HasPrefix(name, config.AuthContainerPrefix) || m.processAlive(pid) {
 			continue
 		}
 		_ = m.Docker.Remove(ctx, id, true)
 	}
+}
+
+// authName returns a name for a sign-in container.
+var authName = func() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return config.AuthContainerPrefix + hex.EncodeToString(b)
 }
 
 // processAlive reports whether pid names a running process.

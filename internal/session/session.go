@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
@@ -80,15 +81,41 @@ func (e noImageError) Error() string {
 
 func (e noImageError) Unwrap() error { return ErrNoImage }
 
+// ErrImageLabel is wrapped by the error returned when an image carries a
+// safeclaw label that only safeclaw may set on containers.
+var ErrImageLabel = errors.New("image carries a safeclaw label")
+
 // checkImage returns an error wrapping ErrNoImage unless the image for a
-// variant ("" for the base image) exists.
+// variant ("" for the base image) exists, and one wrapping ErrImageLabel if
+// it carries safeclaw labels other than its own variant's.
 func (m *Manager) checkImage(ctx context.Context, name string) error {
-	imageID, err := m.Docker.ImageID(ctx, variant.Image(name))
+	img, err := m.Docker.InspectImage(ctx, variant.Image(name))
 	if err != nil {
 		return err
 	}
-	if imageID == "" {
+	if img == nil {
 		return noImageError{variant: name}
+	}
+	return checkImageLabels(variant.Image(name), name, img.Config.Labels)
+}
+
+// checkImageLabels refuses an image carrying any safeclaw label except the
+// safeclaw.variant label naming its own variant. Docker copies an image's
+// labels onto every container made from it, so without this an image could
+// mark the containers safeclaw creates from it as sandboxes, sign-in
+// containers, or sessions with host IPC or a different secret set.
+func checkImageLabels(image, name string, labels map[string]string) error {
+	if name == config.BaseVariant {
+		name = ""
+	}
+	for _, k := range slices.Sorted(maps.Keys(labels)) {
+		if !strings.HasPrefix(k, config.LabelPrefix) {
+			continue
+		}
+		if k == config.LabelVariant && name != "" && labels[k] == name {
+			continue
+		}
+		return fmt.Errorf("%w: image '%s' has the label %s=%q, which only safeclaw sets on containers. Rebuild the image without it", ErrImageLabel, image, k, labels[k])
 	}
 	return nil
 }
@@ -481,6 +508,9 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 					return err
 				}
 			}
+			if err := m.checkImage(ctx, oldVariant); err != nil {
+				return err
+			}
 			return m.create(ctx, name, container, port, oldVariant, oldSet, oldHostIPC, oldVolumes)
 		}
 	}
@@ -665,6 +695,7 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 	args = append(args, ipcArgs(hostIPC)...)
 	args = append(args,
 		"--name", container,
+		"--label", config.LabelType+"="+config.TypeSession,
 	)
 	args = append(args, publishArgs(port)...)
 	args = append(args, "-v", dataDir+":"+config.ProjectsMount)
@@ -825,8 +856,11 @@ func (s Session) IsSandbox() bool {
 	return s.Type == config.TypeSandbox
 }
 
-// TypeOf returns a container's session type. Containers without a type label
-// are interactive sessions.
+// TypeOf returns a container's session type. safeclaw labels every session
+// and sandbox it creates with its type, and refuses images that carry the
+// label, so the label is never inherited from an image. Containers without
+// it, created by versions that left it off sessions, are interactive
+// sessions.
 func TypeOf(c docker.Container) string {
 	if t := c.Label(config.LabelType); t != "" {
 		return t
