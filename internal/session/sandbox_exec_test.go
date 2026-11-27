@@ -38,7 +38,7 @@ func TestSandboxExecArgv(t *testing.T) {
 }
 
 func TestEphemeralRunArgsExecOptions(t *testing.T) {
-	got, err := EphemeralRunArgs("safeclaw-box", SandboxOptions{Variant: "sandbox"}, ExecOptions{Interactive: true, EnvFile: "/dev/fd/3", Timeout: time.Minute}, []string{"7z", "x", "-p", "/in/a.7z"})
+	got, err := EphemeralRunArgs("safeclaw-box", SandboxOptions{Variant: "sandbox", image: "sha256:sb"}, ExecOptions{Interactive: true, EnvFile: "/dev/fd/3", Timeout: time.Minute}, []string{"7z", "x", "-p", "/in/a.7z"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestEphemeralRunArgsExecOptions(t *testing.T) {
 	if !strings.HasPrefix(s, "--rm --init -i --env-file /dev/fd/3 --name safeclaw-box ") {
 		t.Errorf("args = %q", s)
 	}
-	if !strings.HasSuffix(s, ` safeclaw:sandbox /bin/sh -c umask 022; exec "$@" sh timeout --kill-after=5s -- 60s 7z x -p /in/a.7z`) {
+	if !strings.HasSuffix(s, ` --label safeclaw.image=safeclaw:sandbox sha256:sb /bin/sh -c umask 022; exec "$@" sh timeout --kill-after=5s -- 60s 7z x -p /in/a.7z`) {
 		t.Errorf("args = %q", s)
 	}
 }
@@ -69,7 +69,7 @@ func TestSandboxVolumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, _ := r.Find("run ")
-	if !strings.Contains(run.String(), " --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --mount type=bind,src=/tools,dst=/opt/tools,readonly,bind-propagation=rprivate,bind-recursive=readonly safeclaw:sandbox ") {
+	if !strings.Contains(run.String(), " --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --mount type=bind,src=/tools,dst=/opt/tools,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw:sandbox sha256:img ") {
 		t.Errorf("run = %q", run.String())
 	}
 
@@ -97,8 +97,8 @@ func TestEnsureSandboxRecreateVolumes(t *testing.T) {
 		opts      SandboxOptions
 		want, not string
 	}{
-		{"kept", SandboxOptions{Name: "box", Memory: "4g", Recreate: true}, " --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --mount type=bind,src=/tools,dst=/tools,readonly,bind-propagation=rprivate,bind-recursive=readonly safeclaw:sandbox ", ""},
-		{"replaced", SandboxOptions{Name: "box", Volumes: []string{"/new:/new", "/in:/in"}}, " --mount type=bind,src=/new,dst=/new,readonly,bind-propagation=rprivate,bind-recursive=readonly --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly safeclaw:sandbox ", "/tools"},
+		{"kept", SandboxOptions{Name: "box", Memory: "4g", Recreate: true}, " --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --mount type=bind,src=/tools,dst=/tools,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw:sandbox sha256:sb-id ", ""},
+		{"replaced", SandboxOptions{Name: "box", Volumes: []string{"/new:/new", "/in:/in"}}, " --mount type=bind,src=/new,dst=/new,readonly,bind-propagation=rprivate,bind-recursive=readonly --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw:sandbox sha256:sb-id ", "/tools"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

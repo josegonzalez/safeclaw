@@ -28,7 +28,7 @@ func TestEnsureHardensSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, _ := r.Find("run ")
-	if !strings.Contains(run.String(), " --label safeclaw.type=session --cap-drop ALL --security-opt no-new-privileges ") || strings.Contains(run.String(), "--cap-add") {
+	if !strings.Contains(run.String(), " --label safeclaw.type=session --user sclaw --cap-drop ALL --security-opt no-new-privileges ") || strings.Contains(run.String(), "--cap-add") {
 		t.Errorf("run = %q", run.String())
 	}
 	for _, d := range []string{m.SessionsDir, filepath.Join(m.SessionsDir, "work")} {
@@ -128,7 +128,7 @@ func TestEnsureQueryLikeOption(t *testing.T) {
 	if _, err := m.Ensure(context.Background(), Options{Name: "q", Query: "-t other -X cancel", NoOpen: true}); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(r.Commands(), "exec safeclaw-q tmux send-keys -t main -l -- -t other -X cancel") {
+	if !slices.Contains(r.Commands(), "exec --user sclaw safeclaw-q tmux send-keys -t main -l -- -t other -X cancel") {
 		t.Errorf("commands %v", r.Commands())
 	}
 }

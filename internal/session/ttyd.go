@@ -316,7 +316,7 @@ func (m *Manager) startTTYD(ctx context.Context, name, variant, container string
 	if err != nil {
 		return Credential{}, err
 	}
-	if _, err := m.Docker.Exec(ctx, container, docker.ExecOptions{Stdin: strings.NewReader(cred.String())}, "sh", "-c", writeCredentialScript); err != nil {
+	if _, err := m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{Stdin: strings.NewReader(cred.String())}), "sh", "-c", writeCredentialScript); err != nil {
 		return Credential{}, err
 	}
 	args := []string{"sh", "-c", startTTYDScript, "ttyd", "-W", "-O", "-t", "titleFixed=SafeClaw - " + name, "-p", strconv.Itoa(config.TTYDPort)}
@@ -325,7 +325,7 @@ func (m *Manager) startTTYD(ctx context.Context, name, variant, container string
 	} else {
 		args = append(args, config.LegacyWrapper)
 	}
-	if _, err := m.Docker.Exec(ctx, container, docker.ExecOptions{Detach: true}, args...); err != nil {
+	if _, err := m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{Detach: true}), args...); err != nil {
 		return Credential{}, err
 	}
 	if err := m.checkTTYDAnswers(ctx, name, container, cred); err != nil {
@@ -383,7 +383,7 @@ func (m *Manager) stopTTYD(ctx context.Context, name, container string) error {
 	why := ""
 	for _, sig := range [][]string{nil, {"-KILL"}} {
 		args := append([]string{"sh", "-c", killTTYDScript, "sh"}, sig...)
-		if _, err := m.Docker.Exec(ctx, container, docker.ExecOptions{}, args...); err != nil {
+		if _, err := m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{}), args...); err != nil {
 			return fmt.Errorf("session %q: %w: stopping the old ttyd failed: %w", name, ErrTTYDRestart, err)
 		}
 		var err error
@@ -427,7 +427,7 @@ func (m *Manager) pollTTYD(ctx context.Context, container, script string, stdin 
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		var opts docker.ExecOptions
+		opts := asSclaw(docker.ExecOptions{})
 		if stdin != nil {
 			opts.Stdin = stdin()
 		}

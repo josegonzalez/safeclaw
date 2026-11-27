@@ -343,7 +343,7 @@ func newAttachCommand() *cobra.Command {
 			// the session can make it send anything to attached clients.
 			// Its output is filtered on the host, not passed straight to
 			// this terminal.
-			argv := []string{"docker", "exec", "-it", config.ContainerName(args[0]), "tmux", "attach", "-t", config.TmuxSession}
+			argv := []string{"docker", "exec", "-it", "--user", config.SessionUser, config.ContainerName(args[0]), "tmux", "attach", "-t", config.TmuxSession}
 			code, err := attachTerminal(argv)
 			if err != nil {
 				return err

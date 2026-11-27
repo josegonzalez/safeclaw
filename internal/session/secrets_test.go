@@ -94,7 +94,7 @@ func TestSecretsLabel(t *testing.T) {
 
 func envCall(t *testing.T, r *dockertest.Runner, container string) string {
 	t.Helper()
-	c, ok := r.Find("exec -i " + container + " sh -c umask 077")
+	c, ok := r.Find("exec -i --user sclaw " + container + " sh -c umask 077")
 	if !ok {
 		t.Fatalf("env not written: %v", r.Commands())
 	}
@@ -117,7 +117,7 @@ func TestEnsureLimitedSecrets(t *testing.T) {
 	if env := envCall(t, r, "safeclaw-chat"); env != "export CLAUDE_CODE_OAUTH_TOKEN='tok'\n" {
 		t.Errorf("env = %q", env)
 	}
-	if hasCall(r, "exec safeclaw-chat bash -c") {
+	if hasCall(r, "exec --user sclaw safeclaw-chat bash -c") {
 		t.Error("git config should be skipped without GH_TOKEN in the set")
 	}
 
@@ -131,7 +131,7 @@ func TestEnsureLimitedSecrets(t *testing.T) {
 	if env := envCall(t, r, "safeclaw-all"); !strings.Contains(env, "GH_TOKEN") || !strings.Contains(env, "OTHER") {
 		t.Errorf("env = %q", env)
 	}
-	if !hasCall(r, "exec safeclaw-all bash -c") {
+	if !hasCall(r, "exec --user sclaw safeclaw-all bash -c") {
 		t.Error("git config skipped")
 	}
 }
@@ -156,7 +156,7 @@ func TestEnsureNoSecrets(t *testing.T) {
 	if env := envCall(t, r, "safeclaw-bare"); env != "" {
 		t.Errorf("env = %q", env)
 	}
-	if hasCall(r, "exec safeclaw-bare bash -c") {
+	if hasCall(r, "exec --user sclaw safeclaw-bare bash -c") {
 		t.Error("git config should be skipped")
 	}
 	if !strings.Contains(out.String(), "does not receive CLAUDE_CODE_OAUTH_TOKEN, so Claude Code will not be logged in") {
