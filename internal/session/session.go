@@ -817,7 +817,12 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	}
 
 	native := m.hasNativeWrapper(ctx, container)
-	cred, err := m.startTTYD(ctx, name, container, native)
+	// A kept container runs its own image's ttyd; a new one, the image's.
+	ttydLabels := imageLabels
+	if existing != nil {
+		ttydLabels = existing.Config.Labels
+	}
+	cred, err := m.startTTYD(ctx, name, container, native, ttydLabels)
 	if err != nil {
 		return nil, err
 	}

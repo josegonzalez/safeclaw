@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
         -X github.com/josegonzalez/safeclaw/internal/version.Date=${DATE}" \
       -o /out/safeclaw ./cmd/safeclaw
 
-# === BUILD ttyd, patched to accept a bracketed IPv6 Host and refuse framing ===
+# === BUILD ttyd, patched to accept a bracketed IPv6 Host, refuse framing and read its credential from a file ===
 
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS ttyd
 
@@ -32,16 +32,20 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 COPY setup/ttyd/bracketed-ipv6-origin.patch /tmp/bracketed-ipv6-origin.patch
 COPY setup/ttyd/refuse-framing.patch /tmp/refuse-framing.patch
+COPY setup/ttyd/credential-file.patch /tmp/credential-file.patch
 # Session URLs name [::1]:PORT, and ttyd's -O origin check otherwise never
 # matches a bracketed Host. Every response says X-Frame-Options DENY and
 # frame-ancestors 'none', so no other page can frame a logged-in terminal
-# and pass the user's keystrokes through
+# and pass the user's keystrokes through. --credential-file reads the
+# credential from a file, so it is not in ttyd's command line, which every
+# local user can read, and ttyd no longer logs it at startup
 RUN git init -q /src && cd /src && \
     git fetch -q --depth 1 https://github.com/tsl0922/ttyd.git "${TTYD_COMMIT}" && \
     git checkout -q FETCH_HEAD && \
     test "$(git rev-parse HEAD)" = "${TTYD_COMMIT}" && \
     git apply /tmp/bracketed-ipv6-origin.patch && \
     git apply /tmp/refuse-framing.patch && \
+    git apply /tmp/credential-file.patch && \
     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build -j "$(nproc)" && \
     install -D -m 755 build/ttyd /out/ttyd
@@ -153,6 +157,8 @@ COPY --from=ttyd /out/ttyd /usr/local/bin/ttyd
 RUN ttyd --version
 # safeclaw names [::1] in the URLs of sessions made from images with this
 LABEL io.github.josegonzalez.safeclaw.ttyd-bracketed-host="1"
+# safeclaw starts ttyd with --credential-file in sessions made from images with this
+LABEL io.github.josegonzalez.safeclaw.ttyd-credential-file="1"
 
 # === INSTALL Claude Code (native binary) ===
 

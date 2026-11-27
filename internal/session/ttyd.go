@@ -37,10 +37,17 @@ const legacyPublishHost = "127.0.0.1"
 // web terminal: missing, stopped, offline, or a sandbox.
 var ErrNoTerminal = errors.New("has no running web terminal")
 
-// startTTYDScript starts ttyd with the credential written to
-// config.TTYDCredentialFile, so it never appears in a host command line,
-// and with sessionUmask, which the wrapper, tmux, and Claude Code inherit.
-const startTTYDScript = sessionUmask + `; exec ttyd -c "$(cat ` + config.TTYDCredentialFile + `)" "$@"`
+// startTTYDScript starts ttyd reading the credential from
+// config.TTYDCredentialFile with the image's patched --credential-file
+// (setup/ttyd), so it is in no command line, including ttyd's own, which
+// every local user can read on a native Linux docker host. It sets
+// sessionUmask, which the wrapper, tmux, and Claude Code inherit.
+const startTTYDScript = sessionUmask + `; exec ttyd --credential-file ` + config.TTYDCredentialFile + ` "$@"`
+
+// legacyStartTTYDScript is startTTYDScript for images whose ttyd has no
+// --credential-file. The credential stays out of the docker exec command
+// line, but is in ttyd's.
+const legacyStartTTYDScript = sessionUmask + `; exec ttyd -c "$(cat ` + config.TTYDCredentialFile + `)" "$@"`
 
 // writeCredentialScript replaces the container's credential file with
 // stdin, readable only by its owner.
@@ -244,12 +251,16 @@ func writePrivate(path, content string) error {
 	return os.Rename(tmp, path)
 }
 
-// startTTYD starts ttyd requiring the session's credential (-c) and
-// refusing WebSocket clients from other origins (-O). The credential goes
-// to the container on stdin, not on a command line. The image's ttyd is
-// patched to refuse framing on every response (setup/ttyd), which needs no
-// flag, so older images' ttyd still starts with these arguments.
-func (m *Manager) startTTYD(ctx context.Context, name, container string, native bool) (Credential, error) {
+// startTTYD starts ttyd requiring the session's credential and refusing
+// WebSocket clients from other origins (-O). The credential goes to the
+// container on stdin, and ttyd reads it from a file, so it is on no command
+// line. labels are the container's, which it copied from its image: an
+// image without config.LabelCredentialFileTTYD has a ttyd that takes the
+// credential only with -c, on its command line, and the user is warned.
+// The image's ttyd is also patched to refuse framing on every response
+// (setup/ttyd), which needs no flag, so older images' ttyd still starts
+// with these arguments.
+func (m *Manager) startTTYD(ctx context.Context, name, container string, native bool, labels map[string]string) (Credential, error) {
 	cred, err := m.ensureCredential(name)
 	if err != nil {
 		return Credential{}, err
@@ -257,7 +268,12 @@ func (m *Manager) startTTYD(ctx context.Context, name, container string, native 
 	if _, err := m.Docker.Exec(ctx, container, docker.ExecOptions{Stdin: strings.NewReader(cred.String())}, "sh", "-c", writeCredentialScript); err != nil {
 		return Credential{}, err
 	}
-	args := []string{"sh", "-c", startTTYDScript, "ttyd", "-W", "-O", "-t", "titleFixed=SafeClaw - " + name, "-p", strconv.Itoa(config.TTYDPort)}
+	script := startTTYDScript
+	if labels[config.LabelCredentialFileTTYD] == "" {
+		script = legacyStartTTYDScript
+		m.printf("Warning: session %s's ttyd takes its credential on its command line, which other local users can read on a Linux host, because its image's ttyd has no --credential-file. Update the image with `safeclaw pull` or `safeclaw build`, then recreate the session, for example with -v or `safeclaw rm`\n", name)
+	}
+	args := []string{"sh", "-c", script, "ttyd", "-W", "-O", "-t", "titleFixed=SafeClaw - " + name, "-p", strconv.Itoa(config.TTYDPort)}
 	if native {
 		args = append(args, "safeclaw", "ttyd-wrapper")
 	} else {

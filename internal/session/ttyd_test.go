@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
 )
@@ -38,8 +39,13 @@ func TestTTYDRequiresCredentialAndOrigin(t *testing.T) {
 		t.Fatalf("ttyd not started: %v", r.Commands())
 	}
 	argv := start.Args[slices.Index(start.Args, "ttyd")+1:]
-	if !slices.Contains(argv, "-O") || !slices.Contains(argv, "-W") || !strings.Contains(strings.Join(start.Args, " "), `ttyd -c "$(cat /home/sclaw/.ttyd-credential)"`) {
-		t.Errorf("ttyd argv = %q, want -c from the credential file and -O", start.Args)
+	if !slices.Contains(argv, "-O") || !slices.Contains(argv, "-W") || !strings.Contains(strings.Join(start.Args, " "), `exec ttyd --credential-file /home/sclaw/.ttyd-credential "$@"`) {
+		t.Errorf("ttyd argv = %q, want --credential-file and -O", start.Args)
+	}
+	// The credential is in no command line, ttyd's included: the script
+	// passes ttyd the file, not its contents.
+	if slices.Contains(argv, "-c") || strings.Contains(startTTYDScript, "$(") || strings.Contains(startTTYDScript, " -c ") {
+		t.Errorf("ttyd gets the credential on its command line: %q", start.Args)
 	}
 	write, ok := r.Find("exec -i safeclaw-work sh -c umask 077 && cat > /home/sclaw/.ttyd-credential")
 	if !ok || write.Stdin != cred.String() {
@@ -429,5 +435,58 @@ func TestCredentialSymlinkIsReplacedNotFollowed(t *testing.T) {
 	}
 	if _, err := m.Credential("../work"); err == nil {
 		t.Error("credential accepted a path in the name")
+	}
+}
+
+// A session whose image's ttyd has no --credential-file still starts, with
+// the credential on ttyd's command line, and run warns about it. A kept
+// container runs its own image's ttyd, so it is judged by its own labels,
+// not by the current image's.
+func TestTTYDWithoutCredentialFileFallsBackToArgv(t *testing.T) {
+	legacy := `exec ttyd -c "$(cat /home/sclaw/.ttyd-credential)" "$@" ttyd -W -O`
+	current := `exec ttyd --credential-file /home/sclaw/.ttyd-credential "$@" ttyd -W -O`
+	for _, tc := range []struct {
+		name     string
+		w        *world
+		fallback bool
+	}{
+		{"new from old image", &world{image: "img", argvCredTTYD: true, containers: map[string]*fakeContainer{}, native: true}, true},
+		{"new from older image", &world{image: "img", oldTTYD: true, containers: map[string]*fakeContainer{}, native: true}, true},
+		{"new from current image", &world{image: "img", containers: map[string]*fakeContainer{}, native: true}, false},
+		{"kept from old image", &world{image: "img", imageLabels: map[string]map[string]string{"safeclaw": {config.LabelCredentialFileTTYD: "1"}}, oldTTYD: true, containers: map[string]*fakeContainer{
+			"safeclaw-work": {Running: true, Port: 7690, HostIP: "::1", Image: "img"},
+		}, native: true}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, r := newTestManager(t, tc.w)
+			var out bytes.Buffer
+			m.Out = &out
+			if _, err := m.Ensure(context.Background(), Options{Name: "work", NoOpen: true}); err != nil {
+				t.Fatal(err)
+			}
+			cred, err := m.Credential("work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			start, ok := r.Find("exec -d safeclaw-work sh -c ")
+			if !ok {
+				t.Fatalf("ttyd not started: %v", r.Commands())
+			}
+			want := current
+			if tc.fallback {
+				want = legacy
+			}
+			if got := strings.Join(start.Args, " "); !strings.Contains(got, want) {
+				t.Errorf("ttyd started with %q, want %q", got, want)
+			}
+			if warned := strings.Contains(out.String(), "takes its credential on its command line"); warned != tc.fallback {
+				t.Errorf("argv credential warning = %v, want %v: %s", warned, tc.fallback, out.String())
+			}
+			for _, c := range r.Commands() {
+				if strings.Contains(c, cred.Password) {
+					t.Errorf("credential leaked into a host command line: %q", c)
+				}
+			}
+		})
 	}
 }
