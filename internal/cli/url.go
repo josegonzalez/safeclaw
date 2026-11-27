@@ -28,9 +28,13 @@ func newURLCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), t.URL())
+			u, err := t.URL()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), u)
 			if open {
-				return m.OpenTerminal(ctx, args[0], t.URL())
+				return m.OpenTerminal(ctx, args[0], u)
 			}
 			return nil
 		},

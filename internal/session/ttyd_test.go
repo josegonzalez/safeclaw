@@ -213,8 +213,11 @@ func TestCredentialRotatesWithContainer(t *testing.T) {
 				return
 			}
 			term, err := m.Terminal(ctx, "work")
-			if err != nil || term.Credential != cred || term.URL() != res.URL {
-				t.Errorf("terminal = %+v, %v; want the current credential", term, err)
+			if err != nil || term.Credential != cred {
+				t.Fatalf("terminal = %+v, %v; want the current credential", term, err)
+			}
+			if u, err := term.URL(); err != nil || u != res.URL {
+				t.Errorf("terminal url = %q, %v; want %q", u, err, res.URL)
 			}
 		})
 	}
@@ -297,8 +300,8 @@ func TestTerminalsPublishedAwayFromCookieHost(t *testing.T) {
 	if term.Addr != "[::1]:7681" || term.Host != "localhost:7681" || term.Port != 7681 {
 		t.Errorf("terminal = %+v", term)
 	}
-	if want := "http://safeclaw:" + term.Credential.Password + "@[::1]:7681"; term.URL() != want {
-		t.Errorf("terminal url = %q, want %q", term.URL(), want)
+	if want := "http://safeclaw:" + term.Credential.Password + "@[::1]:7681"; mustURL(t, term) != want {
+		t.Errorf("terminal url = %q, want %q", mustURL(t, term), want)
 	}
 }
 
@@ -460,45 +463,175 @@ func TestSessionURLsNamePublishAddress(t *testing.T) {
 	}
 }
 
-// A session made from an image whose ttyd refuses a bracketed Host keeps a
-// localhost URL, which that ttyd accepts, and run says how to move it.
-func TestSessionURLsOnOldTTYDUseLocalhost(t *testing.T) {
-	w := &world{image: "img", oldTTYD: true, containers: map[string]*fakeContainer{
-		"safeclaw-work": {Running: true, Port: 7690, HostIP: "::1", Image: "img"},
-		"safeclaw-old":  {Running: true, Port: 7691, HostIP: "127.0.0.1", Image: "img"},
+func mustURL(t *testing.T, term *Terminal) string {
+	t.Helper()
+	u, err := term.URL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+// oldTTYDWorld has an image whose ttyd refuses a bracketed Host, and
+// sessions made from it: work, running on [::1]; stopped, stopped on [::1];
+// and old, a legacy one on 127.0.0.1.
+func oldTTYDWorld() *world {
+	return &world{image: "img", oldTTYD: true, containers: map[string]*fakeContainer{
+		"safeclaw-work":    {Running: true, Port: 7690, HostIP: "::1", Image: "img", Mounts: []string{"/proj:/home/sclaw/proj"}},
+		"safeclaw-stopped": {Port: 7691, HostIP: "::1", Image: "img"},
+		"safeclaw-old":     {Running: true, Port: 7692, HostIP: "127.0.0.1", Image: "img"},
 	}, native: true}
-	m, _ := newTestManager(t, w)
+}
+
+// No session gets a URL naming localhost while only [::1] is published: a
+// browser falls back to 127.0.0.1 for it when [::1] refuses, where nothing
+// holds the port and another local user can listen. A new session from an
+// image whose ttyd refuses [::1] URLs, and a kept [::1] one made from such
+// an image, are refused until the image is updated, and nothing is changed.
+// A legacy session keeps the 127.0.0.1 URL it is published on.
+func TestOldTTYDSessionsRefused(t *testing.T) {
+	w := oldTTYDWorld()
+	m, r := newTestManager(t, w)
 	var out bytes.Buffer
 	m.Out = &out
 	ctx := context.Background()
-	for name, want := range map[string]string{"work": "@localhost:7690", "old": "@127.0.0.1:7691", "new": "@localhost:7681"} {
+	for _, name := range []string{"work", "stopped", "old", "new"} {
+		if _, err := m.rotateCredential(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, then := range map[string]string{
+		"new":     "then run it again",
+		"work":    "then run `safeclaw run -s work` to recreate the session from it",
+		"stopped": "then run `safeclaw run -s stopped` to recreate the session from it",
+	} {
+		r.Calls = nil
 		out.Reset()
-		res, err := m.Ensure(ctx, Options{Name: name, NoOpen: true})
-		if err != nil {
-			t.Fatal(err)
+		_, err := m.Ensure(ctx, Options{Name: name, NoOpen: true})
+		if !errors.Is(err, ErrOldTTYD) || !strings.Contains(err.Error(), "Update the image with `safeclaw pull` or `safeclaw build`, "+then) {
+			t.Errorf("%s: err = %v", name, err)
 		}
-		if !strings.HasSuffix(res.URL, want) {
-			t.Errorf("%s: url = %q, want it to end in %q", name, res.URL, want)
+		for _, c := range r.Commands() {
+			if !strings.HasPrefix(c, "image inspect") && !strings.HasPrefix(c, "container inspect") && !strings.HasPrefix(c, "ps") {
+				t.Errorf("%s: refused run ran %q", name, c)
+			}
 		}
-		if warned := strings.Contains(out.String(), "URL uses localhost"); warned != (name != "old") {
-			t.Errorf("%s: localhost warning = %v: %s", name, warned, out.String())
+		if strings.Contains(out.String(), "localhost") {
+			t.Errorf("%s: output = %s", name, out.String())
 		}
-		term, err := m.Terminal(ctx, name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !strings.HasSuffix(term.URL(), want) {
-			t.Errorf("%s: terminal url = %q, want it to end in %q", name, term.URL(), want)
-		}
+	}
+	if c := w.containers["safeclaw-work"]; c == nil || !c.Running || c.HostIP != "::1" {
+		t.Errorf("work = %+v, want it kept", c)
+	}
+	if _, ok := w.containers["safeclaw-new"]; ok {
+		t.Error("new session created")
+	}
+
+	// An explicit recreate would make a container from the old image too.
+	w.containers["safeclaw-labelled"] = &fakeContainer{Running: true, Port: 7693, HostIP: "::1", Image: "img", Labels: map[string]string{config.LabelBracketedHostTTYD: "1"}}
+	r.Calls = nil
+	if _, err := m.Ensure(ctx, Options{Name: "labelled", Volume: t.TempDir() + ":/home/sclaw/x", NoOpen: true}); !errors.Is(err, ErrOldTTYD) || hasCall(r, "rm ") {
+		t.Errorf("explicit recreate: err = %v, commands = %v", err, r.Commands())
+	}
+
+	// A sandbox variant's image is updated with its own commands.
+	w.images = map[string]string{"safeclaw": "img", "safeclaw:sandbox": "sb"}
+	if _, err := m.Ensure(ctx, Options{Name: "fresh", Variant: "sandbox", NoOpen: true}); !errors.Is(err, ErrOldTTYD) || !strings.Contains(err.Error(), "`safeclaw pull --variant sandbox` or `safeclaw build --variant sandbox`") {
+		t.Errorf("variant: err = %v", err)
+	}
+
+	// The legacy session's URL names 127.0.0.1, where it is published.
+	res, err := m.Ensure(ctx, Options{Name: "old", NoOpen: true})
+	if err != nil || !strings.HasSuffix(res.URL, "@127.0.0.1:7692") {
+		t.Errorf("old: res = %+v, %v", res, err)
+	}
+
+	// A running [::1] session from the old image, started by an earlier
+	// version, still has a terminal for the dashboard's relay, but no URL.
+	term, err := m.Terminal(ctx, "work")
+	if err != nil || term.Addr != "[::1]:7690" {
+		t.Fatalf("terminal = %+v, %v", term, err)
+	}
+	if u, err := term.URL(); !errors.Is(err, ErrOldTTYD) || u != "" || !strings.Contains(err.Error(), "`safeclaw run -s work`") {
+		t.Errorf("terminal url = %q, %v", u, err)
+	}
+	if term, err := m.Terminal(ctx, "old"); err != nil || !strings.HasSuffix(mustURL(t, term), "@127.0.0.1:7692") {
+		t.Errorf("old terminal = %+v, %v", term, err)
 	}
 	list, err := m.List(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range list {
-		if s.Name == "work" && s.URL != "http://localhost:7690" {
-			t.Errorf("listed url = %q", s.URL)
+		if strings.Contains(s.URL, "localhost") || (s.Name == "work" && s.URL != "") || (s.Name == "old" && s.URL != "http://127.0.0.1:7692") {
+			t.Errorf("%s: listed url = %q", s.Name, s.URL)
 		}
+	}
+}
+
+// Once the image is updated, a kept [::1] session made from an image whose
+// ttyd refused [::1] URLs is recreated from it on its port, keeping its
+// mounts like any other recreate, and gets a [::1] URL.
+func TestOldTTYDSessionsRecreatedFromUpdatedImage(t *testing.T) {
+	w := oldTTYDWorld()
+	w.oldTTYD = false
+	for _, c := range w.containers {
+		c.OldTTYD = true
+	}
+	m, r := newTestManager(t, w)
+	var out bytes.Buffer
+	m.Out = &out
+	ctx := context.Background()
+	for name, port := range map[string]int{"work": 7690, "stopped": 7691} {
+		r.Calls = nil
+		out.Reset()
+		res, err := m.Ensure(ctx, Options{Name: name, NoOpen: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !hasCall(r, "rm -v -f safeclaw-"+name) || res.Port != port {
+			t.Errorf("%s: not recreated on its port: %d %v", name, res.Port, r.Commands())
+		}
+		if !strings.Contains(out.String(), "Removing existing container to recreate it from the updated one") {
+			t.Errorf("%s: output = %s", name, out.String())
+		}
+		cred, err := m.Credential(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := URLWithCredential(port, cred); res.URL != want {
+			t.Errorf("%s: url = %q, want %q", name, res.URL, want)
+		}
+		term, err := m.Terminal(ctx, name)
+		if err != nil || mustURL(t, term) != res.URL {
+			t.Errorf("%s: terminal = %+v, %v", name, term, err)
+		}
+	}
+	if run, _ := r.Find("run "); !strings.Contains(run.String(), " -p [::1]:7691:7681 ") {
+		t.Errorf("run = %q", run.String())
+	}
+	if c := w.containers["safeclaw-work"]; c == nil || !slices.Contains(c.Mounts, "/proj:/home/sclaw/proj") {
+		t.Errorf("work = %+v, want its mount kept", c)
+	}
+
+	// Once recreated, a plain run keeps it.
+	r.Calls = nil
+	if _, err := m.Ensure(ctx, Options{Name: "work", NoOpen: true}); err != nil || hasCall(r, "rm ") || hasCall(r, "run ") {
+		t.Errorf("recreated again: %v %v", err, r.Commands())
+	}
+}
+
+// An offline [::1] session from an old image is not recreated, which would
+// bring it back online; run refuses and says how to let it move.
+func TestOldTTYDSessionOfflineRefused(t *testing.T) {
+	w := oldTTYDWorld()
+	w.oldTTYD = false
+	w.containers["safeclaw-work"].OldTTYD = true
+	w.containers["safeclaw-work"].Offline = true
+	m, r := newTestManager(t, w)
+	_, err := m.Ensure(context.Background(), Options{Name: "work", NoOpen: true})
+	if !errors.Is(err, ErrOffline) || !strings.Contains(err.Error(), "safeclaw net on work") || hasCall(r, "rm ") || hasCall(r, "run ") {
+		t.Errorf("err = %v, commands = %v", err, r.Commands())
 	}
 }
 
@@ -578,10 +711,9 @@ func TestTTYDWithoutCredentialFileFallsBackToArgv(t *testing.T) {
 		fallback bool
 	}{
 		{"new from old image", &world{image: "img", argvCredTTYD: true, containers: map[string]*fakeContainer{}, native: true}, true},
-		{"new from older image", &world{image: "img", oldTTYD: true, containers: map[string]*fakeContainer{}, native: true}, true},
 		{"new from current image", &world{image: "img", containers: map[string]*fakeContainer{}, native: true}, false},
-		{"kept from old image", &world{image: "img", imageLabels: map[string]map[string]string{"safeclaw": {config.LabelCredentialFileTTYD: "1"}}, oldTTYD: true, containers: map[string]*fakeContainer{
-			"safeclaw-work": {Running: true, Port: 7690, HostIP: "::1", Image: "img"},
+		{"kept from old image", &world{image: "img", containers: map[string]*fakeContainer{
+			"safeclaw-work": {Running: true, Port: 7690, HostIP: "::1", Image: "img", OldTTYD: true, Labels: map[string]string{config.LabelBracketedHostTTYD: "1"}},
 		}, native: true}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

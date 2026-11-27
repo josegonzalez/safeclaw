@@ -113,23 +113,40 @@ func publishedHost(c docker.Container) string {
 	}
 }
 
-// urlHost returns the host the URLs of a terminal published on host name,
-// given its container's or image's labels: host itself, or localhost for
-// PublishHost from an image whose ttyd refuses a bracketed IPv6 Host.
-// That ttyd's origin check never passes for [::1]:PORT, and localhost
-// resolves to [::1].
-func urlHost(host string, labels map[string]string) string {
-	if host == PublishHost && labels[config.LabelBracketedHostTTYD] == "" {
-		return "localhost"
-	}
-	return host
+// acceptsBracketedHost reports whether a container's or image's labels
+// mark a ttyd that accepts a bracketed IPv6 Host such as [::1]:PORT in its
+// origin check. Older ttyd's check never passes for [::1]:PORT, so a
+// session published on PublishHost from such an image has no URL that is
+// both usable and safe: one naming localhost lets a browser fall back to
+// 127.0.0.1:PORT, which nothing holds and another local user can bind, and
+// publishing the session there too would hand it the dashboard's cookie.
+// Such sessions are refused, or recreated from an updated image.
+func acceptsBracketedHost(labels map[string]string) bool {
+	return labels[config.LabelBracketedHostTTYD] != ""
 }
 
-// containerURLHost returns the host a container's terminal URLs name; see
-// urlHost.
-func containerURLHost(c docker.Container) string {
-	return urlHost(publishedHost(c), c.Config.Labels)
+// containerURLHost returns the host a container's terminal URLs name, the
+// address it is published on, or false when it has no safe URL: it is
+// published on PublishHost and its ttyd refuses [::1] URLs.
+func containerURLHost(c docker.Container) (string, bool) {
+	host := publishedHost(c)
+	if host == PublishHost && !acceptsBracketedHost(c.Config.Labels) {
+		return "", false
+	}
+	return host, true
 }
+
+// updateImageCommands returns the commands that update a variant's image.
+func updateImageCommands(name string) string {
+	if name != "" && name != config.BaseVariant {
+		return "`safeclaw pull --variant " + name + "` or `safeclaw build --variant " + name + "`"
+	}
+	return "`safeclaw pull` or `safeclaw build`"
+}
+
+// ErrOldTTYD is wrapped by the errors for a session whose image's ttyd
+// refuses [::1] URLs; see acceptsBracketedHost.
+var ErrOldTTYD = errors.New("its image's ttyd refuses [::1] URLs")
 
 func (m *Manager) ttydDir() string {
 	if m.TTYDDir != "" {
@@ -289,14 +306,34 @@ type Terminal struct {
 	Port       int
 	Credential Credential
 
-	// browserHost is the host its URL names; see urlHost.
+	// browserHost is the host its URL names, or "" when it has none; see
+	// containerURLHost.
 	browserHost string
+	// name and variant are the session's, for the error URL returns.
+	name, variant string
 }
 
 // URL returns the terminal's URL with its credential in it, on the address
-// it is published on; see urlHost.
-func (t *Terminal) URL() string {
-	return urlOn(t.browserHost, t.Port, &t.Credential)
+// it is published on. A terminal published on PublishHost whose ttyd
+// refuses [::1] URLs has none, and gets an error wrapping ErrOldTTYD that
+// says how to recreate it; the dashboard's relay still reaches it, since no
+// browser connects to it there.
+func (t *Terminal) URL() (string, error) {
+	if t.browserHost == "" {
+		return "", oldTTYDError(t.name, t.variant, true)
+	}
+	return urlOn(t.browserHost, t.Port, &t.Credential), nil
+}
+
+// oldTTYDError returns the error for session name, whose variant's image
+// has a ttyd that refuses [::1] URLs. kept says the session's own container
+// is the one refused, so it is recreated once the image is updated.
+func oldTTYDError(name, variant string, kept bool) error {
+	then := "then run it again"
+	if kept {
+		then = "then run `safeclaw run -s " + name + "` to recreate the session from it"
+	}
+	return fmt.Errorf("session %q: %w, so its terminal URL would have to name localhost, where a browser can fall back to 127.0.0.1, which another local user can listen on. Update the image with %s, %s", name, ErrOldTTYD, updateImageCommands(variant), then)
 }
 
 // Terminal returns where to reach a running, online interactive session's
@@ -329,11 +366,14 @@ func (m *Manager) Terminal(ctx context.Context, name string) (*Terminal, error) 
 	if err != nil {
 		return nil, fmt.Errorf("session %q: read ttyd credential: %w", name, err)
 	}
+	browserHost, _ := containerURLHost(*c)
 	return &Terminal{
 		Addr:        net.JoinHostPort(publishedHost(*c), strconv.Itoa(port)),
 		Host:        "localhost:" + strconv.Itoa(port),
 		Port:        port,
 		Credential:  cred,
-		browserHost: containerURLHost(*c),
+		browserHost: browserHost,
+		name:        name,
+		variant:     variantOf(*c),
 	}, nil
 }

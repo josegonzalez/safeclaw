@@ -79,7 +79,8 @@ const (
 	// LabelBracketedHostTTYD is the image label, copied onto its containers,
 	// marking an image whose ttyd accepts a bracketed IPv6 Host such as
 	// [::1]:PORT in its origin check. It is outside LabelPrefix because the
-	// image sets it. Containers without it get localhost URLs.
+	// image sets it. Sessions are not created from an image without it, and
+	// containers on [::1] without it get no URL until they are recreated.
 	LabelBracketedHostTTYD = "io.github.josegonzalez.safeclaw.ttyd-bracketed-host"
 	// LabelCredentialFileTTYD is the image label, copied onto its
 	// containers, marking an image whose ttyd reads its credential from a
