@@ -149,16 +149,16 @@ func DashboardTokenFile(port int) string {
 	return filepath.Join(DashboardDir(), strconv.Itoa(port)+".token")
 }
 
-// ContainerName returns the container name for a session name. Names that
-// already carry the prefix are returned unchanged.
+// ContainerName returns the container name for a session name. It always
+// adds the prefix, so every session name maps to exactly one container;
+// session names may not start with the prefix themselves.
 func ContainerName(session string) string {
-	if strings.HasPrefix(session, ContainerPrefix) {
-		return session
-	}
 	return ContainerPrefix + session
 }
 
-// SessionName returns the short session name for a container name.
+// SessionName returns the short session name for a container name, removing
+// one prefix. Names without the prefix are returned unchanged, so a session
+// can be given by either name.
 func SessionName(container string) string {
 	return strings.TrimPrefix(container, ContainerPrefix)
 }

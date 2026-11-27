@@ -62,7 +62,7 @@ fi
 // writeEnvScript replaces the env file with stdin, readable only by its owner.
 const writeEnvScript = `umask 077 && cat > ` + config.EnvFile + ` && chmod 600 ` + config.EnvFile
 
-var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+var nameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]*$`)
 
 // ErrNoImage is wrapped by the error returned when a session's image is
 // missing.
@@ -123,12 +123,56 @@ func checkImageLabels(image, name string, labels map[string]string) error {
 // ErrNoClaudeToken is returned by non-interactive runs without a Claude token.
 var ErrNoClaudeToken = errors.New("no Claude Code token found. Run `safeclaw auth login` to create one, or pipe one to `safeclaw auth set`")
 
-// ValidateName checks that a session name makes a valid container name.
+// ErrLegacyName is wrapped by the error returned for a session name with
+// uppercase letters.
+var ErrLegacyName = errors.New("session names are lowercase")
+
+// ValidateName checks that a session name is canonical: lowercase, without
+// the container prefix, and a valid container name. Each session then has
+// one container, history directory, and state file, even on a
+// case-insensitive filesystem.
 func ValidateName(name string) error {
+	if nameRe.MatchString(strings.ToLower(name)) && strings.ToLower(name) != name {
+		return legacyNameError(name)
+	}
 	if !nameRe.MatchString(name) {
-		return fmt.Errorf("invalid session name %q: use letters, numbers, '.', '_' and '-', starting with a letter or number", name)
+		return fmt.Errorf("invalid session name %q: use lowercase letters, numbers, '.', '_' and '-', starting with a letter or number", name)
+	}
+	if strings.HasPrefix(name, config.ContainerPrefix) {
+		return fmt.Errorf("invalid session name %q: session names may not start with %q", name, config.ContainerPrefix)
 	}
 	return nil
+}
+
+// legacyNameError explains a session name with uppercase letters, which
+// earlier versions accepted.
+func legacyNameError(name string) error {
+	return fmt.Errorf("invalid session name %q: %w. A container made with this name before names were lowercased can only be removed with `docker rm -f %s`, then created again as %q", name, ErrLegacyName, config.ContainerName(name), strings.ToLower(name))
+}
+
+// ResolveName returns the canonical session name for a name given on the
+// command line: one container prefix is removed and letters are lowercased,
+// as the dashboard does. A name with uppercase letters is refused if a
+// container was made with exactly that name before names were lowercased,
+// so a command meant for it never acts on the lowercase session instead.
+func (m *Manager) ResolveName(ctx context.Context, name string) (string, error) {
+	name = config.SessionName(name)
+	if lower := strings.ToLower(name); lower != name {
+		if nameRe.MatchString(lower) {
+			c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
+			if err != nil {
+				return "", err
+			}
+			if c != nil && c.ShortName() == config.ContainerName(name) {
+				return "", legacyNameError(name)
+			}
+		}
+		name = lower
+	}
+	if err := ValidateName(name); err != nil {
+		return "", err
+	}
+	return name, nil
 }
 
 // NormalizeName applies the dashboard's name rules: spaces become dashes,
@@ -351,6 +395,10 @@ type Options struct {
 	// existing container's choice, or gives a new one a private namespace.
 	// A different choice recreates an existing container.
 	HostIPC *bool
+	// FreshHistory moves the session's history directory aside, to
+	// NAME.old-TIMESTAMP next to it, so the new container starts with an
+	// empty one. It recreates an existing container.
+	FreshHistory bool
 	// Query is sent to Claude Code once it is ready.
 	Query string
 	// NoOpen skips opening the browser.
@@ -421,6 +469,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if existing != nil {
 		set = secretsOf(*existing)
 	}
+	oldSet := set
 	secretsChanged := false
 	if opts.Secrets != nil {
 		secretsChanged = existing != nil && !opts.Secrets.Equal(set)
@@ -466,9 +515,9 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	// created, so a failed recreate never leaves the session without its
 	// container and the secret set recorded in its label.
 	var restore func() error
-	if existing != nil && (opts.Volume != "" || changed || secretsChanged || ipcChanged) {
+	if existing != nil && (opts.Volume != "" || changed || secretsChanged || ipcChanged || opts.FreshHistory) {
 		if offline {
-			return nil, fmt.Errorf("session %q %w: run `safeclaw net on %s` before changing its volume, variant, secrets, or IPC namespace", name, ErrOffline, name)
+			return nil, fmt.Errorf("session %q %w: run `safeclaw net on %s` before changing its volume, variant, secrets, IPC namespace, or history", name, ErrOffline, name)
 		}
 		oldVolumes := existing.BindSpecs(config.ProjectsMount)
 		if opts.Volume == "" {
@@ -487,10 +536,12 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			m.printf("Variant %s requested. Removing existing container...\n", variant.Label(want))
 		case secretsChanged:
 			m.printf("Secrets changed to %s. Removing existing container...\n", set)
-		case hostIPC:
+		case ipcChanged && hostIPC:
 			m.printf("Host IPC namespace requested. Removing existing container...\n")
-		default:
+		case ipcChanged:
 			m.printf("Private IPC namespace requested. Removing existing container...\n")
+		default:
+			m.printf("Fresh history requested. Removing existing container...\n")
 		}
 		// The restored container keeps the recorded IPC choice, so one that
 		// shared the host's without opting in comes back private.
@@ -560,11 +611,27 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			}
 		}
 	default:
-		if restore == nil && opts.Secrets == nil && set.All() && m.hasHistory(name) {
-			m.printf("Warning: session %s has history from an earlier container, but no secret selection is remembered, so it receives every secret. Use --secrets or --no-secrets to limit it\n", name)
+		archived := ""
+		if opts.FreshHistory {
+			if archived, err = m.archiveHistory(name); err != nil {
+				if restore != nil {
+					if rerr := restore(); rerr != nil {
+						return nil, fmt.Errorf("%w (restoring the previous container also failed: %w)", err, rerr)
+					}
+				}
+				return nil, err
+			}
+		} else {
+			m.warnHistory(name, restore != nil, opts.Secrets != nil, secretsChanged, oldSet, set)
 		}
 		m.printf("Creating container: %s\n", container)
 		if err := m.create(ctx, name, container, port, want, set, hostIPC, volumes); err != nil {
+			// The previous container gets its own history back.
+			if archived != "" {
+				if rerr := m.unarchiveHistory(name, archived); rerr != nil {
+					return nil, fmt.Errorf("%w (moving the history back from %s also failed: %w)", err, archived, rerr)
+				}
+			}
 			if restore != nil {
 				if rerr := restore(); rerr != nil {
 					return nil, fmt.Errorf("%w (restoring the previous container also failed: %w)", err, rerr)
@@ -685,6 +752,63 @@ func (m *Manager) allocatePort(ctx context.Context) (int, error) {
 func (m *Manager) hasHistory(name string) bool {
 	_, err := os.Stat(filepath.Join(m.SessionsDir, name))
 	return err == nil
+}
+
+// warnHistory warns when a new container reuses history, including the
+// transcripts and memory Claude Code reads, that an earlier container wrote
+// with a different or unknown set of secrets. recreated is set when the
+// container replaces one this run removed, and given when this run picks
+// the set.
+func (m *Manager) warnHistory(name string, recreated, given, secretsChanged bool, oldSet, set SecretSet) {
+	if !m.hasHistory(name) {
+		return
+	}
+	switch {
+	case secretsChanged:
+		m.printf("Warning: session %s keeps the history its previous container wrote with %s, including transcripts and memory that Claude Code reads, and now receives %s. Use --fresh-history to start with an empty one\n", name, oldSet, set)
+	case recreated:
+		// The secrets are the ones the history was written with.
+	case !given && set.All():
+		m.printf("Warning: session %s has history from an earlier container, but no secret selection is remembered, so it receives every secret. Use --secrets or --no-secrets to limit it, or --fresh-history to start with an empty history\n", name)
+	case given:
+		m.printf("Warning: session %s has history from an earlier container, including transcripts and memory that Claude Code reads, which may have been written with other secrets than %s. Use --fresh-history to start with an empty one\n", name, set)
+	}
+}
+
+// archiveTime formats the time in the name a history directory is moved
+// to. Its UTC offset is written as +0000, and no session name may contain
+// '+' or uppercase letters, so a moved directory is never the history of
+// another session, even on a case-insensitive filesystem.
+const archiveTime = "20060102T150405-0700"
+
+// archiveHistory moves a session's history directory aside, to
+// NAME.old-TIMESTAMP, returning its new path, or "" if it had none.
+func (m *Manager) archiveHistory(name string) (string, error) {
+	dir := filepath.Join(m.SessionsDir, name)
+	if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	to := dir + ".old-" + time.Now().UTC().Format(archiveTime)
+	if _, err := os.Lstat(to); err == nil {
+		return "", fmt.Errorf("can't move the history of session %s aside: %s already exists", name, to)
+	}
+	if err := os.Rename(dir, to); err != nil {
+		return "", fmt.Errorf("moving the history of session %s aside: %w", name, err)
+	}
+	m.printf("Moved the history of session %s to %s\n", name, to)
+	return to, nil
+}
+
+// unarchiveHistory moves a history directory back after the new container
+// could not be created, removing the empty one made for it first.
+func (m *Manager) unarchiveHistory(name, archived string) error {
+	dir := filepath.Join(m.SessionsDir, name)
+	if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.Rename(archived, dir)
 }
 
 // create runs a session container. It gets docker's default private IPC
@@ -925,12 +1049,20 @@ func (m *Manager) Exists(ctx context.Context, name string) (bool, error) {
 
 // Stop stops a session container.
 func (m *Manager) Stop(ctx context.Context, name string) error {
+	name = config.SessionName(name)
+	if err := ValidateName(name); err != nil {
+		return err
+	}
 	return m.Docker.Stop(ctx, config.ContainerName(name), 1)
 }
 
 // Delete removes a session container, its saved network state, and its
 // ttyd credential. Its history stays on the host.
 func (m *Manager) Delete(ctx context.Context, name string, force bool) error {
+	name = config.SessionName(name)
+	if err := ValidateName(name); err != nil {
+		return err
+	}
 	if err := m.Docker.Remove(ctx, config.ContainerName(name), force); err != nil {
 		return err
 	}
@@ -939,7 +1071,7 @@ func (m *Manager) Delete(ctx context.Context, name string, force bool) error {
 		return err
 	}
 	defer unlock()
-	if err := m.removeState(config.SessionName(name)); err != nil {
+	if err := m.removeState(name); err != nil {
 		return err
 	}
 	return m.removeCredential(name)

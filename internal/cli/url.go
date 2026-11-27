@@ -18,6 +18,9 @@ func newURLCommand() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessions,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := resolveArg(cmd, args); err != nil {
+				return err
+			}
 			ctx := cmd.Context()
 			m := newManager()
 			m.Out = cmd.ErrOrStderr()

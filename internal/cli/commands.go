@@ -72,7 +72,7 @@ type runFlags struct {
 	noOpen                          bool
 	secrets                         []string
 	noSecrets, allSecrets           bool
-	hostIPC                         bool
+	hostIPC, freshHistory           bool
 }
 
 func (f *runFlags) register(cmd *cobra.Command) {
@@ -87,6 +87,7 @@ func (f *runFlags) register(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&f.noSecrets, "no-secrets", false, "give the session no secrets")
 	cmd.Flags().BoolVar(&f.allSecrets, "all-secrets", false, "give the session every secret, including ones added later (default for new sessions)")
 	cmd.MarkFlagsMutuallyExclusive("secrets", "no-secrets", "all-secrets")
+	cmd.Flags().BoolVar(&f.freshHistory, "fresh-history", false, "move the session's history aside to NAME.old-TIMESTAMP and start with an empty one (recreates an existing container)")
 	cmd.Flags().BoolVar(&f.hostIPC, "host-ipc", false, "share the docker host's IPC namespace and /dev/shm with the session, or --host-ipc=false for a private one (new sessions get a private one; a different choice recreates an existing container)")
 }
 
@@ -127,16 +128,40 @@ func (f *runFlags) options(cmd *cobra.Command, interactive bool) (session.Option
 	if err != nil {
 		return session.Options{}, err
 	}
+	name, err := resolveName(cmd, f.session)
+	if err != nil {
+		return session.Options{}, err
+	}
 	return session.Options{
-		Name:        f.session,
-		Volume:      f.volume,
-		Variant:     f.variant,
-		Secrets:     set,
-		HostIPC:     f.hostIPCChoice(cmd),
-		Query:       f.query,
-		NoOpen:      f.noOpen,
-		Interactive: interactive,
+		Name:         name,
+		Volume:       f.volume,
+		Variant:      f.variant,
+		Secrets:      set,
+		HostIPC:      f.hostIPCChoice(cmd),
+		FreshHistory: f.freshHistory,
+		Query:        f.query,
+		NoOpen:       f.noOpen,
+		Interactive:  interactive,
 	}, nil
+}
+
+// resolveName returns the canonical session name for a name given on the
+// command line, lowercased as the dashboard does. An empty name stays empty.
+func resolveName(cmd *cobra.Command, name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	return newManager().ResolveName(cmd.Context(), name)
+}
+
+// resolveArg replaces args[0] with its canonical session name.
+func resolveArg(cmd *cobra.Command, args []string) error {
+	name, err := resolveName(cmd, args[0])
+	if err != nil {
+		return err
+	}
+	args[0] = name
+	return nil
 }
 
 func newRunCommand() *cobra.Command {
@@ -256,6 +281,9 @@ func newStopCommand() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessions,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := resolveArg(cmd, args); err != nil {
+				return err
+			}
 			m := session.NewManager(nil)
 			if err := m.RequireType(cmd.Context(), args[0], config.TypeSession); err != nil {
 				return err
@@ -274,6 +302,9 @@ func newRemoveCommand() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessions,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := resolveArg(cmd, args); err != nil {
+				return err
+			}
 			m := session.NewManager(nil)
 			if err := m.RequireType(cmd.Context(), args[0], config.TypeSession); err != nil {
 				return err
@@ -292,6 +323,9 @@ func newAttachCommand() *cobra.Command {
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeSessions,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := resolveArg(cmd, args); err != nil {
+				return err
+			}
 			if err := session.NewManager(nil).RequireType(cmd.Context(), args[0], config.TypeSession); err != nil {
 				return err
 			}
