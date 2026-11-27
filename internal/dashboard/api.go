@@ -18,6 +18,8 @@ type apiSession struct {
 	Volume string  `json:"volume"`
 	Active bool    `json:"active"`
 	Type   string  `json:"type"`
+	// Variant is the image variant, "" for the base image.
+	Variant string `json:"variant"`
 	// AutoRemove is set for one-off sandboxes, which are removed when
 	// they stop.
 	AutoRemove bool `json:"autoRemove"`
@@ -30,9 +32,10 @@ type apiResult struct {
 }
 
 type apiRequest struct {
-	Name   string `json:"name"`
-	Volume string `json:"volume"`
-	Query  string `json:"query"`
+	Name    string `json:"name"`
+	Volume  string `json:"volume"`
+	Variant string `json:"variant"`
+	Query   string `json:"query"`
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -60,7 +63,7 @@ func (s *Server) apiSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]apiSession, 0, len(list))
 	for _, x := range list {
-		a := apiSession{Name: x.Container, Volume: x.Volume, Active: x.Active, Type: x.Type, AutoRemove: x.IsOneOff()}
+		a := apiSession{Name: x.Container, Volume: x.Volume, Active: x.Active, Type: x.Type, Variant: x.Variant, AutoRemove: x.IsOneOff()}
 		if x.Port > 0 {
 			p := strconv.Itoa(x.Port)
 			u := x.URL
@@ -112,10 +115,11 @@ func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.sessions.Ensure(r.Context(), session.Options{
-		Name:   session.NormalizeName(req.Name),
-		Volume: req.Volume,
-		Query:  req.Query,
-		NoOpen: true,
+		Name:    session.NormalizeName(req.Name),
+		Volume:  req.Volume,
+		Variant: req.Variant,
+		Query:   req.Query,
+		NoOpen:  true,
 	})
 	if err != nil {
 		writeJSONStatus(w, errStatus(err, http.StatusOK), apiResult{Error: err.Error()})

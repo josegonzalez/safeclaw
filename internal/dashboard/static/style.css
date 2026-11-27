@@ -321,7 +321,8 @@ dialog.modal::backdrop {
     color: #8b949e;
     margin-bottom: 6px;
 }
-.modal-field input[type="text"] {
+.modal-field input[type="text"],
+.modal-field select {
     width: 100%;
     padding: 8px 10px;
     background: #141210;
@@ -331,7 +332,8 @@ dialog.modal::backdrop {
     font-family: inherit;
     font-size: 14px;
 }
-.modal-field input[type="text"]:focus {
+.modal-field input[type="text"]:focus,
+.modal-field select:focus {
     outline: none;
     border-color: #3a5040;
 }

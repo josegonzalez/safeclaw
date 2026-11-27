@@ -29,9 +29,10 @@ go install github.com/josegonzalez/safeclaw/cmd/safeclaw@latest
 ## Quickstart
 
 ```bash
-# Build the image (once, or after upgrading), or pull the published one
-safeclaw build
-safeclaw pull
+# Build the image (once, or after upgrading), or pull the published one.
+# --variant sandbox also fetches the image sandboxes use by default.
+safeclaw build --variant sandbox
+safeclaw pull --variant sandbox
 
 # Start a container and web terminal
 safeclaw run
@@ -54,7 +55,7 @@ safeclaw dashboard
 
 Opens at http://localhost:7680 with:
 
-- Create new sessions with volume mounts and initial queries
+- Create new sessions with volume mounts, image variants, and initial queries
 - All sessions listed with start/stop/delete controls
 - Live iframe views of active sessions, updated as containers change
 
@@ -62,11 +63,14 @@ Opens at http://localhost:7680 with:
 
 A sandbox is a headless container for opening untrusted files, such as PDFs, archives, or emails that haven't been checked. It gets no secrets, git config, web terminal, or Claude Code, has no network, and runs as an unprivileged user that can't read `/home/sclaw`. See [architecture](docs/architecture.md#sandboxes) for the full list of defaults.
 
+Sandboxes run the `sandbox` [image variant](#image-variants) by default, which adds document extraction tools: `pdftotext`, `pdfinfo`, and `pdftoppm` from poppler-utils, `tesseract` with English language data, `7z`, and `file`. Fetch it once with `safeclaw pull --variant sandbox` (or `safeclaw build --variant sandbox`), or pass `--variant base` to use the base image.
+
 ```bash
 # Create a sandbox, mounting a host directory read-only
 safeclaw sandbox run -s triage -v ~/inbox:/in
 
 # Run commands as the sandbox user
+safeclaw sandbox exec triage -- pdftotext /in/report.pdf -
 safeclaw sandbox exec triage -- unzip -l /in/report.zip
 safeclaw sandbox exec -i triage -- python3 - < extract.py
 
@@ -83,12 +87,39 @@ A one-off sandbox lives for exactly one job, so jobs never share files, locks, o
 # Run one command in a new sandbox that is removed when the command exits
 safeclaw sandbox exec --ephemeral -i -- python3 - < extract.py
 safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- unzip -l /in/report.zip
+safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- tesseract /in/scan.png -
 
 # Or keep one around for a job with several steps; it is removed when stopped
 name=$(safeclaw sandbox run --rm -v ~/inbox:/in)
 safeclaw sandbox exec "$name" -- unzip -d /sandbox/out /in/report.zip
 safeclaw sandbox stop "$name"
 ```
+
+## Image variants
+
+An image variant is the `safeclaw` image with extra apt packages or setup steps, tagged `safeclaw:NAME`. The built-in `sandbox` variant is published alongside each release. Define more, or override `sandbox`, in `~/.config/safeclaw/config.yaml`:
+
+```yaml
+defaults:
+  session: base      # the variant new sessions use (default: base)
+  sandbox: sandbox   # the variant new sandboxes use (default: sandbox)
+variants:
+  research:
+    packages: [pandoc]
+    run:
+      - pip install --break-system-packages markitdown
+```
+
+`run` commands run as root, one line each. A variant defined in the config file replaces a built-in one with the same name.
+
+```bash
+safeclaw variant ls                          # variants, their images, and defaults
+safeclaw build --variant research            # build the base image, then the variant
+safeclaw run -s notes --variant research     # a session on safeclaw:research
+safeclaw sandbox exec --ephemeral --variant base -- ls
+```
+
+`safeclaw build` and `safeclaw pull` also refresh every variant already present locally, so no variant is left on an older base image. Passing `--variant` to an existing session or sandbox with a different variant recreates it, keeping its mounts and limits.
 
 ## What's included
 
@@ -99,6 +130,7 @@ safeclaw sandbox stop "$name"
 - Playwright MCP 0.0.86 with Chromium
 - [DX plugin](https://github.com/ykdojo/claude-code-tips#tip-44-install-the-dx-plugin), [custom status line](https://github.com/ykdojo/claude-code-tips#tip-0-customize-your-status-line), [shell aliases](#aliases)
 - ttyd web terminal + tmux
+- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, and file
 
 ## Sensible defaults
 
@@ -122,6 +154,8 @@ This maps to `/home/sclaw/.claude/projects/` inside the container and includes:
 
 Rebuilding containers or restarting sessions won't affect your history or memory.
 
+Image variants and their defaults are configured in `~/.config/safeclaw/config.yaml`, see [image variants](#image-variants).
+
 ## Authentication
 
 Tokens are stored in `~/.config/safeclaw/.secrets/` and injected as env vars on each run. The filename becomes the env var name.
@@ -137,9 +171,9 @@ You can add any additional secrets with `safeclaw env` or by creating files in t
 
 | Command | Description |
 |---------|-------------|
-| `safeclaw build` | Build the image from the build context embedded in the binary (`--context .` for a checkout). Warns about sessions on an older image; `--recreate` removes them. |
-| `safeclaw pull` | Pull `ghcr.io/josegonzalez/safeclaw` for this version and tag it `safeclaw` |
-| `safeclaw run` | Start/reuse a container, inject auth, start ttyd. `-s name` for named sessions, `-v` for volumes, `-n` to skip opening the browser, `-q "question"` to start with a query. |
+| `safeclaw build` | Build the image from the build context embedded in the binary (`--context .` for a checkout), then each `--variant` and every variant already built. Warns about sessions on an older image; `--recreate` removes them. |
+| `safeclaw pull` | Pull `ghcr.io/josegonzalez/safeclaw` for this version and tag it `safeclaw`, then fetch each `--variant` and every variant already present |
+| `safeclaw run` | Start/reuse a container, inject auth, start ttyd. `-s name` for named sessions, `-v` for volumes, `--variant` for an image variant, `-n` to skip opening the browser, `-q "question"` to start with a query. |
 | `safeclaw new` | Same as `run` but never prompts (used by the dashboard) |
 | `safeclaw dashboard` | Web dashboard for managing sessions |
 | `safeclaw env` | Manage environment variables (list, add, delete) |
@@ -147,13 +181,15 @@ You can add any additional secrets with `safeclaw env` or by creating files in t
 | `safeclaw stop NAME` | Stop a session |
 | `safeclaw rm NAME` | Delete a session container (history is kept) |
 | `safeclaw attach NAME` | Attach to a session's tmux session in this terminal |
-| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory read-only, `--memory`, `--pids-limit`, and `--cpus` set limits. |
+| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory read-only, `--variant` picks the image variant, `--memory`, `--pids-limit`, and `--cpus` set limits. |
 | `safeclaw sandbox run --rm [-s NAME]` | Create a one-off sandbox that is removed when it stops, and print its name |
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY) |
-| `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v` and limit flags as `sandbox run`. |
+| `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`. |
 | `safeclaw sandbox ls` | List sandboxes |
 | `safeclaw sandbox stop NAME` | Stop a sandbox |
 | `safeclaw sandbox rm NAME` | Delete a sandbox and its `/sandbox` volume |
+| `safeclaw variant ls` | List image variants, whether their images exist, and which session types default to them |
+| `safeclaw variant dockerfile NAME` | Print the Dockerfile that builds a variant |
 | `safeclaw completion SHELL` | Shell completions |
 | `safeclaw version` | Version information |
 

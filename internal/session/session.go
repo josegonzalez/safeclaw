@@ -22,6 +22,7 @@ import (
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/secrets"
+	"github.com/josegonzalez/safeclaw/internal/variant"
 )
 
 // gitConfigScript sets the container's git identity from the GitHub account.
@@ -56,8 +57,35 @@ const writeEnvScript = `umask 077 && cat > ` + config.EnvFile + ` && chmod 600 `
 
 var nameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
-// ErrNoImage is returned when the safeclaw image is missing.
-var ErrNoImage = fmt.Errorf("image '%s' not found. Run `safeclaw build` or `safeclaw pull` first", config.ImageName)
+// ErrNoImage is wrapped by the error returned when a session's image is
+// missing.
+var ErrNoImage = errors.New("image not found")
+
+// noImageError names the missing image and how to get it.
+type noImageError struct{ variant string }
+
+func (e noImageError) Error() string {
+	flag := ""
+	if e.variant != "" {
+		flag = " --variant " + e.variant
+	}
+	return fmt.Sprintf("image '%s' not found. Run `safeclaw pull%s` or `safeclaw build%s` first", variant.Image(e.variant), flag, flag)
+}
+
+func (e noImageError) Unwrap() error { return ErrNoImage }
+
+// checkImage returns an error wrapping ErrNoImage unless the image for a
+// variant ("" for the base image) exists.
+func (m *Manager) checkImage(ctx context.Context, name string) error {
+	imageID, err := m.Docker.ImageID(ctx, variant.Image(name))
+	if err != nil {
+		return err
+	}
+	if imageID == "" {
+		return noImageError{variant: name}
+	}
+	return nil
+}
 
 // ErrNoClaudeToken is returned by non-interactive runs without a Claude token.
 var ErrNoClaudeToken = errors.New("no Claude Code token found. Run `safeclaw run` first to set up authentication")
@@ -108,6 +136,10 @@ type Manager struct {
 	OpenBrowser func(url string) error
 	// PromptTimeout bounds how long a query waits for Claude Code's prompt.
 	PromptTimeout time.Duration
+	// LoadVariants returns the known image variants. It is called whenever
+	// a variant is resolved, so config file edits apply without a restart.
+	// Defaults to the built-in variants alone.
+	LoadVariants func() (*variant.Set, error)
 
 	mu sync.Mutex
 }
@@ -119,7 +151,54 @@ func NewManager(out io.Writer) *Manager {
 		Secrets:     secrets.Store{Dir: config.SecretsDir()},
 		SessionsDir: config.SessionsDir(),
 		Out:         out,
+		LoadVariants: func() (*variant.Set, error) {
+			return variant.Load(config.File())
+		},
 	}
+}
+
+// Variants returns the known image variants and defaults.
+func (m *Manager) Variants() (*variant.Set, error) {
+	if m.LoadVariants == nil {
+		return variant.Default(), nil
+	}
+	return m.LoadVariants()
+}
+
+// variantOf returns the variant a container runs, "" for the base image.
+func variantOf(c docker.Container) string {
+	return c.Label(config.LabelVariant)
+}
+
+// pickVariant returns the variant a container of type typ should run: the
+// requested one, else the existing container's, else the default for typ.
+// It also reports whether the request changes an existing container's
+// variant.
+func (m *Manager) pickVariant(requested, typ string, existing *docker.Container) (string, bool, error) {
+	set, err := m.Variants()
+	if err != nil {
+		return "", false, err
+	}
+	if requested == "" {
+		if existing != nil {
+			return variantOf(*existing), false, nil
+		}
+		return set.DefaultFor(typ), false, nil
+	}
+	name, err := set.Resolve(requested)
+	if err != nil {
+		return "", false, err
+	}
+	return name, existing != nil && name != variantOf(*existing), nil
+}
+
+// variantArgs returns the `docker run` label for a variant, none for the
+// base image.
+func variantArgs(name string) []string {
+	if name == "" || name == config.BaseVariant {
+		return nil
+	}
+	return []string{"--label", config.LabelVariant + "=" + name}
 }
 
 func (m *Manager) out() io.Writer {
@@ -180,6 +259,11 @@ type Options struct {
 	// Volume is an optional host:container bind mount. Setting it recreates
 	// an existing container.
 	Volume string
+	// Variant is the image variant, config.BaseVariant for the base image.
+	// Empty keeps an existing container's variant, or uses the configured
+	// default for a new one. A different variant recreates an existing
+	// container.
+	Variant string
 	// Query is sent to Claude Code once it is ready.
 	Query string
 	// NoOpen skips opening the browser.
@@ -217,20 +301,20 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	}
 	container := config.ContainerName(name)
 
-	imageID, err := m.Docker.ImageID(ctx, config.ImageName)
-	if err != nil {
-		return nil, err
-	}
-	if imageID == "" {
-		return nil, ErrNoImage
-	}
-
 	existing, err := m.Docker.InspectOne(ctx, container)
 	if err != nil {
 		return nil, err
 	}
 	if existing != nil && TypeOf(*existing) == config.TypeSandbox {
 		return nil, wrongType(name, ErrIsSandbox)
+	}
+
+	want, changed, err := m.pickVariant(opts.Variant, config.TypeSession, existing)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.checkImage(ctx, want); err != nil {
+		return nil, err
 	}
 
 	if err := m.ensureTokens(opts.Interactive); err != nil {
@@ -242,8 +326,18 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		port = existing.HostPort(config.TTYDPort)
 	}
 
-	if opts.Volume != "" && existing != nil {
-		m.printf("Volume mount requested. Removing existing container...\n")
+	// A recreated container keeps whatever this run does not change.
+	var volumes []string
+	if opts.Volume != "" {
+		volumes = []string{opts.Volume}
+	}
+	if existing != nil && (opts.Volume != "" || changed) {
+		if opts.Volume != "" {
+			m.printf("Volume mount requested. Removing existing container...\n")
+		} else {
+			m.printf("Variant %s requested. Removing existing container...\n", variant.Label(want))
+			volumes = existing.BindSpecs(config.ProjectsMount)
+		}
 		if err := m.Docker.Remove(ctx, container, true); err != nil {
 			return nil, err
 		}
@@ -271,7 +365,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		}
 	default:
 		m.printf("Creating container: %s\n", container)
-		if err := m.create(ctx, name, container, port, opts.Volume); err != nil {
+		if err := m.create(ctx, name, container, port, want, volumes); err != nil {
 			return nil, err
 		}
 	}
@@ -359,7 +453,7 @@ func (m *Manager) allocatePort(ctx context.Context) (int, error) {
 	return 0, errors.New("no free port available")
 }
 
-func (m *Manager) create(ctx context.Context, name, container string, port int, volume string) error {
+func (m *Manager) create(ctx context.Context, name, container string, port int, variantName string, volumes []string) error {
 	dataDir := filepath.Join(m.SessionsDir, name)
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return err
@@ -370,7 +464,8 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 		"-p", fmt.Sprintf("127.0.0.1:%d:%d", port, config.TTYDPort),
 		"-v", dataDir + ":" + config.ProjectsMount,
 	}
-	if volume != "" {
+	args = append(args, variantArgs(variantName)...)
+	for _, volume := range volumes {
 		v, err := ExpandVolume(volume)
 		if err != nil {
 			return err
@@ -378,7 +473,7 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 		m.printf("Mounting volume: %s\n", v)
 		args = append(args, "-v", v)
 	}
-	args = append(args, config.ImageName, "sleep", "infinity")
+	args = append(args, variant.Image(variantName), "sleep", "infinity")
 	_, err := m.Docker.Run(ctx, args...)
 	return err
 }
@@ -505,6 +600,8 @@ type Session struct {
 	Status string `json:"-"`
 	// Type is config.TypeSession or config.TypeSandbox.
 	Type string `json:"type"`
+	// Variant is the image variant, "" for the base image.
+	Variant string `json:"variant"`
 	// AutoRemove is set for one-off sandboxes, which docker removes when
 	// they stop.
 	AutoRemove bool `json:"autoRemove"`
@@ -548,6 +645,7 @@ func (m *Manager) List(ctx context.Context) ([]Session, error) {
 			Status:     c.State.Status,
 			Volume:     "-",
 			Type:       TypeOf(c),
+			Variant:    variantOf(c),
 			AutoRemove: c.HostConfig.AutoRemove,
 		}
 		if mounts := c.BindMounts(config.ProjectsMount); len(mounts) > 0 {

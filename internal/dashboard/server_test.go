@@ -15,6 +15,7 @@ import (
 
 	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/session"
+	"github.com/josegonzalez/safeclaw/internal/variant"
 )
 
 type fakeSessions struct {
@@ -24,6 +25,19 @@ type fakeSessions struct {
 	stopped  []string
 	deleted  []string
 	ensureFn func(session.Options) (*session.Result, error)
+	// variants is returned by Variants; nil means the built-ins.
+	variants   *variant.Set
+	variantErr error
+}
+
+func (f *fakeSessions) Variants() (*variant.Set, error) {
+	if f.variantErr != nil {
+		return nil, f.variantErr
+	}
+	if f.variants == nil {
+		return variant.Default(), nil
+	}
+	return f.variants, nil
 }
 
 func (f *fakeSessions) List(context.Context) ([]session.Session, error) {

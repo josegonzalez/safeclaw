@@ -22,6 +22,7 @@ import (
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/session"
+	"github.com/josegonzalez/safeclaw/internal/variant"
 )
 
 //go:embed templates static
@@ -33,6 +34,7 @@ type Sessions interface {
 	Ensure(ctx context.Context, opts session.Options) (*session.Result, error)
 	Stop(ctx context.Context, name string) error
 	Delete(ctx context.Context, name string, force bool) error
+	Variants() (*variant.Set, error)
 }
 
 // Options configures the dashboard.
@@ -220,6 +222,12 @@ type view struct {
 	Sessions []session.Session
 	Active   []session.Session
 	Err      string
+	// Variants lists the image variants for the new session form, base
+	// included, and DefaultVariant is the one new sessions get by default.
+	Variants       []string
+	DefaultVariant string
+	// VariantErr is set when the variants could not be loaded.
+	VariantErr string
 }
 
 func (s *Server) load(ctx context.Context) view {
@@ -227,6 +235,12 @@ func (s *Server) load(ctx context.Context) view {
 	v := view{Sessions: list}
 	if err != nil {
 		v.Err = err.Error()
+	}
+	if set, err := s.sessions.Variants(); err != nil {
+		v.VariantErr = err.Error()
+	} else {
+		v.Variants = append([]string{config.BaseVariant}, set.Names()...)
+		v.DefaultVariant = variant.Label(set.DefaultFor(config.TypeSession))
 	}
 	for _, x := range list {
 		if x.Active && x.URL != "" {
@@ -330,10 +344,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res, err := s.sessions.Ensure(r.Context(), session.Options{
-		Name:   name,
-		Volume: strings.TrimSpace(r.PostForm.Get("volume")),
-		Query:  strings.TrimSpace(r.PostForm.Get("query")),
-		NoOpen: true,
+		Name:    name,
+		Volume:  strings.TrimSpace(r.PostForm.Get("volume")),
+		Variant: strings.TrimSpace(r.PostForm.Get("variant")),
+		Query:   strings.TrimSpace(r.PostForm.Get("query")),
+		NoOpen:  true,
 	})
 	if err != nil {
 		s.render(w, http.StatusUnprocessableEntity, "create-error", err.Error())

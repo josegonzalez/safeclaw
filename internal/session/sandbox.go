@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
+	"github.com/josegonzalez/safeclaw/internal/docker"
+	"github.com/josegonzalez/safeclaw/internal/variant"
 )
 
 // Sandbox resource limit defaults.
@@ -63,19 +65,57 @@ type SandboxOptions struct {
 	// Volume is an optional host:container bind mount, always mounted
 	// read-only. Setting it recreates an existing sandbox.
 	Volume string
-	// Memory is docker's --memory value.
+	// Variant is the image variant, config.BaseVariant for the base image.
+	// Empty keeps an existing sandbox's variant, or uses the configured
+	// default for a new one. A different variant recreates an existing
+	// sandbox. SandboxRunArgs and EphemeralRunArgs take it already
+	// resolved, so there empty means the base image.
+	Variant string
+	// Memory is docker's --memory value. Empty keeps a recreated sandbox's
+	// limit, or uses DefaultSandboxMemory.
 	Memory string
-	// PidsLimit is docker's --pids-limit value.
+	// PidsLimit is docker's --pids-limit value. Zero keeps a recreated
+	// sandbox's limit, or uses DefaultSandboxPidsLimit.
 	PidsLimit int
-	// CPUs is docker's --cpus value.
+	// CPUs is docker's --cpus value. Empty keeps a recreated sandbox's
+	// limit, or uses DefaultSandboxCPUs.
 	CPUs string
 	// Recreate removes an existing sandbox first, e.g. because its limits
-	// changed.
+	// changed. A recreated sandbox keeps the mount, variant, and limits
+	// that are not given again.
 	Recreate bool
 	// Remove makes a one-off sandbox: docker removes it, with its /sandbox
 	// volume, when it stops. Name is optional, a random one is picked
 	// without it, and an existing container with the name is refused.
 	Remove bool
+
+	// kept are the bind mounts carried over from a recreated sandbox.
+	kept []string
+}
+
+// keep fills in what opts leaves unset from the sandbox it recreates.
+func (o SandboxOptions) keep(c docker.Container) SandboxOptions {
+	if o.Volume == "" {
+		o.kept = c.BindSpecs()
+	}
+	if o.Memory == "" && c.HostConfig.Memory > 0 {
+		o.Memory = strconv.FormatInt(c.HostConfig.Memory, 10)
+	}
+	if o.PidsLimit == 0 && c.HostConfig.PidsLimit != nil && *c.HostConfig.PidsLimit > 0 {
+		o.PidsLimit = int(*c.HostConfig.PidsLimit)
+	}
+	if o.CPUs == "" && c.HostConfig.NanoCpus > 0 {
+		o.CPUs = strconv.FormatFloat(float64(c.HostConfig.NanoCpus)/1e9, 'f', -1, 64)
+	}
+	return o
+}
+
+// volumes returns the bind mounts to give the sandbox.
+func (o SandboxOptions) volumes() []string {
+	if o.Volume != "" {
+		return []string{o.Volume}
+	}
+	return o.kept
 }
 
 func (o SandboxOptions) withDefaults() SandboxOptions {
@@ -110,11 +150,15 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	if opts.PidsLimit < 0 {
 		return nil, fmt.Errorf("invalid pids limit %d", opts.PidsLimit)
 	}
-	opts = opts.withDefaults()
 	if opts.Remove {
-		if err := m.checkImage(ctx); err != nil {
+		want, _, err := m.pickVariant(opts.Variant, config.TypeSandbox, nil)
+		if err != nil {
 			return nil, err
 		}
+		if err := m.checkImage(ctx, want); err != nil {
+			return nil, err
+		}
+		opts.Variant = want
 		name, err := m.pickName(ctx, opts.Name)
 		if err != nil {
 			return nil, err
@@ -135,9 +179,6 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 		return nil, err
 	}
 	container := config.ContainerName(name)
-	if err := m.checkImage(ctx); err != nil {
-		return nil, err
-	}
 
 	existing, err := m.Docker.InspectOne(ctx, container)
 	if err != nil {
@@ -147,8 +188,18 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 		return nil, wrongType(name, ErrNotSandbox)
 	}
 
-	if existing != nil && (opts.Volume != "" || opts.Recreate) {
+	want, changed, err := m.pickVariant(opts.Variant, config.TypeSandbox, existing)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.checkImage(ctx, want); err != nil {
+		return nil, err
+	}
+	opts.Variant = want
+
+	if existing != nil && (opts.Volume != "" || opts.Recreate || changed) {
 		m.printf("Recreating sandbox: %s\n", container)
+		opts = opts.keep(*existing)
 		if err := m.Docker.Remove(ctx, container, true); err != nil {
 			return nil, err
 		}
@@ -174,18 +225,6 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	m.printf("Run commands with: safeclaw sandbox exec %s -- <command>\n", name)
 	m.printf("To remove: safeclaw sandbox rm -f %s\n", name)
 	return &Result{Name: name, Container: container}, nil
-}
-
-// checkImage returns ErrNoImage unless the safeclaw image exists.
-func (m *Manager) checkImage(ctx context.Context) error {
-	imageID, err := m.Docker.ImageID(ctx, config.ImageName)
-	if err != nil {
-		return err
-	}
-	if imageID == "" {
-		return ErrNoImage
-	}
-	return nil
 }
 
 // pickName returns the session name for a new one-off sandbox. A given name
@@ -235,9 +274,14 @@ func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, int
 	if opts.PidsLimit < 0 {
 		return nil, "", fmt.Errorf("invalid pids limit %d", opts.PidsLimit)
 	}
-	if err := m.checkImage(ctx); err != nil {
+	want, _, err := m.pickVariant(opts.Variant, config.TypeSandbox, nil)
+	if err != nil {
 		return nil, "", err
 	}
+	if err := m.checkImage(ctx, want); err != nil {
+		return nil, "", err
+	}
+	opts.Variant = want
 	name, err := m.pickName(ctx, opts.Name)
 	if err != nil {
 		return nil, "", err
@@ -261,7 +305,7 @@ func SandboxRunArgs(container string, opts SandboxOptions) ([]string, error) {
 		return nil, err
 	}
 	args = append(args, shared...)
-	return append(args, config.ImageName, "sleep", "infinity"), nil
+	return append(args, variant.Image(opts.Variant), "sleep", "infinity"), nil
 }
 
 // EphemeralRunArgs returns the `docker run` arguments that run cmd in a
@@ -280,7 +324,7 @@ func EphemeralRunArgs(container string, opts SandboxOptions, interactive, tty bo
 		return nil, err
 	}
 	args = append(args, shared...)
-	args = append(args, config.ImageName)
+	args = append(args, variant.Image(opts.Variant))
 	return append(args, cmd...), nil
 }
 
@@ -291,12 +335,15 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 	args := []string{
 		"--name", container,
 		"--label", config.LabelType + "=" + config.TypeSandbox,
+	}
+	args = append(args, variantArgs(opts.Variant)...)
+	args = append(args,
 		"--network", "none",
 		"--user", config.SandboxUser,
 		"--workdir", config.SandboxDir,
-		"--env", "HOME=" + config.SandboxDir,
+		"--env", "HOME="+config.SandboxDir,
 		"--env", "BASH_ENV=",
-		"--env", "PATH=" + sandboxPath,
+		"--env", "PATH="+sandboxPath,
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
 		"--read-only",
@@ -305,9 +352,9 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 		"--memory", opts.Memory,
 		"--pids-limit", strconv.Itoa(opts.PidsLimit),
 		"--cpus", opts.CPUs,
-	}
-	if opts.Volume != "" {
-		v, err := ReadOnlyVolume(opts.Volume)
+	)
+	for _, volume := range opts.volumes() {
+		v, err := ReadOnlyVolume(volume)
 		if err != nil {
 			return nil, err
 		}
@@ -321,8 +368,8 @@ func (m *Manager) createSandbox(ctx context.Context, container string, opts Sand
 	if err != nil {
 		return err
 	}
-	if opts.Volume != "" {
-		v, _ := ReadOnlyVolume(opts.Volume)
+	for _, volume := range opts.volumes() {
+		v, _ := ReadOnlyVolume(volume)
 		m.printf("Mounting volume read-only: %s\n", v)
 	}
 	_, err = m.Docker.Run(ctx, args...)
@@ -368,6 +415,7 @@ func (m *Manager) Get(ctx context.Context, name string) (*Session, error) {
 		Active:     c.State.Running,
 		Status:     c.State.Status,
 		Type:       TypeOf(*c),
+		Variant:    variantOf(*c),
 		AutoRemove: c.HostConfig.AutoRemove,
 	}, nil
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"errors"
 	"io"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -11,10 +12,16 @@ import (
 )
 
 func TestSandboxFlagsOptions(t *testing.T) {
-	f := sandboxFlags{session: "box", volume: "/in:/in", memory: "1g", pidsLimit: 256, cpus: "1"}
+	f := sandboxFlags{session: "box", volume: "/in:/in", variant: "base", memory: "2g", pidsLimit: 64, cpus: "0.5"}
 	none := func(string) bool { return false }
-	want := session.SandboxOptions{Name: "box", Volume: "/in:/in", Memory: "1g", PidsLimit: 256, CPUs: "1"}
-	if got := f.options(none); got != want {
+	// Unset limits are left for the defaults, or a recreated sandbox's own.
+	want := session.SandboxOptions{Name: "box", Volume: "/in:/in", Variant: "base"}
+	if got := f.options(none); !reflect.DeepEqual(got, want) {
+		t.Errorf("options = %+v, want %+v", got, want)
+	}
+	all := func(string) bool { return true }
+	want = session.SandboxOptions{Name: "box", Volume: "/in:/in", Variant: "base", Memory: "2g", PidsLimit: 64, CPUs: "0.5", Recreate: true}
+	if got := f.options(all); !reflect.DeepEqual(got, want) {
 		t.Errorf("options = %+v, want %+v", got, want)
 	}
 	for _, flag := range limitFlags {
@@ -76,6 +83,8 @@ func TestSandboxExecArgs(t *testing.T) {
 		{[]string{"-s", "job"}, []string{"box", "ls"}, "--session can only be used with --ephemeral"},
 		{[]string{"-v", "/in:/in"}, []string{"box", "ls"}, "--volume can only be used with --ephemeral"},
 		{[]string{"--cpus", "2"}, []string{"box", "ls"}, "--cpus can only be used with --ephemeral"},
+		{[]string{"--variant", "base"}, []string{"box", "ls"}, "--variant can only be used with --ephemeral"},
+		{[]string{"--ephemeral", "--variant", "base"}, []string{"ls"}, ""},
 		{[]string{"-i", "-t"}, []string{"box", "ls"}, ""},
 	}
 	for _, tc := range cases {
@@ -95,7 +104,7 @@ func TestSandboxExecArgs(t *testing.T) {
 
 func TestWriteSandboxes(t *testing.T) {
 	list := []session.Session{
-		{Name: "job", Status: "running", Volume: "-", Type: "sandbox", AutoRemove: true},
+		{Name: "job", Status: "running", Volume: "-", Type: "sandbox", Variant: "sandbox", AutoRemove: true},
 		{Name: "box", Status: "exited", Volume: "/in:/in", Type: "sandbox"},
 		{Name: "work", Status: "running", Volume: "-", Type: "session"},
 	}
@@ -103,9 +112,9 @@ func TestWriteSandboxes(t *testing.T) {
 	if err := writeSandboxes(&b, list); err != nil {
 		t.Fatal(err)
 	}
-	want := "SANDBOX   STATUS    ONE-OFF   VOLUME\n" +
-		"job       running   yes       -\n" +
-		"box       exited    -         /in:/in\n"
+	want := "SANDBOX   VARIANT   STATUS    ONE-OFF   VOLUME\n" +
+		"job       sandbox   running   yes       -\n" +
+		"box       -         exited    -         /in:/in\n"
 	if b.String() != want {
 		t.Errorf("sandbox ls =\n%s\nwant\n%s", b.String(), want)
 	}
@@ -114,10 +123,10 @@ func TestWriteSandboxes(t *testing.T) {
 	if err := writeSessions(&b, list); err != nil {
 		t.Fatal(err)
 	}
-	want = "SESSION   TYPE                STATUS    URL   VOLUME\n" +
-		"job       sandbox (one-off)   running   -     -\n" +
-		"box       sandbox             exited    -     /in:/in\n" +
-		"work      session             running   -     -\n"
+	want = "SESSION   TYPE                VARIANT   STATUS    URL   VOLUME\n" +
+		"job       sandbox (one-off)   sandbox   running   -     -\n" +
+		"box       sandbox             -         exited    -     /in:/in\n" +
+		"work      session             -         running   -     -\n"
 	if b.String() != want {
 		t.Errorf("ls =\n%s\nwant\n%s", b.String(), want)
 	}

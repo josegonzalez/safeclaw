@@ -42,6 +42,13 @@ const (
 	SandboxUser = "sandbox"
 	// SandboxDir is the sandbox user's home and working directory.
 	SandboxDir = "/sandbox"
+
+	// LabelVariant is the container and image label that records which
+	// image variant a container runs. Containers without it run the base
+	// image.
+	LabelVariant = "safeclaw.variant"
+	// BaseVariant names the base image wherever a variant is expected.
+	BaseVariant = "base"
 )
 
 // Dir returns the safeclaw config directory, honoring XDG_CONFIG_HOME.
@@ -52,6 +59,11 @@ func Dir() string {
 		base = filepath.Join(home, ".config")
 	}
 	return filepath.Join(base, "safeclaw")
+}
+
+// File returns the path of the optional config file.
+func File() string {
+	return filepath.Join(Dir(), "config.yaml")
 }
 
 // SecretsDir returns the directory holding one file per env var.

@@ -49,6 +49,7 @@ func NewRootCommand() *cobra.Command {
 		newRemoveCommand(),
 		newAttachCommand(),
 		newSandboxCommand(),
+		newVariantCommand(),
 		newTTYDWrapperCommand(),
 		newVersionCommand(),
 	)
@@ -88,4 +89,13 @@ func completeType(want string) cobra.CompletionFunc {
 		}
 		return names, cobra.ShellCompDirectiveNoFileComp
 	}
+}
+
+// completeVariants completes variant names, base included, for --variant.
+func completeVariants(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	set, err := loadVariants()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	return append([]string{config.BaseVariant}, set.Names()...), cobra.ShellCompDirectiveNoFileComp
 }

@@ -39,6 +39,16 @@
                 <input type="text" id="session-volume" name="volume" placeholder="~/myproject:/home/sclaw/myproject">
             </div>
             <div class="modal-field">
+                <label for="session-variant">image variant</label>
+                <select id="session-variant" name="variant">
+                    <option value="">default{{with .DefaultVariant}} ({{.}}){{end}}</option>
+                    {{- range .Variants}}
+                    <option value="{{.}}">{{.}}</option>
+                    {{- end}}
+                </select>
+                {{- if .VariantErr}}<p class="modal-hint">could not load variants: {{.VariantErr}}</p>{{end}}
+            </div>
+            <div class="modal-field">
                 <label for="session-query">initial query</label>
                 <input type="text" id="session-query" name="query" placeholder="Research topic X...">
             </div>

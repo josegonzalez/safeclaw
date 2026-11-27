@@ -21,9 +21,9 @@ Containers created from the upstream image don't contain the `safeclaw` binary, 
 
 `safeclaw run` (and the dashboard's create and start) all go through the same code path:
 
-1. Check the image exists and the Claude token is present (prompting for it only in `run`)
+1. Pick the [image variant](#image-variants) and check its image exists, then check the Claude token is present (prompting for it only in `run`)
 2. Reuse the container's existing port, or pick the lowest port no `safeclaw-*` container reserves and nothing on the host is listening on
-3. Create, start, or refresh the container. With `-v`, an existing container is recreated with the new mount. A running container has ttyd and tmux restarted so new env vars take effect
+3. Create, start, or refresh the container. With `-v`, or a `--variant` other than the container's, an existing container is recreated, keeping its port and whichever of its mount and variant were not given again. A running container has ttyd and tmux restarted so new env vars take effect
 4. Write `/home/sclaw/.env` from the secrets directory
 5. Configure git from the GitHub account if `GH_TOKEN` is set
 6. Start ttyd, and with `-q`, wait for Claude Code's input prompt before sending the query
@@ -41,7 +41,9 @@ A sandbox is created with none of what an interactive session gets: no secrets a
 - `--memory 1g`, `--pids-limit 256`, and `--cpus 1` by default, changeable with flags of the same name
 - `HOME=/sandbox`, an empty `BASH_ENV`, and a `PATH` without sclaw's `~/.local/bin`
 
-With `-v`, a host directory is mounted read-only, whatever options the spec carries. Rerunning `sandbox run` starts a stopped sandbox or leaves a running one alone, and `-v` or any limit flag recreates it.
+With `-v`, a host directory is mounted read-only, whatever options the spec carries. Rerunning `sandbox run` starts a stopped sandbox or leaves a running one alone, and `-v`, any limit flag, or a `--variant` other than the sandbox's recreates it. The new sandbox keeps whichever of the old one's mount, variant, and limits were not given again.
+
+Sandboxes run the `sandbox` [image variant](#image-variants) unless the config file or `--variant` says otherwise, so the document extraction tools are already installed and never need the network or root.
 
 The two types are kept apart. `safeclaw run`, the dashboard's start, and the API refuse a sandbox name, `safeclaw stop`, `rm`, and `attach` refuse sandboxes, and the `safeclaw sandbox` commands refuse interactive sessions. `safeclaw ls` lists both with a TYPE column, and `safeclaw sandbox ls` lists only sandboxes.
 
@@ -53,6 +55,19 @@ A one-off sandbox lives for exactly one job, so callers sharing the host need no
 - `safeclaw sandbox run --rm` creates a detached one-off sandbox for jobs with several steps (`docker cp`, then several `sandbox exec` calls). Progress goes to stderr and only its name to stdout, and `safeclaw sandbox stop` removes it
 
 `safeclaw sandbox ls` marks them in a ONE-OFF column, and `safeclaw ls` lists their type as `sandbox (one-off)`.
+
+## Image variants
+
+An image variant is the base `safeclaw` image with extra apt packages or `run` commands, tagged `safeclaw:NAME`. Variants come from two places:
+
+- built in: `sandbox` adds poppler-utils, tesseract-ocr and tesseract-ocr-eng, 7zip, and file
+- `~/.config/safeclaw/config.yaml` (honoring `XDG_CONFIG_HOME`), whose `variants` map adds variants or replaces a built-in of the same name, and whose `defaults` pick the variant each session type uses when none is given (`base` for sessions and `sandbox` for sandboxes unless set)
+
+The config file is decoded strictly, so unknown keys are errors. Names are lowercase and may not be `base`, which means the base image, or `latest`. Package names are checked, and `run` commands are one line each and run as root. The file is read whenever a variant is resolved, so the dashboard sees edits without a restart, and commands that don't resolve variants, like `ls`, `stop`, and `rm`, don't read it.
+
+Each variant is built from a generated Dockerfile (`safeclaw variant dockerfile NAME`) that starts `FROM` the image in its `BASE` build argument, the local `safeclaw` image by default, installs the packages and runs the commands as root, then switches back to `sclaw` and labels the image `safeclaw.variant=NAME`. `safeclaw build` builds the base image, then each `--variant` and every variant already present locally, so no variant is left on an older base. `safeclaw pull` does the same with the published images: the unmodified built-ins are pulled from `ghcr.io/josegonzalez/safeclaw:<version>-NAME` (`:NAME` for latest), and variants from the config file are built on the pulled base.
+
+Containers on a variant carry the `safeclaw.variant=NAME` label; containers without it run the base image. An existing container keeps its variant unless `--variant` names a different one, which recreates it. A missing variant image is an error naming the `pull` and `build` commands that fetch it, and after a build or pull, containers whose variant image changed or no longer exists are reported as stale.
 
 ## Authentication
 
@@ -80,4 +95,4 @@ We recommend creating a separate GitHub account for SafeClaw so you can scope it
 
 ## Image
 
-The image has two users: `sclaw`, who runs Claude Code and owns `/home/sclaw` (mode 700), and `sandbox`, the non-login user sandboxes run as. The Dockerfile is multi-stage. The first stage builds the `safeclaw` binary from the Go source; the second is the runtime image. The Dockerfile, `setup/`, and the Go source are embedded in the binary, so `safeclaw build` works from any directory. Tagged releases also publish a multi-arch image to `ghcr.io/josegonzalez/safeclaw`, which `safeclaw pull` fetches and tags locally as `safeclaw`.
+The image has two users: `sclaw`, who runs Claude Code and owns `/home/sclaw` (mode 700), and `sandbox`, the non-login user sandboxes run as. The Dockerfile is multi-stage. The first stage builds the `safeclaw` binary from the Go source; the second is the runtime image. The Dockerfile, `setup/`, and the Go source are embedded in the binary, so `safeclaw build` works from any directory. Tagged releases also publish a multi-arch image to `ghcr.io/josegonzalez/safeclaw`, which `safeclaw pull` fetches and tags locally as `safeclaw`, along with the built-in [variants](#image-variants), built on top of it.
