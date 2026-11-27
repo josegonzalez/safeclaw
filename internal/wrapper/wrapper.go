@@ -63,6 +63,12 @@ func EnsureSession(c Commander) error {
 		{"-f", "/dev/null", "new", "-d", "-s", s},
 		{"set", "-t", s, "status", "off"},
 		{"set", "-t", s, "mouse", "on"},
+		// Don't forward clipboard writes or passthrough sequences to
+		// attached clients. This only covers programs that leave these
+		// alone: code in the session runs as the server's user and can
+		// turn both back on, so `safeclaw attach` filters them on the host.
+		{"set", "-s", "set-clipboard", "off"},
+		{"set", "-g", "allow-passthrough", "off"},
 		// Env vars are loaded via BASH_ENV -> the env file.
 		{"send-keys", "-t", s, ClaudeCommand, "Enter"},
 	}

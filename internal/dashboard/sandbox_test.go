@@ -65,7 +65,7 @@ func TestSandboxStartAndInfoConflict(t *testing.T) {
 		t.Errorf("start: %d %s", rec.Code, rec.Body)
 	}
 	rec = do(h, "GET", "/sessions/box/info", nil, nil)
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "is a sandbox") || strings.Contains(rec.Body.String(), "tmux attach") {
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "is a sandbox") || strings.Contains(rec.Body.String(), "safeclaw attach") {
 		t.Errorf("info: %d %s", rec.Code, rec.Body)
 	}
 	// Stop and delete still work on sandboxes.

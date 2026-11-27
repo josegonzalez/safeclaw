@@ -40,7 +40,7 @@ Stop and delete need two clicks, and make the checks the CLI's `stop` and `rm` m
 | `GET /events` | SSE stream of `sessions` events |
 | `POST /sessions` | Create a session (`name`, `volume`, `variant`, `secrets` as `all`, `none`, or `only` with a `secret` field per name, `query`, `open_tab`). Errors return 422 and render in the dialog |
 | `GET /sessions/validate?name=` | Name hint shown while typing |
-| `GET /sessions/{name}/info` | Session info dialog with the `docker exec` attach command |
+| `GET /sessions/{name}/info` | Session info dialog with the `safeclaw attach` command |
 | `GET /sessions/{name}/actions` | Normal action button, used to revert a confirm |
 | `GET /sessions/{name}/terminal` | The session's terminal page |
 | `GET /sessions/{name}/terminal/ws` | WebSocket (subprotocol `tty`) proxied to the session's ttyd with its credential. Only the dashboard's own `Origin` is accepted; 404 for a session without a running, online terminal |

@@ -668,8 +668,10 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.render(w, http.StatusOK, "info", map[string]string{
-		"Name":    name,
-		"Command": fmt.Sprintf("docker exec -it %s tmux attach -t %s", config.ContainerName(name), config.TmuxSession),
+		"Name": name,
+		// Not a raw `docker exec ... tmux attach`, which would pass the
+		// session's clipboard writes and passthrough to the host terminal.
+		"Command": "safeclaw attach " + name,
 	})
 }
 
