@@ -174,14 +174,51 @@ func (m *Manager) netLock() (func(), error) {
 // removing it while another process waits on it would let two holders in.
 // The returned function releases it and is safe to call more than once.
 func lockFile(dir string) (func(), error) {
+	return lockPath(dir, ".lock", func(fd int) error {
+		return syscall.Flock(fd, syscall.LOCK_EX)
+	})
+}
+
+// lockRetry is how often lockFileCtx tries again for a held lock.
+const lockRetry = 25 * time.Millisecond
+
+// lockFileCtx takes an exclusive lock on dir/name, creating dir if needed,
+// like lockFile, but gives up with ctx's error once ctx is done, so a
+// holder that never lets go can't hold the caller past its deadline or
+// Ctrl-C. Like lockFile's, the lock file is never removed.
+func lockFileCtx(ctx context.Context, dir, name string) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return lockPath(dir, name, func(fd int) error {
+		t := time.NewTicker(lockRetry)
+		defer t.Stop()
+		for {
+			err := syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
+			if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EINTR) {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-t.C:
+			}
+		}
+	})
+}
+
+// lockPath opens dir/name, creating both if needed, and locks it with
+// lock. The returned function releases it and is safe to call more than
+// once.
+func lockPath(dir, name string, lock func(fd int) error) (func(), error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lock(int(f.Fd())); err != nil {
 		_ = f.Close()
 		return nil, fmt.Errorf("lock %s: %w", f.Name(), err)
 	}

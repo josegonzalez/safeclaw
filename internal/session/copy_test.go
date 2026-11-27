@@ -15,8 +15,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
 )
@@ -32,9 +34,10 @@ type copyFake struct {
 func newCopyManager(t *testing.T, f *copyFake) (*Manager, *dockertest.Runner) {
 	t.Helper()
 	w := &world{image: "img", containers: map[string]*fakeContainer{
-		"safeclaw-box":  {Running: true, Image: "img", Labels: sandboxLabels, NetworkMode: "none", Offline: true},
-		"safeclaw-off":  {Image: "img", Labels: sandboxLabels, NetworkMode: "none", Offline: true},
-		"safeclaw-chat": {Running: true, Image: "img"},
+		"safeclaw-box":   {Running: true, Image: "img", Labels: sandboxLabels, NetworkMode: "none", Offline: true},
+		"safeclaw-other": {Running: true, Image: "img", Labels: sandboxLabels, NetworkMode: "none", Offline: true},
+		"safeclaw-off":   {Image: "img", Labels: sandboxLabels, NetworkMode: "none", Offline: true},
+		"safeclaw-chat":  {Running: true, Image: "img"},
 	}}
 	m, r := newTestManager(t, w)
 	r.Handler = func(args []string, stdin string) ([]byte, error) {
@@ -187,6 +190,114 @@ func TestCopyInExecError(t *testing.T) {
 	}
 	if _, err := m.CopyIn(context.Background(), "box", []string{file}, ""); !errors.Is(err, failed) {
 		t.Errorf("err = %v, want the tar error", err)
+	}
+}
+
+// stalledCopy starts a CopyIn into sandbox box whose tar -x hangs until
+// the returned release is called, as when code in the sandbox stops it,
+// and waits until that copy holds the sandbox's copy lock. done gets the
+// stalled copy's error once it is released.
+func stalledCopy(t *testing.T, m *Manager, r *dockertest.Runner, file string) (release func(), done <-chan error) {
+	t.Helper()
+	entered := make(chan struct{})
+	gate := make(chan struct{})
+	var once sync.Once
+	inner := r.Handler
+	r.Handler = func(args []string, stdin string) ([]byte, error) {
+		if slices.Contains(args, "safeclaw-box") && slices.Contains(args, "-x") {
+			once.Do(func() {
+				close(entered)
+				<-gate
+			})
+		}
+		return inner(args, stdin)
+	}
+	errs := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, err := m.CopyIn(context.Background(), "box", []string{file}, "")
+		errs <- err
+	}()
+	var released sync.Once
+	release = func() { released.Do(func() { close(gate) }) }
+	t.Cleanup(func() {
+		release()
+		<-finished
+	})
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stalled copy never reached tar -x")
+	}
+	return release, errs
+}
+
+func TestCopyInOtherSandboxNotStalled(t *testing.T) {
+	file := writeFile(t, filepath.Join(t.TempDir(), "x.txt"), "x")
+	m, r := newCopyManager(t, &copyFake{})
+	stalledCopy(t, m, r, file)
+
+	type result struct {
+		paths []string
+		err   error
+	}
+	results := make(chan result, 1)
+	go func() {
+		paths, err := m.CopyIn(context.Background(), "other", []string{file}, "")
+		results <- result{paths, err}
+	}()
+	select {
+	case res := <-results:
+		if res.err != nil {
+			t.Fatalf("copy into another sandbox: %v", res.err)
+		}
+		if want := []string{"/sandbox/in/1-x.txt"}; !reflect.DeepEqual(res.paths, want) {
+			t.Errorf("paths = %v, want %v", res.paths, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a stalled copy into one sandbox held up a copy into another")
+	}
+}
+
+func TestCopyInSameSandboxHonorsContext(t *testing.T) {
+	file := writeFile(t, filepath.Join(t.TempDir(), "x.txt"), "x")
+	m, r := newCopyManager(t, &copyFake{})
+	release, done := stalledCopy(t, m, r, file)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errs := make(chan error, 1)
+	go func() {
+		_, err := m.CopyIn(ctx, "box", []string{file}, "")
+		errs <- err
+	}()
+	time.Sleep(3 * lockRetry)
+	cancel()
+	select {
+	case err := <-errs:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a copy waiting on the sandbox's lock ignored its context")
+	}
+	mkdirs := 0
+	for _, c := range r.Commands() {
+		if strings.Contains(c, "safeclaw-box") && strings.Contains(c, mkdirBin) {
+			mkdirs++
+		}
+	}
+	if mkdirs != 1 {
+		t.Errorf("the waiting copy ran execs without the lock: %d mkdirs in %v", mkdirs, r.Commands())
+	}
+
+	// Once the stalled copy ends, the lock is free for the next one.
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("stalled copy: %v", err)
+	}
+	if _, err := m.CopyIn(context.Background(), "box", []string{file}, ""); err != nil {
+		t.Errorf("copy after release: %v", err)
 	}
 }
 
