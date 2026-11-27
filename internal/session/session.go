@@ -164,6 +164,9 @@ type Manager struct {
 	// TTYDDir holds each session's ttyd credential. Defaults to
 	// config.TTYDDir().
 	TTYDDir string
+	// DashboardDir holds the token file of each running dashboard, which
+	// OpenTerminal looks for. Defaults to config.DashboardDir().
+	DashboardDir string
 	// Out receives progress messages. Defaults to io.Discard.
 	Out io.Writer
 	// Prompter is used for interactive runs.
@@ -192,13 +195,14 @@ type Manager struct {
 // NewManager returns a Manager using the real docker CLI and config paths.
 func NewManager(out io.Writer) *Manager {
 	return &Manager{
-		Docker:      docker.New(),
-		Secrets:     secrets.Open(config.SecretsDir(), config.SecretsLockPath(), os.Stderr),
-		SessionsDir: config.SessionsDir(),
-		NetworkDir:  config.NetworkDir(),
-		CopyDir:     config.CopyDir(),
-		TTYDDir:     config.TTYDDir(),
-		Out:         out,
+		Docker:       docker.New(),
+		Secrets:      secrets.Open(config.SecretsDir(), config.SecretsLockPath(), os.Stderr),
+		SessionsDir:  config.SessionsDir(),
+		NetworkDir:   config.NetworkDir(),
+		CopyDir:      config.CopyDir(),
+		TTYDDir:      config.TTYDDir(),
+		DashboardDir: config.DashboardDir(),
+		Out:          out,
 		LoadVariants: func() (*variant.Set, error) {
 			return variant.Load(config.File())
 		},
@@ -609,8 +613,8 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 
 	m.printf("\nTo stop: safeclaw stop %s\n", name)
 
-	if !opts.NoOpen {
-		_ = m.openBrowser(res.URL)
+	if !opts.NoOpen && !offline {
+		_ = m.OpenTerminal(ctx, name, res.URL)
 	}
 	return res, nil
 }

@@ -131,8 +131,11 @@ func TestTerminalsPublishedAwayFromCookieHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if term.Addr != "[::1]:7681" || term.Host != "localhost:7681" {
+	if term.Addr != "[::1]:7681" || term.Host != "localhost:7681" || term.Port != 7681 {
 		t.Errorf("terminal = %+v", term)
+	}
+	if want := "http://safeclaw:" + term.Credential.Password + "@localhost:7681"; term.URL() != want {
+		t.Errorf("terminal url = %q, want %q", term.URL(), want)
 	}
 	if old, err := m.Terminal(ctx, "old"); err != nil || old.Addr != "127.0.0.1:7690" || old.Host != "localhost:7690" {
 		t.Errorf("legacy terminal = %+v, %v", old, err)
@@ -147,9 +150,19 @@ func TestTerminalRefusesUnreachableSessions(t *testing.T) {
 		"safeclaw-nocred":  {Running: true, Port: 7683, HostIP: "::1", Image: "img"},
 	}}
 	m, _ := newTestManager(t, w)
-	for _, name := range []string{"missing", "stopped", "off", "box"} {
-		if _, err := m.Terminal(context.Background(), name); !errors.Is(err, ErrNoTerminal) {
+	for name, why := range map[string]string{
+		"missing": "it does not exist",
+		"stopped": "it is stopped; start it with `safeclaw run -s stopped`",
+		"off":     "it is offline; bring it back with `safeclaw net on off`",
+		"box":     "it is a sandbox",
+	} {
+		_, err := m.Terminal(context.Background(), name)
+		if !errors.Is(err, ErrNoTerminal) {
 			t.Errorf("%s: err = %v, want ErrNoTerminal", name, err)
+			continue
+		}
+		if want := `session "` + name + `" has no running web terminal: ` + why; err.Error() != want {
+			t.Errorf("%s: err = %q, want %q", name, err, want)
 		}
 	}
 	if _, err := m.Terminal(context.Background(), "nocred"); err == nil || errors.Is(err, ErrNoTerminal) {

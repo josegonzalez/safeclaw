@@ -60,6 +60,7 @@ func NewRootCommand() *cobra.Command {
 		newAuthCommand(),
 		newEnvCommand(),
 		newListCommand(),
+		newURLCommand(),
 		newStopCommand(),
 		newRemoveCommand(),
 		newAttachCommand(),
