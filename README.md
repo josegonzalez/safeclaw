@@ -85,9 +85,11 @@ safeclaw sandbox exec triage -- unzip -d /sandbox/out /sandbox/in/1-report.zip
 # Copy only the matching regular files back out, dropping links and directories
 safeclaw sandbox cp-out triage /sandbox/out ./results --only '*.txt'
 
-# Remove it along with its /sandbox volume
+# Remove it
 safeclaw sandbox rm -f triage
 ```
+
+`/sandbox` is a tmpfs of `--disk` bytes (default `1g`), so an extractor writing past it fails instead of filling the host's disk. Its files count toward `--memory` (default `2g`), so raise both together, and they are lost when the sandbox stops. See [sandbox disk](docs/architecture.md#sandbox-disk).
 
 A one-off sandbox lives for exactly one job, so jobs never share files, locks, or cleanup. Without `-s` it gets a random name, and a name that already exists is refused.
 
@@ -249,15 +251,15 @@ The choice is remembered for the session like its secrets, and changing it recre
 | `safeclaw attach NAME` | Attach to a session's tmux session in this terminal |
 | `safeclaw net off NAME` | Save a session's networks and disconnect it from them. `--owner` names the hold and `--reason` says why. |
 | `safeclaw net on NAME` | Release the hold for `--owner` (or the unnamed hold) and reconnect the session once none remain. `--force` releases every hold. |
-| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory read-only, `--variant` picks the image variant, `--memory`, `--pids-limit`, and `--cpus` set limits. |
+| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory read-only, `--variant` picks the image variant, `--memory`, `--pids-limit`, `--cpus`, and `--disk` (the size of `/sandbox`) set limits. |
 | `safeclaw sandbox run --rm [-s NAME]` | Create a one-off sandbox that is removed when it stops, and print its name |
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY, `--escape-controls` to escape control characters in its output) |
 | `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`. |
 | `safeclaw sandbox cp-in NAME FILE...` | Copy regular host files into a running sandbox as `N-name`, owned by the sandbox user, refusing links and other file types. `--to` picks a directory under `/sandbox` (default `/sandbox/in`). |
 | `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, sparse files, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given, `--max-size` (default `1g`) caps the total, and `--max-files` (default `1000`) caps the number of files. |
 | `safeclaw sandbox ls` | List sandboxes |
-| `safeclaw sandbox stop NAME` | Stop a sandbox |
-| `safeclaw sandbox rm NAME` | Delete a sandbox and its `/sandbox` volume |
+| `safeclaw sandbox stop NAME` | Stop a sandbox, emptying its `/sandbox` |
+| `safeclaw sandbox rm NAME` | Delete a sandbox |
 | `safeclaw variant ls` | List image variants, whether their images exist, and which session types default to them |
 | `safeclaw variant dockerfile NAME` | Print the Dockerfile that builds a variant |
 | `safeclaw completion SHELL` | Shell completions |

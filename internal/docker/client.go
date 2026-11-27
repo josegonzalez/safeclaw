@@ -76,6 +76,9 @@ type Container struct {
 		// IpcMode is the IPC namespace the container was created with, e.g.
 		// "private", "shareable", or "host".
 		IpcMode string `json:"IpcMode"`
+		// Tmpfs maps each --tmpfs mount point to its options, e.g.
+		// "rw,size=1073741824".
+		Tmpfs map[string]string `json:"Tmpfs"`
 	} `json:"HostConfig"`
 	NetworkSettings struct {
 		// Networks are the networks the container is connected to, by name.

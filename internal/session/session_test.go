@@ -32,6 +32,8 @@ type fakeContainer struct {
 	RunImage string
 	// Memory, NanoCPUs, and PidsLimit are the limits docker reports.
 	Memory, NanoCPUs, PidsLimit int64
+	// Tmpfs maps each tmpfs mount point to its options.
+	Tmpfs map[string]string
 	// AutoRemove is set for containers run with --rm.
 	AutoRemove bool
 	// ID is the container ID. Defaults to "id-" plus the name.
@@ -135,7 +137,7 @@ func (w *world) inspectJSON(names []string) []byte {
 			"Image":           c.Image,
 			"Config":          map[string]any{"Labels": c.Labels},
 			"State":           map[string]any{"Status": status, "Running": c.Running},
-			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode, "IpcMode": ipc},
+			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode, "IpcMode": ipc, "Tmpfs": c.Tmpfs},
 			"NetworkSettings": map[string]any{"Networks": nets},
 			"Mounts":          mounts,
 		})
@@ -176,6 +178,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		var mounts []string
 		var autoRemove bool
 		var memory, cpus, pids int64
+		tmpfs := map[string]string{}
 		ipc := ""
 		mode := ""
 		image := ""
@@ -213,6 +216,9 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 				cpus = int64(f * 1e9)
 			case "--pids-limit":
 				pids, _ = strconv.ParseInt(args[i+1], 10, 64)
+			case "--tmpfs":
+				dst, opts, _ := strings.Cut(args[i+1], ":")
+				tmpfs[dst] = opts
 			case "--network":
 				mode = args[i+1]
 			case "--ipc=host":
@@ -232,7 +238,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		}
 		w.runs++
 		w.containers[name] = &fakeContainer{Running: fail.err == nil, Port: port, HostIP: hostIP, Mounts: mounts, Image: id, RunImage: image, Labels: labels, AutoRemove: autoRemove,
-			Memory: memory, NanoCPUs: cpus, PidsLimit: pids, ID: fmt.Sprintf("id-%s-%d", name, w.runs), NetworkMode: mode, IpcMode: ipc, Offline: mode == "none"}
+			Memory: memory, NanoCPUs: cpus, PidsLimit: pids, Tmpfs: tmpfs, ID: fmt.Sprintf("id-%s-%d", name, w.runs), NetworkMode: mode, IpcMode: ipc, Offline: mode == "none"}
 		return []byte("id\n"), fail.err
 	case args[0] == "rm":
 		delete(w.containers, args[len(args)-1])

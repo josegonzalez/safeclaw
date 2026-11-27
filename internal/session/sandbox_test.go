@@ -19,7 +19,12 @@ var sandboxLabels = map[string]string{"safeclaw.type": "sandbox"}
 // variant.
 const sandboxRunPrefix = "run -d --name safeclaw-box --label safeclaw.type=sandbox --label safeclaw.variant=sandbox --network none --user sandbox --workdir /sandbox" +
 	" --env HOME=/sandbox --env BASH_ENV= --env PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" +
-	" --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m -v /sandbox"
+	" --cap-drop ALL --security-opt no-new-privileges --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m" +
+	" --tmpfs " + sandboxDirTmpfs
+
+// sandboxDirTmpfs is the default /sandbox tmpfs: 1g, owned by the sandbox
+// user.
+const sandboxDirTmpfs = "/sandbox:rw,nosuid,nodev,exec,size=1073741824,uid=2000,gid=2000,mode=0700"
 
 func TestEnsureSandboxCreates(t *testing.T) {
 	w := &world{image: "img", containers: map[string]*fakeContainer{}}
@@ -39,7 +44,7 @@ func TestEnsureSandboxCreates(t *testing.T) {
 	if !ok {
 		t.Fatal("no docker run")
 	}
-	want := sandboxRunPrefix + " --memory 1g --pids-limit 256 --cpus 1 safeclaw:sandbox sleep infinity"
+	want := sandboxRunPrefix + " --memory 2g --pids-limit 256 --cpus 1 safeclaw:sandbox sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -60,13 +65,13 @@ func TestEnsureSandboxLimitsAndVolume(t *testing.T) {
 	w := &world{image: "img", containers: map[string]*fakeContainer{}}
 	m, r := newTestManager(t, w)
 	_, err := m.EnsureSandbox(context.Background(), SandboxOptions{
-		Name: "box", Volume: "/in:/in:rw,z", Memory: "512m", PidsLimit: 64, CPUs: "0.5",
+		Name: "box", Volume: "/in:/in:rw,z", Memory: "512m", PidsLimit: 64, CPUs: "0.5", Disk: "256m",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	run, _ := r.Find("run ")
-	want := sandboxRunPrefix + " --memory 512m --pids-limit 64 --cpus 0.5 -v /in:/in:ro,z safeclaw:sandbox sleep infinity"
+	want := strings.Replace(sandboxRunPrefix, "size=1073741824,", "size=268435456,", 1) + " --memory 512m --pids-limit 64 --cpus 0.5 -v /in:/in:ro,z safeclaw:sandbox sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -107,6 +112,11 @@ func TestEnsureSandboxReuse(t *testing.T) {
 				if !ok || !strings.Contains(run.String(), "--label safeclaw.type=sandbox") {
 					t.Errorf("not recreated as a sandbox: %v", r.Commands())
 				}
+				// A sandbox without a /sandbox tmpfs, such as one made with
+				// a volume before there was --disk, gets the default size.
+				if !strings.Contains(run.String(), " --tmpfs "+sandboxDirTmpfs+" ") {
+					t.Errorf("recreated without the default /sandbox tmpfs: %q", run.String())
+				}
 			}
 		})
 	}
@@ -116,6 +126,7 @@ func TestEnsureSandboxErrors(t *testing.T) {
 	ctx := context.Background()
 	m, r := newTestManager(t, &world{image: "img", containers: map[string]*fakeContainer{
 		"safeclaw-work": {Running: true, Port: 7681, Image: "img"},
+		"safeclaw-box":  {Running: true, Image: "img", Labels: sandboxLabels},
 	}})
 	if _, err := m.EnsureSandbox(ctx, SandboxOptions{}); !errors.Is(err, ErrSandboxName) {
 		t.Errorf("err = %v, want ErrSandboxName", err)
@@ -128,6 +139,15 @@ func TestEnsureSandboxErrors(t *testing.T) {
 	}
 	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: "box", PidsLimit: -1}); err == nil {
 		t.Error("negative pids limit accepted")
+	}
+	// A tmpfs of size 0 has no limit, so 0 is refused like a bad size, and
+	// before an existing sandbox is removed to recreate it.
+	for _, disk := range []string{"0", "0g", "1.5g", "-1g", "big"} {
+		for _, opts := range []SandboxOptions{{Name: "box", Disk: disk, Recreate: true}, {Remove: true, Disk: disk}} {
+			if _, err := m.EnsureSandbox(ctx, opts); err == nil {
+				t.Errorf("disk %q accepted", disk)
+			}
+		}
 	}
 	if hasCall(r, "rm ") || hasCall(r, "run ") {
 		t.Errorf("should not touch containers: %v", r.Commands())
@@ -243,7 +263,7 @@ func TestEnsureSandboxRemove(t *testing.T) {
 	}
 	run, _ := r.Find("run ")
 	want := strings.Replace(sandboxRunPrefix, "run -d --name safeclaw-box", "run -d --rm --name safeclaw-job", 1) +
-		" --memory 1g --pids-limit 256 --cpus 1 safeclaw:sandbox sleep infinity"
+		" --memory 2g --pids-limit 256 --cpus 1 safeclaw:sandbox sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -334,7 +354,7 @@ func TestSandboxCommand(t *testing.T) {
 func TestEphemeralRunArgs(t *testing.T) {
 	isolation := strings.TrimPrefix(sandboxRunPrefix, "run -d ")
 	base := strings.Replace(isolation, " --label safeclaw.variant=sandbox", "", 1)
-	limits := " --memory 1g --pids-limit 256 --cpus 1"
+	limits := " --memory 2g --pids-limit 256 --cpus 1"
 	wrapped := `/bin/sh -c umask 022; exec "$@" sh pdftotext - -`
 	sb := SandboxOptions{Variant: "sandbox"}
 	cases := []struct {
@@ -345,8 +365,8 @@ func TestEphemeralRunArgs(t *testing.T) {
 		{false, false, sb, "--rm --init " + isolation + limits + " safeclaw:sandbox " + wrapped},
 		{true, false, sb, "--rm --init -i " + isolation + limits + " safeclaw:sandbox " + wrapped},
 		{true, true, sb, "--rm --init -i -t " + isolation + limits + " safeclaw:sandbox " + wrapped},
-		{false, false, SandboxOptions{Variant: "sandbox", Volume: "/in:/in:rw", Memory: "2g", PidsLimit: 8, CPUs: "2"},
-			"--rm --init " + isolation + " --memory 2g --pids-limit 8 --cpus 2 -v /in:/in:ro safeclaw:sandbox " + wrapped},
+		{false, false, SandboxOptions{Variant: "sandbox", Volume: "/in:/in:rw", Memory: "4g", PidsLimit: 8, CPUs: "2", Disk: "2g"},
+			"--rm --init " + strings.Replace(isolation, "size=1073741824,", "size=2147483648,", 1) + " --memory 4g --pids-limit 8 --cpus 2 -v /in:/in:ro safeclaw:sandbox " + wrapped},
 		// Already resolved: empty is the base image.
 		{false, false, SandboxOptions{}, "--rm --init " + base + limits + " safeclaw " + wrapped},
 		{false, false, SandboxOptions{Variant: "base"}, "--rm --init " + base + limits + " safeclaw " + wrapped},
@@ -362,6 +382,9 @@ func TestEphemeralRunArgs(t *testing.T) {
 	}
 	if _, err := EphemeralRunArgs("safeclaw-box", SandboxOptions{Volume: "/in"}, false, false, []string{"ls"}); err == nil {
 		t.Error("invalid volume accepted")
+	}
+	if _, err := EphemeralRunArgs("safeclaw-box", SandboxOptions{Disk: "0"}, false, false, []string{"ls"}); err == nil {
+		t.Error("zero disk accepted")
 	}
 }
 
@@ -412,6 +435,9 @@ func TestPrepareEphemeralErrors(t *testing.T) {
 	}
 	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{PidsLimit: -1}, false, false, []string{"ls"}); err == nil {
 		t.Error("negative pids limit accepted")
+	}
+	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{Disk: "0"}, false, false, []string{"ls"}); err == nil {
+		t.Error("zero disk accepted")
 	}
 	m, _ = newTestManager(t, &world{containers: map[string]*fakeContainer{}})
 	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{}, false, false, []string{"ls"}); !errors.Is(err, ErrNoImage) {

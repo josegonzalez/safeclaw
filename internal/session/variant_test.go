@@ -128,7 +128,8 @@ func TestEnsureSandboxRecreateKeeps(t *testing.T) {
 	existing := func() *world {
 		return &world{images: map[string]string{"safeclaw": "base-id", "safeclaw:sandbox": "sb-id"}, containers: map[string]*fakeContainer{
 			"safeclaw-box": {Running: true, Image: "sb-id", Labels: map[string]string{"safeclaw.type": "sandbox", "safeclaw.variant": "sandbox"},
-				Mounts: []string{"/sandbox", "/in:/in:ro"}, Memory: 2 << 30, NanoCPUs: 500_000_000, PidsLimit: 64},
+				Mounts: []string{"/in:/in:ro"}, Memory: 2 << 30, NanoCPUs: 500_000_000, PidsLimit: 64,
+				Tmpfs: map[string]string{"/tmp": "rw,nosuid,nodev,size=256m", "/sandbox": "rw,nosuid,nodev,exec,size=536870912,uid=2000,gid=2000,mode=0700"}},
 		}}
 	}
 	cases := []struct {
@@ -141,7 +142,9 @@ func TestEnsureSandboxRecreateKeeps(t *testing.T) {
 		{"volume", SandboxOptions{Name: "box", Volume: "/new:/new"},
 			[]string{"--label safeclaw.variant=sandbox ", " --memory 2147483648 --pids-limit 64 --cpus 0.5 -v /new:/new:ro safeclaw:sandbox sleep infinity"}},
 		{"limit", SandboxOptions{Name: "box", Memory: "4g", Recreate: true},
-			[]string{"--label safeclaw.variant=sandbox ", " --memory 4g --pids-limit 64 --cpus 0.5 -v /in:/in:ro safeclaw:sandbox sleep infinity"}},
+			[]string{"--label safeclaw.variant=sandbox ", "size=536870912,", " --memory 4g --pids-limit 64 --cpus 0.5 -v /in:/in:ro safeclaw:sandbox sleep infinity"}},
+		{"disk", SandboxOptions{Name: "box", Disk: "2g", Recreate: true},
+			[]string{"size=2147483648,", " --memory 2147483648 --pids-limit 64 --cpus 0.5 -v /in:/in:ro safeclaw:sandbox sleep infinity"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

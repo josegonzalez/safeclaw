@@ -16,11 +16,21 @@ import (
 
 // Sandbox resource limit defaults.
 const (
-	DefaultSandboxMemory    = "1g"
+	// DefaultSandboxMemory leaves room for a full /sandbox and /tmp, whose
+	// tmpfs pages count toward the memory limit.
+	DefaultSandboxMemory    = "2g"
 	DefaultSandboxPidsLimit = 256
 	DefaultSandboxCPUs      = "1"
+	// DefaultSandboxDisk is the size of the /sandbox tmpfs.
+	DefaultSandboxDisk = "1g"
 	// sandboxTmpfs bounds the scratch space under /tmp.
 	sandboxTmpfs = "/tmp:rw,nosuid,nodev,size=256m"
+	// sandboxUID is the sandbox user's uid in the image, which owns the
+	// /sandbox tmpfs.
+	sandboxUID = 2000
+	// sandboxDirOptions are the /sandbox tmpfs options other than its size.
+	// exec keeps what a docker volume allows.
+	sandboxDirOptions = "rw,nosuid,nodev,exec"
 	// sandboxPath leaves out sclaw's ~/.local/bin, which the sandbox user
 	// cannot read anyway.
 	sandboxPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -94,13 +104,17 @@ type SandboxOptions struct {
 	// CPUs is docker's --cpus value. Empty keeps a recreated sandbox's
 	// limit, or uses DefaultSandboxCPUs.
 	CPUs string
+	// Disk is the size of /sandbox, a tmpfs, with an optional k, m, g, or t
+	// suffix. Empty keeps a recreated sandbox's size, or uses
+	// DefaultSandboxDisk.
+	Disk string
 	// Recreate removes an existing sandbox first, e.g. because its limits
 	// changed. A recreated sandbox keeps the mount, variant, and limits
 	// that are not given again.
 	Recreate bool
-	// Remove makes a one-off sandbox: docker removes it, with its /sandbox
-	// volume, when it stops. Name is optional, a random one is picked
-	// without it, and an existing container with the name is refused.
+	// Remove makes a one-off sandbox: docker removes it when it stops. Name
+	// is optional, a random one is picked without it, and an existing
+	// container with the name is refused.
 	Remove bool
 
 	// kept are the bind mounts carried over from a recreated sandbox.
@@ -121,7 +135,46 @@ func (o SandboxOptions) keep(c docker.Container) SandboxOptions {
 	if o.CPUs == "" && c.HostConfig.NanoCpus > 0 {
 		o.CPUs = strconv.FormatFloat(float64(c.HostConfig.NanoCpus)/1e9, 'f', -1, 64)
 	}
+	if o.Disk == "" {
+		o.Disk = tmpfsSize(c.HostConfig.Tmpfs[config.SandboxDir])
+	}
 	return o
+}
+
+// tmpfsSize returns the size= value of tmpfs mount options, or "".
+func tmpfsSize(options string) string {
+	for _, o := range strings.Split(options, ",") {
+		if v, ok := strings.CutPrefix(o, "size="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// validate checks the limits that docker would not refuse itself.
+func (o SandboxOptions) validate() error {
+	if o.PidsLimit < 0 {
+		return fmt.Errorf("invalid pids limit %d", o.PidsLimit)
+	}
+	if o.Disk != "" {
+		if _, err := diskBytes(o.Disk); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// diskBytes parses a /sandbox size. Zero is refused: a tmpfs of size 0 has
+// no limit at all.
+func diskBytes(s string) (int64, error) {
+	n, err := ParseSize(s)
+	if err != nil {
+		return 0, fmt.Errorf("disk: %w", err)
+	}
+	if n == 0 {
+		return 0, fmt.Errorf("invalid disk size %q: must be more than 0", s)
+	}
+	return n, nil
 }
 
 // volumes returns the bind mounts to give the sandbox.
@@ -142,6 +195,9 @@ func (o SandboxOptions) withDefaults() SandboxOptions {
 	if o.CPUs == "" {
 		o.CPUs = DefaultSandboxCPUs
 	}
+	if o.Disk == "" {
+		o.Disk = DefaultSandboxDisk
+	}
 	return o
 }
 
@@ -161,8 +217,8 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	if opts.Name == "" && !opts.Remove {
 		return nil, ErrSandboxName
 	}
-	if opts.PidsLimit < 0 {
-		return nil, fmt.Errorf("invalid pids limit %d", opts.PidsLimit)
+	if err := opts.validate(); err != nil {
+		return nil, err
 	}
 	if opts.Remove {
 		want, _, err := m.pickVariant(opts.Variant, config.TypeSandbox, nil)
@@ -285,8 +341,8 @@ func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, int
 	if len(cmd) == 0 {
 		return nil, "", ErrNoCommand
 	}
-	if opts.PidsLimit < 0 {
-		return nil, "", fmt.Errorf("invalid pids limit %d", opts.PidsLimit)
+	if err := opts.validate(); err != nil {
+		return nil, "", err
 	}
 	want, _, err := m.pickVariant(opts.Variant, config.TypeSandbox, nil)
 	if err != nil {
@@ -344,9 +400,15 @@ func EphemeralRunArgs(container string, opts SandboxOptions, interactive, tty bo
 }
 
 // sandboxArgs returns the `docker run` flags every sandbox gets: its name,
-// label, isolation, limits, and optional read-only volume.
+// label, isolation, limits, and optional read-only volume. /sandbox is a
+// tmpfs of opts.Disk bytes owned by the sandbox user, since docker volumes
+// can't be size-limited on most storage drivers.
 func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 	opts = opts.withDefaults()
+	disk, err := diskBytes(opts.Disk)
+	if err != nil {
+		return nil, err
+	}
 	args := []string{
 		"--name", container,
 		"--label", config.LabelType + "=" + config.TypeSandbox,
@@ -363,7 +425,7 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 		"--security-opt", "no-new-privileges",
 		"--read-only",
 		"--tmpfs", sandboxTmpfs,
-		"-v", config.SandboxDir,
+		"--tmpfs", fmt.Sprintf("%s:%s,size=%d,uid=%d,gid=%d,mode=0700", config.SandboxDir, sandboxDirOptions, disk, sandboxUID, sandboxUID),
 		"--memory", opts.Memory,
 		"--pids-limit", strconv.Itoa(opts.PidsLimit),
 		"--cpus", opts.CPUs,
