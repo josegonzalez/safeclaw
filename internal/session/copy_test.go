@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -369,6 +370,43 @@ func TestCopyOutRefusesStreams(t *testing.T) {
 		if got := dirContents(t, host); len(got) != 0 {
 			t.Errorf("%s: left %v in the host dir", tc.name, got)
 		}
+	}
+}
+
+// TestExtractTopHugeSize checks that a declared size near math.MaxInt64, as
+// GNU tar writes for a sparse file in base-256, is refused by the size limit
+// instead of wrapping the running total.
+func TestExtractTopHugeSize(t *testing.T) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	if err := tw.WriteHeader(&tar.Header{Name: "./a.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1, Format: tar.FormatGNU}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	hdrAt := buf.Len()
+	if err := tw.WriteHeader(&tar.Header{Name: "./b.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: math.MaxInt64, Format: tar.FormatGNU}); err != nil {
+		t.Fatal(err)
+	}
+	wantField := []byte{0x80, 0, 0, 0, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+	if got := buf.Bytes()[hdrAt+124 : hdrAt+136]; !bytes.Equal(got, wantField) {
+		t.Fatalf("size field = % x, want % x", got, wantField)
+	}
+	if _, err := tw.Write(make([]byte, 65536)); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	_, err := extractTop(bytes.NewReader(buf.Bytes()), dir, []string{"*"}, 1024)
+	if !errors.Is(err, ErrTooLarge) {
+		t.Errorf("err = %v, want %v", err, ErrTooLarge)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "b.txt")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("b.txt was created: %v", err)
 	}
 }
 
