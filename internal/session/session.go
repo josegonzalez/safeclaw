@@ -378,9 +378,23 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	}
 	// A held session stays offline even if something reconnected it.
 	offline := existing != nil && (Offline(*existing) || len(m.holdsFor(name, *existing)) > 0)
+	// restore recreates the removed container if its replacement can't be
+	// created, so a failed recreate never leaves the session without its
+	// container and the secret set recorded in its label.
+	var restore func() error
 	if existing != nil && (opts.Volume != "" || changed || secretsChanged) {
 		if offline {
 			return nil, fmt.Errorf("session %q %w: run `safeclaw net on %s` before changing its volume, variant, or secrets", name, ErrOffline, name)
+		}
+		oldVolumes := existing.BindSpecs(config.ProjectsMount)
+		if opts.Volume == "" {
+			volumes = oldVolumes
+		}
+		// Check every volume before anything is removed.
+		for _, v := range volumes {
+			if _, err := ExpandVolume(v); err != nil {
+				return nil, err
+			}
 		}
 		switch {
 		case opts.Volume != "":
@@ -390,13 +404,26 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		default:
 			m.printf("Secrets changed to %s. Removing existing container...\n", set)
 		}
-		if opts.Volume == "" {
-			volumes = existing.BindSpecs(config.ProjectsMount)
-		}
+		oldVariant, oldSet := variantOf(*existing), secretsOf(*existing)
 		if err := m.Docker.Remove(ctx, container, true); err != nil {
 			return nil, err
 		}
 		existing = nil
+		restore = func() error {
+			m.printf("Restoring the previous container: %s\n", container)
+			// A failed start leaves the new container behind, created but
+			// not running.
+			c, err := m.Docker.InspectOne(ctx, container)
+			if err != nil {
+				return err
+			}
+			if c != nil {
+				if err := m.Docker.Remove(ctx, container, true); err != nil {
+					return err
+				}
+			}
+			return m.create(ctx, name, container, port, oldVariant, oldSet, oldVolumes)
+		}
 	}
 
 	if port == 0 {
@@ -425,8 +452,16 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			}
 		}
 	default:
+		if restore == nil && opts.Secrets == nil && set.All() && m.hasHistory(name) {
+			m.printf("Warning: session %s has history from an earlier container, but no secret selection is remembered, so it receives every secret. Use --secrets or --no-secrets to limit it\n", name)
+		}
 		m.printf("Creating container: %s\n", container)
 		if err := m.create(ctx, name, container, port, want, set, volumes); err != nil {
+			if restore != nil {
+				if rerr := restore(); rerr != nil {
+					return nil, fmt.Errorf("%w (restoring the previous container also failed: %w)", err, rerr)
+				}
+			}
 			return nil, err
 		}
 		// Any saved state belonged to an earlier container.
@@ -527,6 +562,13 @@ func (m *Manager) allocatePort(ctx context.Context) (int, error) {
 		}
 	}
 	return 0, errors.New("no free port available")
+}
+
+// hasHistory reports whether the session's history directory exists, which
+// means a container of that name existed before.
+func (m *Manager) hasHistory(name string) bool {
+	_, err := os.Stat(filepath.Join(m.SessionsDir, name))
+	return err == nil
 }
 
 func (m *Manager) create(ctx context.Context, name, container string, port int, variantName string, set SecretSet, volumes []string) error {

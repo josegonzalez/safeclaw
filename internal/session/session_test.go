@@ -66,6 +66,15 @@ type world struct {
 	attachOnStart bool
 	// runs counts docker run calls, to give each container a new ID.
 	runs int
+	// runErrs fail the next docker run calls, one each, in order. A run
+	// failing with leaveCreated leaves a stopped container behind, like a
+	// failed start.
+	runErrs []runErr
+}
+
+type runErr struct {
+	err          error
+	leaveCreated bool
 }
 
 func (w *world) inspectJSON(names []string) []byte {
@@ -184,10 +193,17 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		if w.images != nil {
 			id = w.images[image]
 		}
+		var fail runErr
+		if len(w.runErrs) > 0 {
+			fail, w.runErrs = w.runErrs[0], w.runErrs[1:]
+			if fail.err != nil && !fail.leaveCreated {
+				return nil, fail.err
+			}
+		}
 		w.runs++
-		w.containers[name] = &fakeContainer{Running: true, Port: port, Mounts: mounts, Image: id, RunImage: image, Labels: labels, AutoRemove: autoRemove,
+		w.containers[name] = &fakeContainer{Running: fail.err == nil, Port: port, Mounts: mounts, Image: id, RunImage: image, Labels: labels, AutoRemove: autoRemove,
 			Memory: memory, NanoCPUs: cpus, PidsLimit: pids, ID: fmt.Sprintf("id-%s-%d", name, w.runs), NetworkMode: mode, Offline: mode == "none"}
-		return []byte("id\n"), nil
+		return []byte("id\n"), fail.err
 	case args[0] == "rm":
 		delete(w.containers, args[len(args)-1])
 	case args[0] == "start":

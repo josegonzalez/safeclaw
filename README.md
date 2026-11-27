@@ -203,7 +203,7 @@ safeclaw run -s offline --no-secrets                      # none
 safeclaw run -s chat --all-secrets                        # back to every secret
 ```
 
-The choice is remembered for the session, so rerunning `safeclaw run -s chat` or starting it from the dashboard keeps it. Giving a different set recreates the container, keeping its port, mounts, and variant. Listed secrets must exist. A session that does not receive `CLAUDE_CODE_OAUTH_TOKEN` starts Claude Code logged out, and one that does not receive `GH_TOKEN` gets no git configuration. Sandboxes never receive secrets.
+The choice is remembered for the session, so rerunning `safeclaw run -s chat` or starting it from the dashboard keeps it. It is kept with the container, so give it again after `safeclaw rm`. Giving a different set recreates the container, keeping its port, mounts, and variant. Listed secrets must exist. A session that does not receive `CLAUDE_CODE_OAUTH_TOKEN` starts Claude Code logged out, and one that does not receive `GH_TOKEN` gets no git configuration. Sandboxes never receive secrets.
 
 ## Commands
 
