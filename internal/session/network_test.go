@@ -326,3 +326,140 @@ func TestListNetwork(t *testing.T) {
 		}
 	}
 }
+
+func twoNetContainer() *fakeContainer {
+	return &fakeContainer{Running: true, Port: 7681, Image: "img", ID: "c1", Nets: map[string]docker.Endpoint{"bridge": {}, "work": {}}}
+}
+
+func TestNetOffRetriesFailedDisconnect(t *testing.T) {
+	c := twoNetContainer()
+	w := netWorld(c)
+	w.failDisconnect = map[string]int{"work": 1}
+	m, _ := newTestManager(t, w)
+	res, err := m.NetOff(context.Background(), "n", NetOffOptions{Owner: "a"})
+	if err != nil || !res.Offline || len(c.Nets) != 0 {
+		t.Errorf("result = %+v, %v, nets %v", res, err, c.Nets)
+	}
+}
+
+func TestNetOffPartialFailureKeepsHold(t *testing.T) {
+	ctx := context.Background()
+	c := twoNetContainer()
+	w := netWorld(c)
+	w.failDisconnect = map[string]int{"work": 2}
+	m, r := newTestManager(t, w)
+	var out strings.Builder
+	m.Out = &out
+
+	res, err := m.NetOff(ctx, "n", NetOffOptions{Owner: "a"})
+	if !errors.Is(err, ErrStillOnline) || !strings.Contains(err.Error(), "attached to work") || !strings.Contains(err.Error(), "safeclaw net off n") {
+		t.Fatalf("err = %v, want ErrStillOnline naming work", err)
+	}
+	if res == nil || res.Offline || len(res.Holds) != 1 {
+		t.Errorf("result = %+v", res)
+	}
+	if !strings.Contains(out.String(), "held offline by a, but is still attached to work") {
+		t.Errorf("output = %q", out.String())
+	}
+	if _, ok := c.Nets["bridge"]; ok {
+		t.Error("bridge not disconnected after work failed")
+	}
+	if _, ok := c.Nets["work"]; !ok {
+		t.Fatal("work disconnected despite the failures")
+	}
+	if hasCall(r, "network connect") {
+		t.Error("rolled back to online")
+	}
+	st, _ := m.readState("n")
+	if st == nil || len(st.Holds) != 1 || len(st.Networks) != 2 {
+		t.Errorf("state = %+v, want the hold and both networks", st)
+	}
+	s, _ := m.Get(ctx, "n")
+	if s.Network != NetOnline || len(s.Holds) != 1 {
+		t.Errorf("Get = %+v, want online with the hold", s)
+	}
+
+	// A held session can't be recreated while it is still attached.
+	if _, err := m.Ensure(ctx, Options{Name: "n", Volume: "/tmp:/tmp", NoOpen: true}); !errors.Is(err, ErrOffline) {
+		t.Errorf("recreate err = %v, want ErrOffline", err)
+	}
+
+	// Running it again finishes the disconnect.
+	ensured, err := m.Ensure(ctx, Options{Name: "n", NoOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ensured.Offline || len(c.Nets) != 0 {
+		t.Errorf("Ensure = %+v, nets %v", ensured, c.Nets)
+	}
+	if hasCall(r, "rm ") {
+		t.Error("held session removed")
+	}
+	// Both networks are restored once the hold is released.
+	on, err := m.NetOn(ctx, "n", NetOnOptions{Owner: "a"})
+	if err != nil || on.Offline || !slices.Equal(on.Networks, []string{"bridge", "work"}) {
+		t.Errorf("NetOn = %+v, %v", on, err)
+	}
+}
+
+func TestEnsureRunningHeldReconnected(t *testing.T) {
+	ctx := context.Background()
+	c := &fakeContainer{Running: true, Port: 7681, Image: "img"}
+	m, r := newTestManager(t, netWorld(c))
+	if _, err := m.NetOff(ctx, "n", NetOffOptions{Owner: "a"}); err != nil {
+		t.Fatal(err)
+	}
+	// Something reconnected it behind safeclaw's back.
+	c.networks()["bridge"] = docker.Endpoint{}
+	res, err := m.Ensure(ctx, Options{Name: "n", NoOpen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Offline || len(c.Nets) != 0 {
+		t.Errorf("result = %+v, nets %v", res, c.Nets)
+	}
+	cmds := r.Commands()
+	if n := slices.Index(cmds, "network disconnect bridge safeclaw-n"); n < 0 || !slices.Contains(cmds[n+1:], "network disconnect bridge safeclaw-n") {
+		t.Errorf("not disconnected again: %v", cmds)
+	}
+}
+
+func TestRemoveStale(t *testing.T) {
+	ctx := context.Background()
+	c := twoNetContainer()
+	w := netWorld(c)
+	w.failDisconnect = map[string]int{"work": 2}
+	m, r := newTestManager(t, w)
+	_, _ = m.NetOff(ctx, "n", NetOffOptions{Owner: "a"})
+	listed, err := m.Docker.InspectOne(ctx, "safeclaw-n")
+	if err != nil || listed == nil {
+		t.Fatal(listed, err)
+	}
+
+	// Held but still attached.
+	removed, err := m.RemoveStale(ctx, *listed)
+	if removed || !errors.Is(err, ErrOffline) || !strings.Contains(err.Error(), "by a") {
+		t.Errorf("held: removed %v, err %v", removed, err)
+	}
+	if hasCall(r, "rm ") {
+		t.Error("held session removed")
+	}
+
+	// Replaced since it was listed.
+	w.containers["safeclaw-n"] = &fakeContainer{Running: true, Image: "img", ID: "c2"}
+	if removed, err := m.RemoveStale(ctx, *listed); removed || err != nil {
+		t.Errorf("replaced: removed %v, err %v", removed, err)
+	}
+
+	// Online, with state left by the earlier container.
+	listed, _ = m.Docker.InspectOne(ctx, "safeclaw-n")
+	if removed, err := m.RemoveStale(ctx, *listed); !removed || err != nil {
+		t.Errorf("online: removed %v, err %v", removed, err)
+	}
+	if !hasCall(r, "rm -v -f safeclaw-n") {
+		t.Errorf("calls = %v", r.Commands())
+	}
+	if _, err := os.Stat(m.statePath("n")); !os.IsNotExist(err) {
+		t.Errorf("state kept: %v", err)
+	}
+}

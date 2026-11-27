@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,6 +15,7 @@ import (
 
 	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
+	"github.com/josegonzalez/safeclaw/internal/session"
 	"github.com/josegonzalez/safeclaw/internal/variant"
 )
 
@@ -54,9 +58,29 @@ func (f *fakeImages) handle(args []string, _ string) ([]byte, error) {
 		}
 		return []byte("safeclaw-a\nsafeclaw-b\n"), nil
 	case args[0] == "container" && args[1] == "inspect":
-		return []byte(f.containers), nil
+		return f.inspect(args[2:])
 	}
 	return nil, nil
+}
+
+// inspect returns the inspect JSON of the named containers.
+func (f *fakeImages) inspect(names []string) ([]byte, error) {
+	var all []map[string]any
+	if f.containers != "" {
+		if err := json.Unmarshal([]byte(f.containers), &all); err != nil {
+			return nil, err
+		}
+	}
+	var out []map[string]any
+	for _, c := range all {
+		if slices.Contains(names, strings.TrimPrefix(fmt.Sprint(c["Name"]), "/")) {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return nil, dockertest.NotFound(names)
+	}
+	return json.Marshal(out)
 }
 
 // withFakes swaps in a fake docker and a parsed config for one test.
@@ -70,9 +94,11 @@ func withFakes(t *testing.T, f *fakeImages, config string) *dockertest.Runner {
 	if err != nil {
 		t.Fatal(err)
 	}
-	origDocker, origLoad := newDocker, loadVariants
-	t.Cleanup(func() { newDocker, loadVariants = origDocker, origLoad })
+	origDocker, origManager, origLoad := newDocker, newManager, loadVariants
+	t.Cleanup(func() { newDocker, newManager, loadVariants = origDocker, origManager, origLoad })
 	newDocker = func() *docker.Client { return r.Client() }
+	netDir := t.TempDir()
+	newManager = func() *session.Manager { return &session.Manager{NetworkDir: netDir} }
 	loadVariants = func() (*variant.Set, error) { return set, nil }
 	return r
 }
@@ -272,5 +298,47 @@ func TestReportStaleSkipsOffline(t *testing.T) {
 	}
 	if _, ok := r.Find("rm -v -f safeclaw-b"); !ok {
 		t.Error("online stale session not removed")
+	}
+}
+
+func TestReportStaleSkipsHeld(t *testing.T) {
+	// b is held offline but still attached, as after a failed disconnect.
+	containers := `[
+		{"Id": "a1", "Name": "/safeclaw-a", "Image": "old", "Config": {"Labels": {}}, "HostConfig": {"NetworkMode": "bridge"}, "NetworkSettings": {"Networks": {"bridge": {}}}},
+		{"Id": "b1", "Name": "/safeclaw-b", "Image": "old", "Config": {"Labels": {}}, "HostConfig": {"NetworkMode": "bridge"}, "NetworkSettings": {"Networks": {"bridge": {}}}}
+	]`
+	f := &fakeImages{images: map[string]string{"safeclaw": "new"}, containers: containers}
+	r := withFakes(t, f, "")
+	dir := newManager().NetworkDir
+	state := filepath.Join(dir, "b.json")
+	if err := os.WriteFile(state, []byte(`{"containerId": "b1", "networks": [{"name": "bridge"}], "holds": [{"owner": "job"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if err := reportStale(t.Context(), r.Client(), &out, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "  a\n") || !strings.Contains(out.String(), "  b (offline)\n") {
+		t.Errorf("out = %q", out.String())
+	}
+
+	out.Reset()
+	if err := reportStale(t.Context(), r.Client(), &out, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Skipping offline session: b") || !strings.Contains(out.String(), "Removed old container: safeclaw-a") {
+		t.Errorf("out = %q", out.String())
+	}
+	if _, ok := r.Find("rm -v -f safeclaw-b"); ok {
+		t.Error("held session removed")
+	}
+	if _, ok := r.Find("rm -v -f safeclaw-a"); !ok {
+		t.Error("online stale session not removed")
+	}
+	if _, err := os.Stat(state); err != nil {
+		t.Errorf("hold state removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".lock")); err != nil {
+		t.Errorf("recreate did not take the network lock: %v", err)
 	}
 }

@@ -115,13 +115,15 @@ The networks are saved before anything is disconnected, along with any aliases, 
 
 Each `net off` records a hold with its `--owner`, an optional `--reason`, and when it was taken. Without `--owner` it takes the unnamed hold, which every caller without an owner shares. Taking an offline session offline again adds a hold, or updates the same owner's, and keeps the saved networks. `net on` releases only the hold for its `--owner` (or the unnamed one), fails if other owners hold the session and it holds nothing, and reconnects the session only once no holds remain, so one job can't bring a session back online while another still relies on it being offline. `--force` releases every hold. Every network change and state write happens under one lock file in that directory, so concurrent safeclaw processes don't interleave.
 
-The status comes from docker: a session attached to no network is offline. `safeclaw ls` shows it in a NETWORK column (`online`, `offline` with its holders, `none` for sandboxes, or `host`), and the dashboard shows an `offline` badge.
+If a disconnect fails, `net off` still tries the session's other networks, then retries the failed ones once. If the session is still attached after that, the hold is kept rather than rolled back, since rolling back would bring the session online while its owner expects it offline, and `net off` fails naming the networks still attached, so it can be run again.
 
-While a session is offline:
+The status comes from docker: a session attached to no network is offline. `safeclaw ls` shows it in a NETWORK column (`online`, `offline` with its holders, `none` for sandboxes, or `host`), and the dashboard shows an `offline` badge. A held session that is still attached shows as `online` with its holders.
 
-- `run` and the dashboard's start still start or refresh it, warning that the web terminal is unreachable, and a started session is disconnected again if docker attached any network
+While a session is offline, or held offline but still attached:
+
+- `run` and the dashboard's start still start or refresh it, warning that the web terminal is unreachable, and a started or running held session is disconnected again from any network attached to it
 - `run` refuses to recreate it for a new `-v`, `--variant`, set of secrets, or `--host-ipc` choice, so it can't come back online as a new container
-- `safeclaw build --recreate` skips it, and the stale report marks it `(offline)`
+- `safeclaw build --recreate` skips it, checking under the network lock just before each removal, and the stale report marks it `(offline)`
 - `safeclaw rm` removes its saved state along with the container
 
 Sessions using host networking, or sharing another container's network, can't be disconnected, so `net off` refuses them. Sandboxes always run with `--network none`, so the `net` commands refuse them too.

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -18,9 +19,10 @@ import (
 	"github.com/josegonzalez/safeclaw/internal/version"
 )
 
-// newDocker and loadVariants are replaced in tests.
+// newDocker, newManager, and loadVariants are replaced in tests.
 var (
 	newDocker    = docker.New
+	newManager   = func() *session.Manager { return session.NewManager(nil) }
 	loadVariants = func() (*variant.Set, error) { return variant.Load(config.File()) }
 )
 
@@ -191,6 +193,8 @@ func extractFS(src fs.FS, dir string) error {
 // reportStale lists session containers that are not running the current
 // image of their variant, and removes them if recreate is set.
 func reportStale(ctx context.Context, d *docker.Client, out io.Writer, recreate bool) error {
+	m := newManager()
+	m.Docker = d
 	cs, err := d.List(ctx, config.ContainerPrefix)
 	if err != nil {
 		return err
@@ -216,14 +220,15 @@ func reportStale(ctx context.Context, d *docker.Client, out io.Writer, recreate 
 	}
 	if recreate {
 		for _, c := range stale {
-			if session.Offline(c) {
-				name := config.SessionName(c.ShortName())
+			name := config.SessionName(c.ShortName())
+			removed, err := m.RemoveStale(ctx, c)
+			switch {
+			case errors.Is(err, session.ErrOffline):
 				fmt.Fprintf(out, "Skipping offline session: %s (run `safeclaw net on %s`, then rebuild with --recreate)\n", name, name)
-				continue
-			}
-			fmt.Fprintf(out, "Removing old container: %s\n", c.ShortName())
-			if err := d.Remove(ctx, c.ShortName(), true); err != nil {
+			case err != nil:
 				return err
+			case removed:
+				fmt.Fprintf(out, "Removed old container: %s\n", c.ShortName())
 			}
 		}
 		return nil
@@ -236,7 +241,7 @@ func reportStale(ctx context.Context, d *docker.Client, out io.Writer, recreate 
 			sandboxes = true
 			name += " (sandbox)"
 		}
-		if session.Offline(c) {
+		if m.OfflineOrHeld(c) {
 			name += " (offline)"
 		}
 		fmt.Fprintf(out, "  %s\n", name)

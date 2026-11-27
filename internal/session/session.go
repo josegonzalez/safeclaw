@@ -499,7 +499,13 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	switch {
 	case existing != nil && existing.State.Running:
 		m.printf("Reusing running container: %s\n", container)
-		offline = Offline(*existing)
+		// A held session still attached to a network, for example after a
+		// failed disconnect, is taken offline again.
+		if offline {
+			if err := m.keepOffline(ctx, container); err != nil {
+				return nil, err
+			}
+		}
 		// Restart ttyd/tmux so fresh env vars take effect.
 		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "pkill", "-f", "ttyd")
 		_, _ = m.Docker.Exec(ctx, container, docker.ExecOptions{}, "tmux", "kill-server")
