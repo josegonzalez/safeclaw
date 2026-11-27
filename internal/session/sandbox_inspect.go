@@ -287,15 +287,22 @@ func (m *Manager) VerifySandbox(ctx context.Context, name string) (*SandboxRepor
 // under: the stored secrets and the tokens sessions get. A store that can't
 // be listed gives nil, which fails the no-secrets check.
 func (m *Manager) secretNames() map[string]bool {
+	names, _ := m.secretNameSet()
+	return names
+}
+
+// secretNameSet returns the names a secret could be passed to a container
+// under, or the error listing the stored secrets gave.
+func (m *Manager) secretNameSet() (map[string]bool, error) {
 	keys, err := m.Secrets.Keys()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	names := map[string]bool{secrets.ClaudeToken: true, secrets.GitHubToken: true}
 	for _, k := range keys {
 		names[k] = true
 	}
-	return names
+	return names, nil
 }
 
 func check(name string, ok bool, format string, args ...any) SandboxCheck {

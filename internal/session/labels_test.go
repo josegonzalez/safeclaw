@@ -49,7 +49,7 @@ func TestEnsureRefusesLabeledImage(t *testing.T) {
 	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: "box", Variant: "base"}); !errors.Is(err, ErrImageLabel) {
 		t.Errorf("new sandbox: err = %v, want ErrImageLabel", err)
 	}
-	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{Variant: "base"}, false, false, []string{"true"}); !errors.Is(err, ErrImageLabel) {
+	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{Variant: "base"}, ExecOptions{}, []string{"true"}); !errors.Is(err, ErrImageLabel) {
 		t.Errorf("one-off sandbox: err = %v, want ErrImageLabel", err)
 	}
 	if hasCall(r, "run") {

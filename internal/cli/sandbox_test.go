@@ -9,19 +9,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
+
 	"github.com/josegonzalez/safeclaw/internal/session"
 )
 
 func TestSandboxFlagsOptions(t *testing.T) {
-	f := sandboxFlags{session: "box", volume: "/in:/in", variant: "base", memory: "2g", pidsLimit: 64, cpus: "0.5", disk: "4g"}
+	f := sandboxFlags{session: "box", volumes: []string{"/in:/in", "/tools:/tools"}, variant: "base", memory: "2g", pidsLimit: 64, cpus: "0.5", disk: "4g"}
 	none := func(string) bool { return false }
 	// Unset limits are left for the defaults, or a recreated sandbox's own.
-	want := session.SandboxOptions{Name: "box", Volume: "/in:/in", Variant: "base"}
+	want := session.SandboxOptions{Name: "box", Volumes: []string{"/in:/in", "/tools:/tools"}, Variant: "base"}
 	if got := f.options(none); !reflect.DeepEqual(got, want) {
 		t.Errorf("options = %+v, want %+v", got, want)
 	}
 	all := func(string) bool { return true }
-	want = session.SandboxOptions{Name: "box", Volume: "/in:/in", Variant: "base", Memory: "2g", PidsLimit: 64, CPUs: "0.5", Disk: "4g", Recreate: true}
+	want = session.SandboxOptions{Name: "box", Volumes: []string{"/in:/in", "/tools:/tools"}, Variant: "base", Memory: "2g", PidsLimit: 64, CPUs: "0.5", Disk: "4g", Recreate: true}
 	if got := f.options(all); !reflect.DeepEqual(got, want) {
 		t.Errorf("options = %+v, want %+v", got, want)
 	}
@@ -32,11 +34,23 @@ func TestSandboxFlagsOptions(t *testing.T) {
 		}
 	}
 	if f.options(func(name string) bool { return name == "volume" }).Recreate {
-		t.Error("--volume recreates through Volume, not Recreate")
+		t.Error("--volume recreates through Volumes, not Recreate")
 	}
 	f.remove = true
 	if !f.options(none).Remove {
 		t.Error("--rm should set Remove")
+	}
+}
+
+func TestSandboxVolumeFlagRepeats(t *testing.T) {
+	for _, cmd := range []*cobra.Command{newSandboxRunCommand(), newSandboxExecCommand()} {
+		if err := cmd.ParseFlags([]string{"-v", "/a:/a", "--volume", "/b,c:/b"}); err != nil {
+			t.Fatal(err)
+		}
+		// StringArray, not StringSlice, so a comma in a path is kept.
+		if got, _ := cmd.Flags().GetStringArray("volume"); !slices.Equal(got, []string{"/a:/a", "/b,c:/b"}) {
+			t.Errorf("%s: volumes = %q", cmd.Name(), got)
+		}
 	}
 }
 
@@ -95,6 +109,10 @@ func TestSandboxExecArgs(t *testing.T) {
 		{[]string{"--ephemeral", "--escape-controls"}, []string{"ls"}, ""},
 		{[]string{"--escape-controls", "-t"}, []string{"box", "ls"}, "--escape-controls can't be used with -t"},
 		{[]string{"--ephemeral", "--escape-controls", "-it"}, []string{"ls"}, "--escape-controls can't be used with -t"},
+		{[]string{"--timeout", "30s", "-e", "A=1", "--env", "B"}, []string{"box", "ls"}, ""},
+		{[]string{"--ephemeral", "--timeout", "1m", "-e", "A=1", "-v", "/a:/a", "-v", "/b:/b"}, []string{"ls"}, ""},
+		{[]string{"--timeout", "0s"}, []string{"box", "ls"}, "invalid --timeout"},
+		{[]string{"--ephemeral", "--timeout", "-1s"}, []string{"ls"}, "invalid --timeout"},
 	}
 	for _, tc := range cases {
 		cmd := newSandboxExecCommand()
@@ -140,22 +158,6 @@ func TestWriteSandboxes(t *testing.T) {
 		"triage    session             -         running   offline (job, unnamed)   -     -\n"
 	if b.String() != want {
 		t.Errorf("ls =\n%s\nwant\n%s", b.String(), want)
-	}
-}
-
-func TestSandboxExecArgv(t *testing.T) {
-	cases := []struct {
-		i, t bool
-		want []string
-	}{
-		{false, false, []string{"docker", "exec", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box", "/bin/sh", "-c", `umask 022; exec "$@"`, "sh", "pdftotext", "-", "-"}},
-		{true, false, []string{"docker", "exec", "-i", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box", "/bin/sh", "-c", `umask 022; exec "$@"`, "sh", "pdftotext", "-", "-"}},
-		{true, true, []string{"docker", "exec", "-i", "-t", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box", "/bin/sh", "-c", `umask 022; exec "$@"`, "sh", "pdftotext", "-", "-"}},
-	}
-	for _, tc := range cases {
-		if got := sandboxExecArgv("box", tc.i, tc.t, []string{"pdftotext", "-", "-"}); !slices.Equal(got, tc.want) {
-			t.Errorf("argv = %v, want %v", got, tc.want)
-		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/termtext"
 )
@@ -19,12 +20,33 @@ type exitCodeError struct{ code int }
 
 func (e exitCodeError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
 
-// forwardedSignals are passed on to the command runEscaped runs.
+// forwardedSignals are passed on to the command runChild runs.
 var forwardedSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT}
 
 // runEscaped runs argv with its stdout and stderr passed through
 // termtext.Writer, so control characters in them are escaped before they
-// reach the caller's terminal, and returns its exit code: 128 plus the
+// reach the caller's terminal, and returns its exit code as runChild does.
+func runEscaped(argv []string, stdin io.Reader, stdout, stderr io.Writer, shareGroup bool) (int, error) {
+	return runChild(argv, childOptions{stdin: stdin, stdout: stdout, stderr: stderr, escape: true, shareGroup: shareGroup})
+}
+
+// childOptions configures runChild.
+type childOptions struct {
+	stdin          io.Reader
+	stdout, stderr io.Writer
+	// escape passes stdout and stderr through termtext.Writer.
+	escape bool
+	// shareGroup keeps the command in safeclaw's process group.
+	shareGroup bool
+	// extraFiles are inherited by the command as fd 3 onwards.
+	extraFiles []*os.File
+	// deadline, when set, calls onDeadline once if the command is still
+	// running that long after it started.
+	deadline   time.Duration
+	onDeadline func(*os.Process)
+}
+
+// runChild runs argv as a child and returns its exit code: 128 plus the
 // signal number when it was killed by a signal, as a shell reports it.
 //
 // SIGINT, SIGTERM, SIGHUP and SIGQUIT sent to safeclaw are forwarded to
@@ -35,14 +57,19 @@ var forwardedSignals = []os.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGH
 // terminal on stdin without being stopped; the terminal then signals it
 // directly, and only SIGTERM and SIGHUP are forwarded so it doesn't get
 // SIGINT or SIGQUIT twice.
-func runEscaped(argv []string, stdin io.Reader, stdout, stderr io.Writer, shareGroup bool) (int, error) {
-	outW := termtext.NewWriter(stdout)
-	errW := termtext.NewWriter(stderr)
+func runChild(argv []string, o childOptions) (int, error) {
+	stdout, stderr := o.stdout, o.stderr
+	var outW, errW *termtext.Writer
+	if o.escape {
+		outW, errW = termtext.NewWriter(stdout), termtext.NewWriter(stderr)
+		stdout, stderr = outW, errW
+	}
 	c := exec.Command(argv[0], argv[1:]...)
-	c.Stdin = stdin
-	c.Stdout = outW
-	c.Stderr = errW
-	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: !shareGroup}
+	c.Stdin = o.stdin
+	c.Stdout = stdout
+	c.Stderr = stderr
+	c.ExtraFiles = o.extraFiles
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: !o.shareGroup}
 
 	sigs := make(chan os.Signal, 8)
 	signal.Notify(sigs, forwardedSignals...)
@@ -51,6 +78,12 @@ func runEscaped(argv []string, stdin io.Reader, stdout, stderr io.Writer, shareG
 	if err := c.Start(); err != nil {
 		return 0, err
 	}
+	var expired <-chan time.Time
+	if o.deadline > 0 {
+		t := time.NewTimer(o.deadline)
+		defer t.Stop()
+		expired = t.C
+	}
 	done := make(chan struct{})
 	forwarded := make(chan struct{})
 	go func() {
@@ -58,10 +91,13 @@ func runEscaped(argv []string, stdin io.Reader, stdout, stderr io.Writer, shareG
 		for {
 			select {
 			case s := <-sigs:
-				if shareGroup && (s == syscall.SIGINT || s == syscall.SIGQUIT) {
+				if o.shareGroup && (s == syscall.SIGINT || s == syscall.SIGQUIT) {
 					continue
 				}
 				_ = c.Process.Signal(s)
+			case <-expired:
+				expired = nil
+				o.onDeadline(c.Process)
 			case <-done:
 				return
 			}
@@ -71,7 +107,10 @@ func runEscaped(argv []string, stdin io.Reader, stdout, stderr io.Writer, shareG
 	close(done)
 	<-forwarded
 
-	flushErr := errors.Join(outW.Flush(), errW.Flush())
+	var flushErr error
+	if o.escape {
+		flushErr = errors.Join(outW.Flush(), errW.Flush())
+	}
 	var exitErr *exec.ExitError
 	if waitErr != nil && !errors.As(waitErr, &exitErr) {
 		return 0, errors.Join(waitErr, flushErr)
