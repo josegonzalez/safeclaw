@@ -115,6 +115,102 @@ func TestFilterMixedStream(t *testing.T) {
 	}
 }
 
+func TestFilterHyperlinkTargets(t *testing.T) {
+	const end = "\x1b]8;;\x1b\\"
+	refused := []string{
+		"file:///tmp/dummy.txt",
+		"javascript:x",
+		"x-man-page://ls",
+		"ssh://example.com/",
+		"mailto:a@example.com",
+		"http://127.0.0.1:7680/",
+		"http://localhost:7680/",
+		"http://[::1]:7680/",
+		"http://127.0.0.1:7681/",
+		"http://localhost/",
+		"https://LOCALHOST./",
+		"http://dash.localhost:7680/",
+		"http://127.0.0.2/",
+		"http://127.1/",
+		"http://2130706433/",
+		"http://0x7f000001/",
+		"http://0177.0.0.1/",
+		"http://0.0.0.0:7680/",
+		"http://0/",
+		"http://[::]/",
+		"http://[::ffff:127.0.0.1]/",
+		"http://[fe80::1%25en0]/",
+		"http://user@127.0.0.1/",
+		"http://1.2.3.4.5/",
+		"http://256.0.0.1/",
+		"http://08.0.0.1/",
+		"http:127.0.0.1",
+		"http:///127.0.0.1/",
+		"http://example.com\\@127.0.0.1/",
+		"http://exa mple.com/",
+		"http://ex%61mple.com/",
+		"https://exämple.com/",
+		"https://",
+	}
+	for _, uri := range refused {
+		t.Run(uri, func(t *testing.T) {
+			for _, term := range []string{"\x1b\\", "\x07"} {
+				in := "a\x1b]8;id=1;" + uri + term + "text" + end + "b"
+				want := "a\x1b]8;;" + term + "text" + end + "b"
+				if got := filterAll(t, in); got != want {
+					t.Errorf("Filter(%q) = %q, want %q", in, got, want)
+				}
+			}
+		})
+	}
+	allowed := []string{
+		"https://example.com/",
+		"http://example.com:8080/path?q=1;x=2#frag",
+		"HTTPS://Example.COM/",
+		"https://user@example.com/",
+		"https://xn--exmple-cua.com/",
+		"https://my_host.example.com/",
+		"https://93.184.215.14/",
+		"https://[2001:db8::1]:443/",
+		"https://example.com/%7Euser",
+		"https://1.2.3/",
+	}
+	for _, uri := range allowed {
+		t.Run(uri, func(t *testing.T) {
+			in := "a\x1b]8;;" + uri + "\x1b\\text" + end + "b"
+			if got := filterAll(t, in); got != in {
+				t.Errorf("Filter(%q) = %q, want it unchanged", in, got)
+			}
+		})
+	}
+}
+
+func TestFilterHyperlinkMalformed(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"no params", "a\x1b]8\x07b", "a\x1b]8;;\x07b"},
+		{"no uri", "a\x1b]8;id=1\x1b\\b", "a\x1b]8;;\x1b\\b"},
+		{"end with params", "a\x1b]8;id=1;\x1b\\b", "a\x1b]8;id=1;\x1b\\b"},
+		{"osc 80 is not a hyperlink", "a\x1b]80;file:///x\x07b", "ab"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := filterAll(t, tc.in); got != tc.want {
+				t.Errorf("Filter(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// A refused link opened after an allowed one ends it, so its text isn't
+// shown as part of the earlier link.
+func TestFilterHyperlinkReplacesOpenLink(t *testing.T) {
+	in := "\x1b]8;;https://example.com/\x1b\\ok \x1b]8;;file:///etc/passwd\x1b\\spoofed\x1b]8;;\x1b\\"
+	want := "\x1b]8;;https://example.com/\x1b\\ok \x1b]8;;\x1b\\spoofed\x1b]8;;\x1b\\"
+	if got := filterAll(t, in); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 type failWriter struct{}
 
 func (failWriter) Write([]byte) (int, error) { return 0, errors.New("closed") }
