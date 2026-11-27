@@ -126,6 +126,9 @@ type Manager struct {
 	// NetworkDir holds the saved state of offline sessions. Defaults to
 	// config.NetworkDir().
 	NetworkDir string
+	// CopyDir holds the lock that serializes copies into sandboxes.
+	// Defaults to config.CopyDir().
+	CopyDir string
 	// Out receives progress messages. Defaults to io.Discard.
 	Out io.Writer
 	// Prompter is used for interactive runs.
@@ -155,6 +158,7 @@ func NewManager(out io.Writer) *Manager {
 		Secrets:     secrets.Store{Dir: config.SecretsDir()},
 		SessionsDir: config.SessionsDir(),
 		NetworkDir:  config.NetworkDir(),
+		CopyDir:     config.CopyDir(),
 		Out:         out,
 		LoadVariants: func() (*variant.Set, error) {
 			return variant.Load(config.File())

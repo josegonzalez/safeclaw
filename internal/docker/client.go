@@ -287,24 +287,46 @@ func (c *Client) NetworkDisconnect(ctx context.Context, network, container strin
 	return err
 }
 
-// ExecOptions configures Exec.
+// ExecOptions configures Exec and ExecStream.
 type ExecOptions struct {
 	Detach bool
 	Stdin  io.Reader
+	// User runs the command as this user instead of the container's.
+	User string
+	// Workdir runs the command in this directory instead of the container's.
+	Workdir string
+}
+
+func (o ExecOptions) args(name string, cmd []string) []string {
+	args := []string{"exec"}
+	if o.Detach {
+		args = append(args, "-d")
+	}
+	if o.Stdin != nil {
+		args = append(args, "-i")
+	}
+	if o.User != "" {
+		args = append(args, "--user", o.User)
+	}
+	if o.Workdir != "" {
+		args = append(args, "--workdir", o.Workdir)
+	}
+	args = append(args, name)
+	return append(args, cmd...)
 }
 
 // Exec runs a command in a container and returns its stdout.
 func (c *Client) Exec(ctx context.Context, name string, opts ExecOptions, cmd ...string) ([]byte, error) {
-	args := []string{"exec"}
-	if opts.Detach {
-		args = append(args, "-d")
-	}
-	if opts.Stdin != nil {
-		args = append(args, "-i")
-	}
-	args = append(args, name)
-	args = append(args, cmd...)
-	return c.R.Output(ctx, opts.Stdin, args...)
+	return c.R.Output(ctx, opts.Stdin, opts.args(name, cmd)...)
+}
+
+// ExecStream runs a command in a container and returns its stdout as it is
+// written. Calling the returned function waits for the command to exit and
+// returns an *Error carrying stderr if it failed. opts.Stdin and
+// opts.Detach are ignored.
+func (c *Client) ExecStream(ctx context.Context, name string, opts ExecOptions, cmd ...string) (io.ReadCloser, func() error, error) {
+	opts.Stdin, opts.Detach = nil, false
+	return c.R.Stream(ctx, opts.args(name, cmd)...)
 }
 
 // Tag tags an image.

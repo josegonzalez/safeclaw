@@ -17,7 +17,7 @@ make lint               # golangci-lint
 make test-integration   # real docker; needs the safeclaw image, and safeclaw:sandbox for the variant test
 ```
 
-Unit tests use `internal/docker/dockertest`, a fake docker runner that records every command. The integration tests (`-tags integration`) create, restart, and delete a real session container, and check a real sandbox's isolation: its user, network, read-only mounts and root fs, `docker cp` into `/sandbox`, and that removing it removes its volume. They also check that a one-off sandbox from `sandbox run --rm` is removed with its volume when stopped, and that `sandbox exec --ephemeral` passes stdin, stdout, and the exit code through and leaves no container behind. These run on the base image. With the `sandbox` variant built, another test checks that sandboxes use it by default, that its poppler, tesseract (with English), 7zip, and file tools run, and that it keeps the sandbox's label, user, and network isolation.
+Unit tests use `internal/docker/dockertest`, a fake docker runner that records every command. The integration tests (`-tags integration`) create, restart, and delete a real session container, and check a real sandbox's isolation: its user, network, read-only mounts and root fs, `docker cp` into `/sandbox`, and that removing it removes its volume. Another checks `sandbox cp-in` and `cp-out`: that copied files are owned by the sandbox user and numbered across calls, that links are refused on the way in and links, directories, and nested files are dropped on the way out, that existing host files need `--force`, and that `--max-size` and stopped sandboxes are refused. They also check that a one-off sandbox from `sandbox run --rm` is removed with its volume when stopped, and that `sandbox exec --ephemeral` passes stdin, stdout, and the exit code through and leaves no container behind. These run on the base image. With the `sandbox` variant built, another test checks that sandboxes use it by default, that its poppler, tesseract (with English), 7zip, and file tools run, and that it keeps the sandbox's label, user, and network isolation.
 
 ## End to end
 
@@ -41,6 +41,12 @@ safeclaw sandbox run -s t -v ./docs:/in
 safeclaw sandbox exec t -- id                # uid=2000(sandbox)
 safeclaw sandbox exec t -- ls /home/sclaw    # permission denied
 safeclaw sandbox exec t -- touch /in/x       # read-only file system
+safeclaw sandbox cp-in t README.md docs/README.md   # /sandbox/in/1-README.md, /sandbox/in/2-README.md
+safeclaw sandbox exec t -- ls -ln /sandbox/in       # owned by 2000
+safeclaw sandbox exec t -- sh -c 'mkdir -p out/sub && echo hi > out/a.txt && echo no > out/sub/b.txt && ln -s /etc/passwd out/p.txt'
+mkdir -p tmp/out
+safeclaw sandbox cp-out t /sandbox/out tmp/out --only '*.txt'   # only a.txt
+safeclaw sandbox cp-out t /sandbox/out tmp/out --only '*.txt'   # refused: a.txt exists
 safeclaw sandbox rm -f t
 ```
 

@@ -74,8 +74,12 @@ safeclaw sandbox exec triage -- pdftotext /in/report.pdf -
 safeclaw sandbox exec triage -- unzip -l /in/report.zip
 safeclaw sandbox exec -i triage -- python3 - < extract.py
 
-# Copy files into the writable /sandbox directory
-docker cp report.zip safeclaw-triage:/sandbox/
+# Copy files in, owned by the sandbox user and numbered so names never collide
+safeclaw sandbox cp-in triage ~/Downloads/report.zip   # prints /sandbox/in/1-report.zip
+safeclaw sandbox exec triage -- unzip -d /sandbox/out /sandbox/in/1-report.zip
+
+# Copy only the matching regular files back out, dropping links and directories
+safeclaw sandbox cp-out triage /sandbox/out ./results --only '*.txt'
 
 # Remove it along with its /sandbox volume
 safeclaw sandbox rm -f triage
@@ -92,6 +96,7 @@ safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- tesseract /in/scan.png -
 # Or keep one around for a job with several steps; it is removed when stopped
 name=$(safeclaw sandbox run --rm -v ~/inbox:/in)
 safeclaw sandbox exec "$name" -- unzip -d /sandbox/out /in/report.zip
+safeclaw sandbox cp-out "$name" /sandbox/out ./results --only '*.pdf'
 safeclaw sandbox stop "$name"
 ```
 
@@ -211,6 +216,8 @@ The choice is remembered for the session, so rerunning `safeclaw run -s chat` or
 | `safeclaw sandbox run --rm [-s NAME]` | Create a one-off sandbox that is removed when it stops, and print its name |
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY) |
 | `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`. |
+| `safeclaw sandbox cp-in NAME FILE...` | Copy regular host files into a running sandbox as `N-name`, owned by the sandbox user, refusing links and other file types. `--to` picks a directory under `/sandbox` (default `/sandbox/in`). |
+| `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, and nested files. Existing files are refused unless `--force` is given, and `--max-size` (default `1g`) caps the total. |
 | `safeclaw sandbox ls` | List sandboxes |
 | `safeclaw sandbox stop NAME` | Stop a sandbox |
 | `safeclaw sandbox rm NAME` | Delete a sandbox and its `/sandbox` volume |

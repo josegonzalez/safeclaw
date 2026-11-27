@@ -149,3 +149,51 @@ func TestSandboxExecArgv(t *testing.T) {
 		}
 	}
 }
+
+func TestSandboxCopyCommands(t *testing.T) {
+	in := newSandboxCopyInCommand()
+	if err := in.Args(in, []string{"box"}); err == nil {
+		t.Error("cp-in without files should fail")
+	}
+	if err := in.Args(in, []string{"box", "a", "b"}); err != nil {
+		t.Errorf("cp-in NAME FILE FILE: %v", err)
+	}
+	if got := in.Flags().Lookup("to").DefValue; got != session.DefaultCopyDest {
+		t.Errorf("--to default = %q", got)
+	}
+
+	out := newSandboxCopyOutCommand()
+	for _, args := range [][]string{{"box"}, {"box", "/sandbox/out"}, {"box", "a", "b", "c"}} {
+		if err := out.Args(out, args); err == nil {
+			t.Errorf("cp-out %v should fail", args)
+		}
+	}
+	if err := out.Args(out, []string{"box", "/sandbox/out", "."}); err != nil {
+		t.Errorf("cp-out NAME DIR DIR: %v", err)
+	}
+	if err := out.ParseFlags([]string{"--only", "*.txt", "--only", "a,b"}); err != nil {
+		t.Fatal(err)
+	}
+	// --only is an array, so globs with commas are kept whole.
+	if got, _ := out.Flags().GetStringArray("only"); !slices.Equal(got, []string{"*.txt", "a,b"}) {
+		t.Errorf("--only = %v", got)
+	}
+	if got := out.Flags().Lookup("max-size").DefValue; got != session.DefaultCopyMaxSize {
+		t.Errorf("--max-size default = %q", got)
+	}
+
+	out = newSandboxCopyOutCommand()
+	out.SetArgs([]string{"box", "/sandbox/out", "."})
+	out.SetOut(io.Discard)
+	out.SetErr(io.Discard)
+	if err := out.Execute(); err == nil || !strings.Contains(err.Error(), `"only" not set`) {
+		t.Errorf("cp-out without --only: err = %v", err)
+	}
+	out = newSandboxCopyOutCommand()
+	out.SetArgs([]string{"box", "/sandbox/out", ".", "--only", "*", "--max-size", "lots"})
+	out.SetOut(io.Discard)
+	out.SetErr(io.Discard)
+	if err := out.Execute(); err == nil || !strings.Contains(err.Error(), "--max-size") {
+		t.Errorf("bad --max-size: err = %v", err)
+	}
+}

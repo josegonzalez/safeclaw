@@ -37,7 +37,7 @@ A sandbox is created with none of what an interactive session gets: no secrets a
 - `--network none`, so loopback is the only interface
 - `--user sandbox`, an unprivileged, non-login user (uid 2000) whose home and working directory is `/sandbox`. `/home/sclaw` is mode 700, so it can't be read
 - `--cap-drop ALL` and `--security-opt no-new-privileges`
-- `--read-only`, with a 256 MB tmpfs at `/tmp` and an anonymous volume at `/sandbox`. `docker cp` works into the volume, and removing the sandbox removes the volume too
+- `--read-only`, with a 256 MB tmpfs at `/tmp` and an anonymous volume at `/sandbox`. Files are copied into the volume with [`sandbox cp-in`](#copying-files), and removing the sandbox removes the volume too
 - `--memory 1g`, `--pids-limit 256`, and `--cpus 1` by default, changeable with flags of the same name
 - `HOME=/sandbox`, an empty `BASH_ENV`, and a `PATH` without sclaw's `~/.local/bin`
 
@@ -47,12 +47,20 @@ Sandboxes run the `sandbox` [image variant](#image-variants) unless the config f
 
 The two types are kept apart. `safeclaw run`, the dashboard's start, and the API refuse a sandbox name, `safeclaw stop`, `rm`, and `attach` refuse sandboxes, and the `safeclaw sandbox` commands refuse interactive sessions. `safeclaw ls` lists both with a TYPE column, and `safeclaw sandbox ls` lists only sandboxes.
 
+### Copying files
+
+`safeclaw sandbox cp-in` and `safeclaw sandbox cp-out` move files into and out of a running sandbox without `docker cp`, which runs as root on the daemon side, leaves root-owned files with the host's mode, and copies whatever it is pointed at. Both stream a tar that safeclaw writes or reads itself through `docker exec --user sandbox` and the image's `/usr/bin/tar`, so a copy can only read and write what the sandbox user can, and a symlink planted by the untrusted side can't make it read `/home/sclaw` or anything else root can. A stopped sandbox is refused.
+
+`cp-in NAME FILE...` checks every file before sending any: symbolic links and anything that is not a regular file are refused, and each file is opened without following links and checked to be the same file that was inspected. Files land in `--to` (default `/sandbox/in`, and always under `/sandbox`) as `N-name`, with N continuing after the highest number already there, so files with the same name from different folders never overwrite each other. The numbers are picked under a lock file in `~/.config/safeclaw/copy/`, and tar's `-k` refuses to overwrite anything regardless. Since the sandbox user extracts them, the files are owned by uid 2000, with mode 644. Each container path is printed, in the order given.
+
+`cp-out NAME DIR HOST_DIR --only GLOB` keeps only the regular files directly in DIR whose names match one of the (repeatable) `--only` globs. Symbolic links, hard links, directories, devices, and anything in a subdirectory are dropped, and a name that appears twice is an error. HOST_DIR must exist. Files are written to a temporary directory inside it with mode 644 (less the umask), and nothing is moved into place until the whole stream has arrived, stays within `--max-size` (default `1g`, `0` for no limit), and none of the names already exist. Without `--force` each file is moved with a rename that refuses to replace, so a file created in the meantime is never overwritten. `--force` replaces existing files, and a symlink itself rather than its target, but never a directory. Each host path written is printed.
+
 ### One-off sandboxes
 
 A one-off sandbox lives for exactly one job, so callers sharing the host need no locking, no detection of a sandbox recreated under the same name, and no per-job cleanup. If something removes one mid-job, the job is simply run again. One-off sandboxes are created with docker's `--rm`, so docker itself removes the container and its `/sandbox` volume when it stops, and they get the same isolation, limits, and read-only `-v` as any other sandbox. Without `-s` they get a random `tmp-<8 hex>` name, and a name any container already has is refused rather than reused.
 
 - `safeclaw sandbox exec --ephemeral -- CMD` checks the image and name, then replaces itself with `docker run --rm --init` in the foreground. Cleanup does not depend on safeclaw staying alive, the command's exit code is returned as is, `--init` forwards signals to the command instead of leaving it as PID 1, and nothing but the command writes to stdout
-- `safeclaw sandbox run --rm` creates a detached one-off sandbox for jobs with several steps (`docker cp`, then several `sandbox exec` calls). Progress goes to stderr and only its name to stdout, and `safeclaw sandbox stop` removes it
+- `safeclaw sandbox run --rm` creates a detached one-off sandbox for jobs with several steps (`sandbox cp-in`, several `sandbox exec` calls, then `sandbox cp-out`). Progress goes to stderr and only its name to stdout, and `safeclaw sandbox stop` removes it
 
 `safeclaw sandbox ls` marks them in a ONE-OFF column, and `safeclaw ls` lists their type as `sandbox (one-off)`.
 

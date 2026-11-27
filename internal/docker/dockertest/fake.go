@@ -2,6 +2,7 @@
 package dockertest
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"strings"
@@ -27,7 +28,7 @@ type Runner struct {
 	mu      sync.Mutex
 	Calls   []Call
 	Handler Handler
-	// Events is returned by Stream.
+	// Events is returned by Stream when Handler gives no output.
 	Events string
 }
 
@@ -54,10 +55,14 @@ func (r *Runner) Passthrough(ctx context.Context, args ...string) error {
 	return err
 }
 
-// Stream implements docker.Runner.
+// Stream implements docker.Runner. It returns Handler's output, or Events
+// when there is none, and the wait function returns Handler's error.
 func (r *Runner) Stream(ctx context.Context, args ...string) (io.ReadCloser, func() error, error) {
-	_, _ = r.Output(ctx, nil, args...)
-	return io.NopCloser(strings.NewReader(r.Events)), func() error { return nil }, nil
+	out, err := r.Output(ctx, nil, args...)
+	if out == nil {
+		out = []byte(r.Events)
+	}
+	return io.NopCloser(bytes.NewReader(out)), func() error { return err }, nil
 }
 
 // Commands returns each recorded call as a space-joined string.

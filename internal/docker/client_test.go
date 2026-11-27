@@ -2,7 +2,10 @@ package docker_test
 
 import (
 	"context"
+	"errors"
+	"io"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/josegonzalez/safeclaw/internal/docker"
@@ -152,6 +155,33 @@ func TestExecArgs(t *testing.T) {
 	c := r.Client()
 	_, _ = c.Exec(context.Background(), "safeclaw-a", docker.ExecOptions{Detach: true}, "ttyd", "-p", "7681")
 	if got := r.Commands()[0]; got != "exec -d safeclaw-a ttyd -p 7681" {
+		t.Errorf("exec = %q", got)
+	}
+	_, _ = c.Exec(context.Background(), "safeclaw-a", docker.ExecOptions{Stdin: strings.NewReader("x"), User: "sandbox", Workdir: "/sandbox"}, "tar", "-x")
+	if got := r.Commands()[1]; got != "exec -i --user sandbox --workdir /sandbox safeclaw-a tar -x" {
+		t.Errorf("exec = %q", got)
+	}
+}
+
+func TestExecStream(t *testing.T) {
+	failed := errors.New("exit 2")
+	r := &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
+		return []byte("data"), failed
+	}}
+	out, wait, err := r.Client().ExecStream(context.Background(), "safeclaw-a",
+		docker.ExecOptions{Detach: true, Stdin: strings.NewReader("x"), User: "sandbox"}, "tar", "-c")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(out)
+	if string(b) != "data" {
+		t.Errorf("stdout = %q", b)
+	}
+	if err := wait(); !errors.Is(err, failed) {
+		t.Errorf("wait = %v, want the command's error", err)
+	}
+	// Streams never detach or take stdin.
+	if got := r.Commands()[0]; got != "exec --user sandbox safeclaw-a tar -c" {
 		t.Errorf("exec = %q", got)
 	}
 }

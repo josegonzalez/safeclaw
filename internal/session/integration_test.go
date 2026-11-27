@@ -525,3 +525,126 @@ func TestIntegrationNetwork(t *testing.T) {
 	}
 	waitHTTP(t, res.URL)
 }
+
+// TestIntegrationSandboxCopy checks cp-in and cp-out against a real
+// sandbox: ownership, numbering, and what is refused or dropped each way.
+func TestIntegrationSandboxCopy(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+	dir := t.TempDir()
+	m := &Manager{
+		Docker:      d,
+		Secrets:     secrets.Store{Dir: filepath.Join(dir, ".secrets")},
+		SessionsDir: filepath.Join(dir, "sessions"),
+		NetworkDir:  filepath.Join(dir, "network"),
+		CopyDir:     filepath.Join(dir, "copy"),
+		Out:         os.Stdout,
+	}
+	name := fmt.Sprintf("itest-cp-%d", rand.IntN(1_000_000))
+	container := config.ContainerName(name)
+	t.Cleanup(func() { _ = d.Remove(ctx, container, true) })
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name, Variant: config.BaseVariant}); err != nil {
+		t.Fatal(err)
+	}
+	run := func(cmd ...string) (string, error) {
+		out, err := d.Exec(ctx, container, copyExec, cmd...)
+		return strings.TrimSpace(string(out)), err
+	}
+
+	// Two host files with the same name, one private to the host user.
+	src := filepath.Join(dir, "src")
+	for sub, body := range map[string]string{"a": "first", "b": "second"} {
+		if err := os.MkdirAll(filepath.Join(src, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(src, sub, "report.txt"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a, b := filepath.Join(src, "a", "report.txt"), filepath.Join(src, "b", "report.txt")
+	link := filepath.Join(src, "link.txt")
+	if err := os.Symlink(a, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CopyIn(ctx, name, []string{a, link}, ""); !errors.Is(err, ErrSymlink) {
+		t.Errorf("symlink: err = %v, want ErrSymlink", err)
+	}
+	paths, err := m.CopyIn(ctx, name, []string{a, b}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/sandbox/in/1-report.txt", "/sandbox/in/2-report.txt"}; !slices.Equal(paths, want) {
+		t.Errorf("paths = %v, want %v", paths, want)
+	}
+	if out, err := run("stat", "-c", "%u:%g %a", paths[0]); err != nil || out != "2000:2000 644" {
+		t.Errorf("owner and mode = %q, %v", out, err)
+	}
+	if out, err := run("cat", paths[0], paths[1]); err != nil || out != "firstsecond" {
+		t.Errorf("contents = %q, %v", out, err)
+	}
+	// A later copy continues the numbering, and --to picks the directory.
+	if paths, err := m.CopyIn(ctx, name, []string{a}, ""); err != nil || !slices.Equal(paths, []string{"/sandbox/in/3-report.txt"}) {
+		t.Errorf("second copy = %v, %v", paths, err)
+	}
+	if paths, err := m.CopyIn(ctx, name, []string{a}, "jobs/1"); err != nil || !slices.Equal(paths, []string{"/sandbox/jobs/1/1-report.txt"}) {
+		t.Errorf("--to = %v, %v", paths, err)
+	}
+
+	// Results with a match, a non-match, a link out of the sandbox, a
+	// directory, and a nested match.
+	if _, err := run("sh", "-c", "mkdir -p out/sub out/dir.txt && printf hi > out/a.txt && printf no > out/b.log && "+
+		"printf nested > out/sub/c.txt && ln -s /etc/passwd out/p.txt && chmod 4755 out/a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	host := filepath.Join(dir, "host")
+	if err := os.Mkdir(host, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	opts := CopyOutOptions{Only: []string{"*.txt"}}
+	got, err := m.CopyOut(ctx, name, "/sandbox/out", host, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{filepath.Join(host, "a.txt")}; !slices.Equal(got, want) {
+		t.Errorf("cp-out = %v, want %v", got, want)
+	}
+	entries, _ := os.ReadDir(host)
+	if len(entries) != 1 {
+		t.Errorf("host dir has %d entries, want 1", len(entries))
+	}
+	fi, err := os.Lstat(filepath.Join(host, "a.txt"))
+	if err != nil || !fi.Mode().IsRegular() || fi.Mode()&0o7111 != 0 {
+		t.Errorf("a.txt = %v, %v", fi, err)
+	}
+	if body, _ := os.ReadFile(filepath.Join(host, "a.txt")); string(body) != "hi" {
+		t.Errorf("a.txt = %q", body)
+	}
+
+	// An existing name is refused without --force and replaced with it.
+	if _, err := m.CopyOut(ctx, name, "/sandbox/out", host, opts); !errors.Is(err, ErrFileExists) {
+		t.Errorf("clash: err = %v, want ErrFileExists", err)
+	}
+	opts.Force = true
+	if _, err := m.CopyOut(ctx, name, "/sandbox/out", host, opts); err != nil {
+		t.Errorf("--force: %v", err)
+	}
+	opts = CopyOutOptions{Only: []string{"*"}, MaxSize: 1}
+	if _, err := m.CopyOut(ctx, name, "/sandbox/out", t.TempDir(), opts); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("--max-size: err = %v, want ErrTooLarge", err)
+	}
+	// The sandbox user can't read /home/sclaw, so neither can cp-out.
+	if _, err := m.CopyOut(ctx, name, "/home/sclaw", t.TempDir(), CopyOutOptions{Only: []string{"*"}}); err == nil {
+		t.Error("cp-out of /home/sclaw should fail")
+	}
+
+	// A stopped sandbox is refused.
+	if err := m.Stop(ctx, name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CopyIn(ctx, name, []string{a}, ""); !errors.Is(err, ErrNotRunning) {
+		t.Errorf("stopped: err = %v, want ErrNotRunning", err)
+	}
+}
