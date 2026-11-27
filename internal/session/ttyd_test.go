@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/josegonzalez/safeclaw/internal/docker"
 )
 
 func TestTTYDRequiresCredentialAndOrigin(t *testing.T) {
@@ -118,13 +121,22 @@ func TestTerminalsPublishedAwayFromCookieHost(t *testing.T) {
 		t.Errorf("new session warned about 127.0.0.1: %s", out.String())
 	}
 
-	// Sessions created before keep working, with a warning.
+	// Sessions created before keep working on the address they are
+	// published on, with a warning.
 	out.Reset()
-	if _, err := m.Ensure(ctx, Options{Name: "old", NoOpen: true}); err != nil {
+	res, err := m.Ensure(ctx, Options{Name: "old", NoOpen: true})
+	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "publishes its terminal on 127.0.0.1") {
 		t.Errorf("no warning for a session on 127.0.0.1: %s", out.String())
+	}
+	oldCred, err := m.Credential("old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "http://safeclaw:" + oldCred.Password + "@127.0.0.1:7690"; res.URL != want {
+		t.Errorf("legacy url = %q, want %q", res.URL, want)
 	}
 
 	term, err := m.Terminal(ctx, "new")
@@ -134,11 +146,85 @@ func TestTerminalsPublishedAwayFromCookieHost(t *testing.T) {
 	if term.Addr != "[::1]:7681" || term.Host != "localhost:7681" || term.Port != 7681 {
 		t.Errorf("terminal = %+v", term)
 	}
-	if want := "http://safeclaw:" + term.Credential.Password + "@localhost:7681"; term.URL() != want {
+	if want := "http://safeclaw:" + term.Credential.Password + "@[::1]:7681"; term.URL() != want {
 		t.Errorf("terminal url = %q, want %q", term.URL(), want)
 	}
-	if old, err := m.Terminal(ctx, "old"); err != nil || old.Addr != "127.0.0.1:7690" || old.Host != "localhost:7690" {
+	old, err := m.Terminal(ctx, "old")
+	if err != nil || old.Addr != "127.0.0.1:7690" || old.Host != "localhost:7690" {
 		t.Errorf("legacy terminal = %+v, %v", old, err)
+	} else if want := "http://safeclaw:" + oldCred.Password + "@127.0.0.1:7690"; old.URL() != want {
+		t.Errorf("legacy terminal url = %q, want %q", old.URL(), want)
+	}
+}
+
+// Session URLs name the address the terminal is published on, so a browser
+// neither sends them the cookies other local apps set for localhost nor
+// connects to 127.0.0.1, where nothing holds the port.
+func TestSessionURLsNamePublishAddress(t *testing.T) {
+	u, err := url.Parse(URLWithCredential(7682, Credential{User: "safeclaw", Password: "pw"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Host != "[::1]:7682" || u.User.String() != "safeclaw:pw" {
+		t.Errorf("URLWithCredential host = %q, user = %q, want [::1]:7682", u.Host, u.User)
+	}
+	if got := URLFor(7682); got != "http://[::1]:7682" {
+		t.Errorf("URLFor = %q", got)
+	}
+	for ip, want := range map[string]string{
+		"::1":       "::1",
+		"::":        "::1",
+		"127.0.0.1": "127.0.0.1",
+		"0.0.0.0":   "127.0.0.1",
+		"":          "127.0.0.1",
+	} {
+		c := docker.Container{}
+		c.HostConfig.PortBindings = map[string][]docker.PortBinding{"7681/tcp": {{HostIP: ip, HostPort: "7690"}}}
+		if got := publishedHost(c); got != want {
+			t.Errorf("publishedHost(%q) = %q, want %q", ip, got, want)
+		}
+	}
+}
+
+// A session made from an image whose ttyd refuses a bracketed Host keeps a
+// localhost URL, which that ttyd accepts, and run says how to move it.
+func TestSessionURLsOnOldTTYDUseLocalhost(t *testing.T) {
+	w := &world{image: "img", oldTTYD: true, containers: map[string]*fakeContainer{
+		"safeclaw-work": {Running: true, Port: 7690, HostIP: "::1", Image: "img"},
+		"safeclaw-old":  {Running: true, Port: 7691, HostIP: "127.0.0.1", Image: "img"},
+	}, native: true}
+	m, _ := newTestManager(t, w)
+	var out bytes.Buffer
+	m.Out = &out
+	ctx := context.Background()
+	for name, want := range map[string]string{"work": "@localhost:7690", "old": "@127.0.0.1:7691", "new": "@localhost:7681"} {
+		out.Reset()
+		res, err := m.Ensure(ctx, Options{Name: name, NoOpen: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(res.URL, want) {
+			t.Errorf("%s: url = %q, want it to end in %q", name, res.URL, want)
+		}
+		if warned := strings.Contains(out.String(), "URL uses localhost"); warned != (name != "old") {
+			t.Errorf("%s: localhost warning = %v: %s", name, warned, out.String())
+		}
+		term, err := m.Terminal(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(term.URL(), want) {
+			t.Errorf("%s: terminal url = %q, want it to end in %q", name, term.URL(), want)
+		}
+	}
+	list, err := m.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range list {
+		if s.Name == "work" && s.URL != "http://localhost:7690" {
+			t.Errorf("listed url = %q", s.URL)
+		}
 	}
 }
 

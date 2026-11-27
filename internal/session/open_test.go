@@ -131,7 +131,7 @@ func TestOpenTerminal(t *testing.T) {
 	var out bytes.Buffer
 	m.Out = &out
 	ctx := context.Background()
-	cred := "http://safeclaw:pw@localhost:7681"
+	cred := "http://safeclaw:pw@[::1]:7681"
 
 	if err := m.OpenTerminal(ctx, "work", cred); err != nil {
 		t.Fatal(err)

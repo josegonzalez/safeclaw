@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
 	"github.com/josegonzalez/safeclaw/internal/secrets"
@@ -71,9 +72,12 @@ type world struct {
 	images map[string]string
 	// imageLabels maps image names to their labels.
 	imageLabels map[string]map[string]string
-	containers  map[string]*fakeContainer
-	native      bool
-	prompt      bool
+	// oldTTYD leaves off the label images whose ttyd accepts a bracketed
+	// IPv6 Host carry.
+	oldTTYD    bool
+	containers map[string]*fakeContainer
+	native     bool
+	prompt     bool
 	// rootEnv makes containers report the root-owned env file of current
 	// images, instead of only sclaw's ~/.env.
 	rootEnv bool
@@ -143,11 +147,19 @@ func (w *world) inspectJSON(names []string) []byte {
 			capDrop, secOpt = nil, nil
 		}
 		nets := c.networks()
+		// Containers carry their image's labels, as made by run.
+		labels := maps.Clone(c.Labels)
+		if !w.oldTTYD {
+			if labels == nil {
+				labels = map[string]string{}
+			}
+			labels[config.LabelBracketedHostTTYD] = "1"
+		}
 		out = append(out, map[string]any{
 			"Id":              id,
 			"Name":            "/" + n,
 			"Image":           c.Image,
-			"Config":          map[string]any{"Labels": c.Labels},
+			"Config":          map[string]any{"Labels": labels},
 			"State":           map[string]any{"Status": status, "Running": c.Running},
 			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode, "IpcMode": ipc, "Tmpfs": c.Tmpfs, "CapDrop": capDrop, "SecurityOpt": secOpt},
 			"NetworkSettings": map[string]any{"Networks": nets},
@@ -156,6 +168,18 @@ func (w *world) inspectJSON(names []string) []byte {
 	}
 	b, _ := json.Marshal(out)
 	return b
+}
+
+// labelsOf returns an image's labels.
+func (w *world) labelsOf(image string) map[string]string {
+	labels := maps.Clone(w.imageLabels[image])
+	if labels == nil {
+		labels = map[string]string{}
+	}
+	if !w.oldTTYD {
+		labels[config.LabelBracketedHostTTYD] = "1"
+	}
+	return labels
 }
 
 func (w *world) handle(args []string, _ string) ([]byte, error) {
@@ -168,7 +192,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		if id == "" {
 			return nil, dockertest.NotFound(args)
 		}
-		b, _ := json.Marshal(map[string]any{"Id": id, "Config": map[string]any{"Labels": w.imageLabels[args[len(args)-1]]}})
+		b, _ := json.Marshal(map[string]any{"Id": id, "Config": map[string]any{"Labels": w.labelsOf(args[len(args)-1])}})
 		return append(b, '\n'), nil
 	case args[0] == "ps":
 		var names []string
@@ -200,10 +224,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		}
 		// Like docker, containers start with their image's labels, which
 		// --label overrides.
-		labels := maps.Clone(w.imageLabels[image])
-		if labels == nil {
-			labels = map[string]string{}
-		}
+		labels := w.labelsOf(image)
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
 			case "--rm":
@@ -370,7 +391,7 @@ func TestEnsureCreatesContainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Port != 7683 || res.URL != "http://safeclaw:"+cred.Password+"@localhost:7683" || res.Container != "safeclaw-work" {
+	if res.Port != 7683 || res.URL != "http://safeclaw:"+cred.Password+"@[::1]:7683" || res.Container != "safeclaw-work" {
 		t.Errorf("result = %+v", res)
 	}
 	run, ok := r.Find("run ")
@@ -633,7 +654,7 @@ func TestList(t *testing.T) {
 	w := &world{image: "img", containers: map[string]*fakeContainer{
 		"safeclaw-zeta":  {Running: true, Port: 7682, Mounts: []string{"/s:/home/sclaw/.claude/projects", "/p:/home/sclaw/p"}},
 		"safeclaw-alpha": {Port: 7681, Mounts: []string{"/s:/home/sclaw/.claude/projects"}},
-		"safeclaw-beta":  {Running: true, Port: 7683},
+		"safeclaw-beta":  {Running: true, Port: 7683, HostIP: "::1"},
 		"safeclaw-box":   {Running: true, Mounts: []string{"/sandbox", "/in:/in:ro"}, Labels: sandboxLabels, AutoRemove: true},
 	}}
 	m, _ := newTestManager(t, w)
@@ -651,8 +672,9 @@ func TestList(t *testing.T) {
 	if list[2].Volume != "/p:/home/sclaw/p" || list[3].Volume != "-" {
 		t.Errorf("volumes = %q, %q", list[2].Volume, list[3].Volume)
 	}
-	if list[3].URL != "" || list[0].URL != "http://localhost:7683" {
-		t.Errorf("urls = %q, %q", list[0].URL, list[3].URL)
+	// zeta predates [::1] publishing, so its URL names 127.0.0.1.
+	if list[3].URL != "" || list[0].URL != "http://[::1]:7683" || list[2].URL != "http://127.0.0.1:7682" {
+		t.Errorf("urls = %q, %q, %q", list[0].URL, list[2].URL, list[3].URL)
 	}
 	box := list[1]
 	if !box.IsSandbox() || box.Type != "sandbox" || box.URL != "" || box.Port != 0 || box.Volume != "/in:/in" {

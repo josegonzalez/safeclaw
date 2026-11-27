@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -283,5 +284,85 @@ func TestSessionTerminalsNotOnCookieHost(t *testing.T) {
 	}
 	if u := session.URLFor(7681); strings.Contains(u, cookieHost) {
 		t.Errorf("session URL %s uses the cookie host", u)
+	}
+}
+
+// ttydOriginOK is ttyd 1.7.7's -O check (check_host_origin): Origin's host,
+// which libwebsockets parses without brackets, plus its port unless it is
+// 80 or 443, must equal the Host header as sent.
+func ttydOriginOK(origin, host string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	want := u.Hostname()
+	if p := u.Port(); p != "" && p != "80" && p != "443" {
+		want += ":" + p
+	}
+	return strings.EqualFold(want, host)
+}
+
+// TestTerminalRelayPassesTTYDOriginCheckOnIPv6 relays to a session published
+// on [::1], as sessions are, through a stand-in that applies ttyd's origin
+// check. The relay dials [::1] but names localhost as the Host and Origin,
+// since ttyd never accepts a bracketed [::1] Host.
+func TestTerminalRelayPassesTTYDOriginCheckOnIPv6(t *testing.T) {
+	if ttydOriginOK("http://[::1]:7681", "[::1]:7681") || !ttydOriginOK("http://localhost:7681", "localhost:7681") {
+		t.Fatal("ttydOriginOK does not match ttyd")
+	}
+	l, err := net.Listen("tcp", net.JoinHostPort(session.PublishHost, "0"))
+	if err != nil {
+		t.Skipf("can't listen on [%s]: %v", session.PublishHost, err)
+	}
+	var mu sync.Mutex
+	var gotHost, gotOrigin string
+	hello := make(chan map[string]any, 1)
+	tty := &httptest.Server{Listener: l, Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotHost, gotOrigin = r.Host, r.Header.Get("Origin")
+		mu.Unlock()
+		if !ttydOriginOK(r.Header.Get("Origin"), r.Host) {
+			http.Error(w, "origin", http.StatusForbidden)
+			return
+		}
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{"tty"}, InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.CloseNow() }()
+		_, msg, err := c.Read(r.Context())
+		if err != nil {
+			return
+		}
+		var h map[string]any
+		_ = json.Unmarshal(msg, &h)
+		hello <- h
+		_ = c.Close(websocket.StatusNormalClosure, "")
+	})}}
+	tty.Start()
+	t.Cleanup(tty.Close)
+	_, port, _ := net.SplitHostPort(l.Addr().String())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	term := &session.Terminal{Addr: l.Addr().String(), Host: "localhost:" + port, Credential: testCred}
+	c, err := dialTerminal(ctx, term)
+	mu.Lock()
+	host, origin := gotHost, gotOrigin
+	mu.Unlock()
+	if err != nil {
+		t.Fatalf("dial %s: %v (Host %q, Origin %q)", term.Addr, err, host, origin)
+	}
+	defer func() { _ = c.CloseNow() }()
+	if err := c.Write(ctx, websocket.MessageText, []byte(`{"columns":80}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case h := <-hello:
+		if h["columns"] != float64(80) {
+			t.Errorf("hello = %v", h)
+		}
+	case <-ctx.Done():
+		t.Fatal("no hello")
 	}
 }

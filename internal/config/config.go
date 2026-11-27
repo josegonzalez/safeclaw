@@ -76,6 +76,12 @@ const (
 	// BaseVariant names the base image wherever a variant is expected.
 	BaseVariant = "base"
 
+	// LabelBracketedHostTTYD is the image label, copied onto its containers,
+	// marking an image whose ttyd accepts a bracketed IPv6 Host such as
+	// [::1]:PORT in its origin check. It is outside LabelPrefix because the
+	// image sets it. Containers without it get localhost URLs.
+	LabelBracketedHostTTYD = "io.github.josegonzalez.safeclaw.ttyd-bracketed-host"
+
 	// LabelSecrets is the container label that records which secrets an
 	// interactive session receives, as comma-separated names. Containers
 	// without it get every secret, and an empty value means none.

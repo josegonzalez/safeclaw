@@ -128,14 +128,21 @@ var ErrImageLabel = errors.New("image carries a safeclaw label")
 // variant ("" for the base image) exists, and one wrapping ErrImageLabel if
 // it carries safeclaw labels other than its own variant's.
 func (m *Manager) checkImage(ctx context.Context, name string) error {
+	_, err := m.checkedImageLabels(ctx, name)
+	return err
+}
+
+// checkedImageLabels checks the image for a variant like checkImage and
+// returns its labels.
+func (m *Manager) checkedImageLabels(ctx context.Context, name string) (map[string]string, error) {
 	img, err := m.Docker.InspectImage(ctx, variant.Image(name))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if img == nil {
-		return noImageError{variant: name}
+		return nil, noImageError{variant: name}
 	}
-	return checkImageLabels(variant.Image(name), name, img.Config.Labels)
+	return img.Config.Labels, checkImageLabels(variant.Image(name), name, img.Config.Labels)
 }
 
 // checkImageLabels refuses an image carrying any safeclaw label except the
@@ -445,8 +452,9 @@ func (m *Manager) portFree(port int) bool {
 	if m.PortFree != nil {
 		return m.PortFree(port)
 	}
-	// Sessions are published on PublishHost, but browsers may try either
-	// address for localhost, so both must be free.
+	// Sessions are published on PublishHost, and their URLs name it, but a
+	// port another program holds on 127.0.0.1 is skipped too, so a session
+	// port means the same thing on either loopback address.
 	for _, host := range []string{PublishHost, legacyPublishHost} {
 		l, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 		if err != nil {
@@ -527,10 +535,10 @@ type Result struct {
 	Offline bool
 }
 
-// URLFor returns the session URL for a host port, without the credential
-// ttyd requires; see URLWithCredential.
+// URLFor returns the URL of a session published on PublishHost at a host
+// port, without the credential ttyd requires; see URLWithCredential.
 func URLFor(port int) string {
-	return fmt.Sprintf("http://localhost:%d", port)
+	return urlOn(PublishHost, port, nil)
 }
 
 // Ensure creates, starts, or refreshes a session container and starts ttyd
@@ -569,7 +577,8 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := m.checkImage(ctx, want); err != nil {
+	imageLabels, err := m.checkedImageLabels(ctx, want)
+	if err != nil {
 		return nil, err
 	}
 
@@ -694,6 +703,15 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if existing != nil && !hostIPC && sharesHostIPC(*existing) {
 		m.printf("Warning: session %s shares the host's IPC namespace because it was created before private namespaces became the default. Run with --host-ipc=false to recreate it with a private one, or --host-ipc to keep sharing it\n", name)
 	}
+	// A kept container keeps its address and its image's ttyd, which its
+	// URL depends on; a new one is published on PublishHost.
+	host := urlHost(PublishHost, imageLabels)
+	if existing != nil && existing.HostPort(config.TTYDPort) > 0 {
+		host = containerURLHost(*existing)
+	}
+	if host == "localhost" {
+		m.printf("Warning: session %s's URL uses localhost, which shares cookies with other local web apps, because its image's ttyd refuses [::1] URLs. Update the image with `safeclaw pull` or `safeclaw build`, then recreate the session, for example with -v or `safeclaw rm`\n", name)
+	}
 	if existing != nil && existing.HostPort(config.TTYDPort) > 0 && publishedOnCookieHost(*existing) {
 		m.printf("Warning: session %s publishes its terminal on 127.0.0.1, the dashboard's cookie host, because it was created before terminals moved to [::1]. Recreate it, for example with -v or `safeclaw rm`, to move it\n", name)
 	}
@@ -792,7 +810,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 
-	res := &Result{Name: name, Container: container, Port: port, URL: URLWithCredential(port, cred), Offline: offline}
+	res := &Result{Name: name, Container: container, Port: port, URL: urlOn(host, port, &cred), Offline: offline}
 	m.printf("\nSafeClaw is running at: %s\n", res.URL)
 	if offline {
 		m.printf("Warning: this session is offline, so its web terminal is unreachable until: safeclaw net on %s\n", name)
@@ -1219,7 +1237,7 @@ func (m *Manager) List(ctx context.Context) ([]Session, error) {
 		if s.Active {
 			if p := c.HostPort(config.TTYDPort); p > 0 {
 				s.Port = p
-				s.URL = URLFor(p)
+				s.URL = urlOn(containerURLHost(c), p, nil)
 			}
 		}
 		out = append(out, s)
