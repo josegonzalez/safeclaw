@@ -100,6 +100,12 @@ type Container struct {
 		// PidMode is the PID namespace, "" for the container's own or
 		// "host".
 		PidMode string `json:"PidMode"`
+		// LogConfig is the logging driver, e.g. "json-file" or "none",
+		// and its --log-opt options.
+		LogConfig struct {
+			Type   string            `json:"Type"`
+			Config map[string]string `json:"Config"`
+		} `json:"LogConfig"`
 	} `json:"HostConfig"`
 	NetworkSettings struct {
 		// Networks are the networks the container is connected to, by name.

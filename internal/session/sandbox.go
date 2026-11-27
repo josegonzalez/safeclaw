@@ -473,7 +473,11 @@ func EphemeralRunArgs(container string, opts SandboxOptions, exec ExecOptions, c
 // sandboxArgs returns the `docker run` flags every sandbox gets: its name,
 // label, isolation, limits, and optional read-only volume. /sandbox is a
 // tmpfs of opts.Disk bytes owned by the sandbox user, since docker volumes
-// can't be size-limited on most storage drivers.
+// can't be size-limited on most storage drivers. The container keeps no
+// log, whatever the daemon's default driver: any sandbox process can write
+// to PID 1's stdout through /proc/1/fd/1, and a log would keep those bytes
+// on the docker host's disk outside every limit. Nothing reads a sandbox's
+// log, since a one-off sandbox's output reaches the caller attached.
 func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 	opts = opts.withDefaults()
 	disk, err := diskBytes(opts.Disk)
@@ -494,6 +498,7 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 		"--env", "PATH="+sandboxPath,
 		"--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges",
+		"--log-driver", sandboxLogDriver,
 		"--read-only",
 		"--tmpfs", sandboxTmpfs,
 		"--tmpfs", fmt.Sprintf("%s:%s,size=%d,uid=%d,gid=%d,mode=0700", config.SandboxDir, sandboxDirOptions, disk, sandboxUID, sandboxUID),
