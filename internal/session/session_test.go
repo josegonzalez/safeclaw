@@ -23,8 +23,9 @@ import (
 type fakeContainer struct {
 	Running bool
 	Port    int
-	// HostIP is the address Port is published on. Defaults to 127.0.0.1,
-	// as for containers created before terminals moved to [::1].
+	// HostIP is the address Port is published on. Defaults to ::1. Set it
+	// to 127.0.0.1 or 0.0.0.0 for a container created before terminals
+	// moved to [::1].
 	HostIP string
 	Mounts []string // source:destination bind mounts, or a bare anonymous volume path
 	Image  string
@@ -51,6 +52,9 @@ type fakeContainer struct {
 	// Unhardened containers keep docker's default capabilities and
 	// security options, like ones created before sessions dropped them.
 	Unhardened bool
+	// OldTTYD containers lack the labels of images whose ttyd accepts a
+	// bracketed IPv6 Host, like ones made from an image before it did.
+	OldTTYD bool
 }
 
 // networks returns the attached networks, materializing the default.
@@ -125,7 +129,7 @@ func (w *world) inspectJSON(names []string) []byte {
 		if c.Port > 0 {
 			ip := c.HostIP
 			if ip == "" {
-				ip = "127.0.0.1"
+				ip = "::1"
 			}
 			bindings["7681/tcp"] = []map[string]string{{"HostIp": ip, "HostPort": fmt.Sprint(c.Port)}}
 		}
@@ -152,7 +156,7 @@ func (w *world) inspectJSON(names []string) []byte {
 		nets := c.networks()
 		// Containers carry their image's labels, as made by run.
 		labels := maps.Clone(c.Labels)
-		if !w.oldTTYD {
+		if !w.oldTTYD && !c.OldTTYD {
 			if labels == nil {
 				labels = map[string]string{}
 			}
@@ -661,7 +665,7 @@ func TestEnsurePromptsWhenInteractive(t *testing.T) {
 
 func TestList(t *testing.T) {
 	w := &world{image: "img", containers: map[string]*fakeContainer{
-		"safeclaw-zeta":  {Running: true, Port: 7682, Mounts: []string{"/s:/home/sclaw/.claude/projects", "/p:/home/sclaw/p"}},
+		"safeclaw-zeta":  {Running: true, Port: 7682, HostIP: "127.0.0.1", Mounts: []string{"/s:/home/sclaw/.claude/projects", "/p:/home/sclaw/p"}},
 		"safeclaw-alpha": {Port: 7681, Mounts: []string{"/s:/home/sclaw/.claude/projects"}},
 		"safeclaw-beta":  {Running: true, Port: 7683, HostIP: "::1"},
 		"safeclaw-box":   {Running: true, Mounts: []string{"/sandbox", "/in:/in:ro"}, Labels: sandboxLabels, AutoRemove: true},
