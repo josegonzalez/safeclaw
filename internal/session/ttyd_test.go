@@ -89,13 +89,16 @@ func TestCredentialFileIsPrivateAndPersists(t *testing.T) {
 		t.Errorf("credential %s is inside the mounted history dir %s", path, m.SessionsDir)
 	}
 
-	// Restarting ttyd in the running container keeps the credential.
+	// Restarting ttyd replaces the credential, and the file stays private.
 	if _, err := m.Ensure(ctx, Options{Name: "work", NoOpen: true}); err != nil {
 		t.Fatal(err)
 	}
 	again, err := m.Credential("work")
-	if err != nil || again != first {
-		t.Errorf("credential changed across restarts: %+v, %+v (%v)", first, again, err)
+	if err != nil || again == first {
+		t.Errorf("credential after restarting ttyd = %+v, %v; want a new one", again, err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("rotated credential file = %v, %v; want mode 0600", fi, err)
 	}
 
 	if err := m.Delete(ctx, "work", true); err != nil {
@@ -120,34 +123,47 @@ func lastCredentialWrite(t *testing.T, r *dockertest.Runner, container string) s
 	return ""
 }
 
-// A new container for a session's name gets a new credential, which its
-// ttyd is started with; restarting a container keeps it.
+// Every ttyd start gets a new credential, which the container's credential
+// file, the printed URL, and the dashboard's relay get too: a new
+// container, a stopped one started again, and a running one whose ttyd is
+// restarted. A stopped container's port is released, so whatever held it
+// meanwhile may have been sent the old credential by an open tab.
 func TestCredentialRotatesWithContainer(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name    string
 		replace func(t *testing.T, w *world, m *Manager) Options
-		rotated bool
 	}{
 		{"plain run", func(*testing.T, *world, *Manager) Options {
 			return Options{Name: "work"}
-		}, false},
+		}},
 		{"start", func(_ *testing.T, w *world, _ *Manager) Options {
 			w.containers["safeclaw-work"].Running = false
 			return Options{Name: "work"}
-		}, false},
+		}},
+		{"stop then start", func(t *testing.T, _ *world, m *Manager) Options {
+			if err := m.Stop(ctx, "work"); err != nil {
+				t.Fatal(err)
+			}
+			return Options{Name: "work"}
+		}},
+		{"start offline", func(_ *testing.T, w *world, _ *Manager) Options {
+			w.containers["safeclaw-work"].Running = false
+			w.containers["safeclaw-work"].Offline = true
+			return Options{Name: "work"}
+		}},
 		{"same secrets", func(*testing.T, *world, *Manager) Options {
 			return Options{Name: "work", Secrets: ptr(AllSecrets())}
-		}, false},
+		}},
 		{"secrets", func(*testing.T, *world, *Manager) Options {
 			return Options{Name: "work", Secrets: ptr(NoSecrets())}
-		}, true},
+		}},
 		{"fresh history", func(*testing.T, *world, *Manager) Options {
 			return Options{Name: "work", FreshHistory: true}
-		}, true},
+		}},
 		{"volume", func(*testing.T, *world, *Manager) Options {
 			return Options{Name: "work", Volume: "/host/proj:/home/sclaw/proj"}
-		}, true},
+		}},
 		{"build recreate", func(t *testing.T, _ *world, m *Manager) Options {
 			c, err := m.Docker.InspectOne(ctx, "safeclaw-work")
 			if err != nil || c == nil {
@@ -157,11 +173,11 @@ func TestCredentialRotatesWithContainer(t *testing.T) {
 				t.Fatalf("removed %v, err %v", removed, err)
 			}
 			return Options{Name: "work"}
-		}, true},
+		}},
 		{"removed outside safeclaw", func(_ *testing.T, w *world, _ *Manager) Options {
 			delete(w.containers, "safeclaw-work")
 			return Options{Name: "work"}
-		}, true},
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &world{image: "img", containers: map[string]*fakeContainer{}, native: true}
@@ -184,8 +200,8 @@ func TestCredentialRotatesWithContainer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if rotated := cred != old; rotated != tc.rotated {
-				t.Errorf("credential rotated = %v, want %v", rotated, tc.rotated)
+			if cred == old {
+				t.Errorf("credential kept across a ttyd start: %+v", cred)
 			}
 			if got := lastCredentialWrite(t, r, "safeclaw-work"); got != cred.String() {
 				t.Errorf("ttyd started with %q, host has %q", got, cred.String())
@@ -193,12 +209,20 @@ func TestCredentialRotatesWithContainer(t *testing.T) {
 			if res.URL != URLWithCredential(res.Port, cred) {
 				t.Errorf("url = %q, want the current credential", res.URL)
 			}
+			if res.Offline {
+				return
+			}
+			term, err := m.Terminal(ctx, "work")
+			if err != nil || term.Credential != cred || term.URL() != res.URL {
+				t.Errorf("terminal = %+v, %v; want the current credential", term, err)
+			}
 		})
 	}
 }
 
-// A container restored after a failed recreate starts its ttyd with the
-// host's credential, which no container that could read the old one has.
+// A container restored after a failed recreate runs no ttyd until the next
+// run starts one with a new credential, which no container that could read
+// the old one has.
 func TestCredentialAfterFailedRecreate(t *testing.T) {
 	ctx := context.Background()
 	runFailed := errors.New("docker run failed")
@@ -213,6 +237,7 @@ func TestCredentialAfterFailedRecreate(t *testing.T) {
 			t.Fatal(err)
 		}
 		w.runErrs = []runErr{{err: runFailed, leaveCreated: leaveCreated}}
+		r.Calls = nil
 		if _, err := m.Ensure(ctx, Options{Name: "work", Secrets: ptr(NoSecrets()), FreshHistory: true, NoOpen: true}); !errors.Is(err, runFailed) {
 			t.Fatalf("err = %v", err)
 		}
@@ -220,9 +245,8 @@ func TestCredentialAfterFailedRecreate(t *testing.T) {
 		if err != nil || c == nil || !c.State.Running || !secretsOf(*c).Equal(AllSecrets()) {
 			t.Fatalf("container not restored: %+v", c)
 		}
-		restored, err := m.Credential("work")
-		if err != nil || restored == old {
-			t.Errorf("credential after a failed recreate = %+v, %v; want a new one", restored, err)
+		if hasCall(r, "exec -d safeclaw-work") {
+			t.Errorf("ttyd started after a failed recreate: %v", r.Commands())
 		}
 
 		r.Calls = nil
@@ -234,8 +258,8 @@ func TestCredentialAfterFailedRecreate(t *testing.T) {
 			t.Errorf("plain run recreated the restored container: %v", r.Commands())
 		}
 		cred, err := m.Credential("work")
-		if err != nil || cred != restored {
-			t.Errorf("credential changed on a plain run: %+v, %+v (%v)", restored, cred, err)
+		if err != nil || cred == old {
+			t.Errorf("credential of the restored container's ttyd = %+v, %v; want a new one", cred, err)
 		}
 		if got := lastCredentialWrite(t, r, "safeclaw-work"); got != cred.String() {
 			t.Errorf("ttyd started with %q, host has %q", got, cred.String())
