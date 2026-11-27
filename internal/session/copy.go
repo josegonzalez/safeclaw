@@ -377,10 +377,13 @@ func extractTop(r io.Reader, dir string, globs []string, limit int64) ([]string,
 			return nil, fmt.Errorf("%s appears more than once", name)
 		}
 		seen[name] = true
-		total += hdr.Size
-		if limit > 0 && total > limit {
+		// Compare against what is left rather than adding first: total never
+		// exceeds limit, so limit-total can't overflow, while a declared size
+		// near math.MaxInt64 would wrap the sum.
+		if limit > 0 && hdr.Size > limit-total {
 			return nil, fmt.Errorf("files matching --only %w (%d bytes)", ErrTooLarge, limit)
 		}
+		total += hdr.Size
 		f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, copyFileMode)
 		if err != nil {
 			return nil, err
