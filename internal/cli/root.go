@@ -22,6 +22,12 @@ import (
 func Execute() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// Every command may read or write the config directory, which holds
+	// session history and credentials, so it is checked before any runs.
+	if err := config.SecureDir(os.Stderr); err != nil {
+		printError(os.Stderr, err)
+		return 1
+	}
 	if err := NewRootCommand().ExecuteContext(ctx); err != nil {
 		var exit exitCodeError
 		if errors.As(err, &exit) {

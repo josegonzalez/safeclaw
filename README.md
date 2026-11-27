@@ -176,6 +176,8 @@ This maps to `/home/sclaw/.claude/projects/` inside the container and includes:
 - **Conversations** - JSONL files (one per conversation)
 - **Memory** - Auto memory at `-home-sclaw/memory/MEMORY.md`, loaded into the system prompt each conversation
 
+`~/.config/safeclaw` and the history directories in it are readable only by you (mode 0700). safeclaw restricts one that is open to others, and refuses to run with one owned by another user; see [config directory](docs/architecture.md#config-directory).
+
 Rebuilding containers or restarting sessions won't affect your history or memory. A session created again with a different set of secrets keeps it too, with a warning. To start a session with an empty history, pass `--fresh-history` to `run` or `new`, which moves the old one aside to `<session-name>.old-<timestamp>` and recreates the container:
 
 ```bash

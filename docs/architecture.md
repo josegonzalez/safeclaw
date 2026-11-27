@@ -73,7 +73,7 @@ Earlier versions accepted uppercase letters. If a container was created with exa
 3. Create, start, or refresh the container. With `-v`, a `--variant` other than the container's, a different set of secrets, a different [`--host-ipc`](#ipc-namespace) choice, or [`--fresh-history`](#reused-history), an existing container is recreated, keeping its port and whichever of its mount, variant, secrets, and IPC choice were not given again. Every volume is checked before the old container is removed, and if the new one can't be created, the old one is created again with its port, mounts, variant, secrets, and IPC choice, so a failed recreate never loses the session's secret set. A running container has ttyd and tmux restarted so new env vars take effect. An [offline](#offline-sessions) session is never recreated, and starting it keeps it offline
 4. Write `/home/sclaw/.env` from the secrets the session receives
 5. Configure git from the GitHub account if the session receives `GH_TOKEN`
-6. Start ttyd with the session's [terminal credential](#terminal-credential), and with `-q`, wait for Claude Code's input prompt before sending the query
+6. Start ttyd with the session's [terminal credential](#terminal-credential), and with `-q`, wait for Claude Code's input prompt before sending the query, typed literally with `tmux send-keys -l --` so a query starting with `-` isn't read as options
 
 ### Labels
 
@@ -84,6 +84,18 @@ safeclaw records what it decided about a container in `safeclaw.*` labels: its t
 A session gets docker's default private IPC namespace and its own `/dev/shm`, so code Claude Code runs can't see or attach to the docker host's shared memory, semaphores, or message queues. On a native Linux docker host that is the real host's; on Docker Desktop or OrbStack it is the Linux VM's. No `--shm-size` is set: Playwright starts Chromium with `--disable-dev-shm-usage`, so the browser works with docker's default 64 MB `/dev/shm`.
 
 `--host-ipc` on `run` or `new` opts a session into `--ipc=host`, recorded in the `safeclaw.ipc=host` label so recreates keep it, and `--host-ipc=false` moves it back to a private namespace. Sessions created before private namespaces became the default share the host's without the label: `run` keeps them as they are with a warning, `--host-ipc=false` or `--host-ipc` recreates them with that choice, and any other recreate gives them a private namespace.
+
+### Privileges
+
+Sessions run with `--cap-drop ALL` and `--security-opt no-new-privileges`, like sandboxes. Everything in a session runs as the unprivileged `sclaw` user, which needs no capabilities: Claude Code, git, gh, tmux, and ttyd don't, Playwright starts Chromium with `--no-sandbox` so it needs no user namespaces, and the `.env` and terminal credential writes are files sclaw owns. The image has no sudo, and with `no-new-privileges` the setuid and setgid binaries it does have (`su`, `passwd`, `mount`, `ssh-agent`, and the like) run without gaining privileges, so even a `root` process started with `docker exec -u root` has no capabilities.
+
+The history directory is mounted with plain bind-mount options: docker's `-v` and `--mount type=bind` take no `nosuid` or `nodev`, and a bind volume made with the `local` driver's `o=bind,nosuid,nodev` doesn't carry the flags into the container. The same protections come from the flags above: setuid bits are ignored under `no-new-privileges`, and nothing can make a device node without `CAP_MKNOD`.
+
+Sessions created before this keep docker's default capabilities. `run` keeps them as they are with a warning, and any recreate, for example with `-v` or after `safeclaw rm`, drops them.
+
+### Config directory
+
+Before any command runs, safeclaw checks `~/.config/safeclaw` (honoring `XDG_CONFIG_HOME`, and following a symlink to its target). One owned by another user is refused, since they could read or replace the history, credentials, and tokens kept there; the error suggests removing it or setting `XDG_CONFIG_HOME`. One owned by the user but open to others, for example one made with `mkdir -p` to write `config.yaml`, is restricted to 0700 with a note. Directories safeclaw creates there are 0700, including `sessions/` and each session's history directory, and ones created open to others by earlier versions are restricted when a container is created for them.
 
 ## Sandboxes
 
