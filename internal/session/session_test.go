@@ -47,6 +47,9 @@ type fakeContainer struct {
 	Nets map[string]docker.Endpoint
 	// Offline means no attached networks.
 	Offline bool
+	// Unhardened containers keep docker's default capabilities and
+	// security options, like ones created before sessions dropped them.
+	Unhardened bool
 }
 
 // networks returns the attached networks, materializing the default.
@@ -130,6 +133,10 @@ func (w *world) inspectJSON(names []string) []byte {
 		if ipc == "" {
 			ipc = "private"
 		}
+		capDrop, secOpt := []string{"ALL"}, []string{"no-new-privileges"}
+		if c.Unhardened {
+			capDrop, secOpt = nil, nil
+		}
 		nets := c.networks()
 		out = append(out, map[string]any{
 			"Id":              id,
@@ -137,7 +144,7 @@ func (w *world) inspectJSON(names []string) []byte {
 			"Image":           c.Image,
 			"Config":          map[string]any{"Labels": c.Labels},
 			"State":           map[string]any{"Status": status, "Running": c.Running},
-			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode, "IpcMode": ipc, "Tmpfs": c.Tmpfs},
+			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode, "IpcMode": ipc, "Tmpfs": c.Tmpfs, "CapDrop": capDrop, "SecurityOpt": secOpt},
 			"NetworkSettings": map[string]any{"Networks": nets},
 			"Mounts":          mounts,
 		})
@@ -182,6 +189,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		ipc := ""
 		mode := ""
 		image := ""
+		capDropAll, noNewPrivs := false, false
 		if i := slices.Index(args, "sleep"); i > 0 {
 			image = args[i-1]
 		}
@@ -223,6 +231,10 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 				mode = args[i+1]
 			case "--ipc=host":
 				ipc = "host"
+			case "--cap-drop":
+				capDropAll = capDropAll || args[i+1] == "ALL"
+			case "--security-opt":
+				noNewPrivs = noNewPrivs || args[i+1] == "no-new-privileges"
 			}
 		}
 		id := w.image
@@ -238,7 +250,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		}
 		w.runs++
 		w.containers[name] = &fakeContainer{Running: fail.err == nil, Port: port, HostIP: hostIP, Mounts: mounts, Image: id, RunImage: image, Labels: labels, AutoRemove: autoRemove,
-			Memory: memory, NanoCPUs: cpus, PidsLimit: pids, Tmpfs: tmpfs, ID: fmt.Sprintf("id-%s-%d", name, w.runs), NetworkMode: mode, IpcMode: ipc, Offline: mode == "none"}
+			Memory: memory, NanoCPUs: cpus, PidsLimit: pids, Tmpfs: tmpfs, ID: fmt.Sprintf("id-%s-%d", name, w.runs), NetworkMode: mode, IpcMode: ipc, Offline: mode == "none", Unhardened: !capDropAll || !noNewPrivs}
 		return []byte("id\n"), fail.err
 	case args[0] == "rm":
 		delete(w.containers, args[len(args)-1])
@@ -351,7 +363,7 @@ func TestEnsureCreatesContainer(t *testing.T) {
 	if !ok {
 		t.Fatal("no docker run")
 	}
-	want := "run -d --name safeclaw-work --label safeclaw.type=session -p [::1]:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects safeclaw sleep infinity"
+	want := "run -d --name safeclaw-work --label safeclaw.type=session --cap-drop ALL --security-opt no-new-privileges -p [::1]:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects safeclaw sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -450,7 +462,7 @@ func TestEnsureQuery(t *testing.T) {
 	}
 	cmds := r.Commands()
 	i := slices.Index(cmds, "exec safeclaw-q safeclaw ttyd-wrapper --no-attach")
-	j := slices.Index(cmds, "exec safeclaw-q tmux send-keys -t main -l Enter the dragon")
+	j := slices.Index(cmds, "exec safeclaw-q tmux send-keys -t main -l -- Enter the dragon")
 	if i < 0 || j < i {
 		t.Fatalf("query flow wrong: %v", cmds)
 	}

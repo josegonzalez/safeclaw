@@ -319,6 +319,22 @@ func ipcArgs(host bool) []string {
 	return []string{"--ipc=" + config.IPCHost, "--label", config.LabelIPC + "=" + config.IPCHost}
 }
 
+// hardenArgs are the `docker run` flags that take every capability from a
+// session and keep its processes from gaining privileges, for example from
+// setuid binaries. Sessions run everything as the unprivileged sclaw user,
+// which needs no capabilities: Playwright starts Chromium with --no-sandbox,
+// and nothing in a session uses sudo, su, or ping.
+var hardenArgs = []string{"--cap-drop", "ALL", "--security-opt", "no-new-privileges"}
+
+// hardened reports whether a container was created with hardenArgs.
+// Containers created before sessions dropped their capabilities were not.
+func hardened(c docker.Container) bool {
+	return slices.ContainsFunc(c.HostConfig.CapDrop, func(s string) bool { return strings.EqualFold(s, "ALL") }) &&
+		slices.ContainsFunc(c.HostConfig.SecurityOpt, func(s string) bool {
+			return s == "no-new-privileges" || s == "no-new-privileges:true" || s == "no-new-privileges=true"
+		})
+}
+
 func (m *Manager) out() io.Writer {
 	if m.Out == nil {
 		return io.Discard
@@ -578,6 +594,9 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	if existing != nil && existing.HostPort(config.TTYDPort) > 0 && publishedOnCookieHost(*existing) {
 		m.printf("Warning: session %s publishes its terminal on 127.0.0.1, the dashboard's cookie host, because it was created before terminals moved to [::1]. Recreate it, for example with -v or `safeclaw rm`, to move it\n", name)
 	}
+	if existing != nil && !hardened(*existing) {
+		m.printf("Warning: session %s keeps docker's default capabilities and can gain privileges, because it was created before sessions dropped them. Recreate it, for example with -v or `safeclaw rm`, to drop them\n", name)
+	}
 
 	if port == 0 {
 		port, err = m.allocatePort(ctx)
@@ -814,9 +833,14 @@ func (m *Manager) unarchiveHistory(name, archived string) error {
 // create runs a session container. It gets docker's default private IPC
 // namespace and /dev/shm unless hostIPC is set: Playwright launches Chromium
 // with --disable-dev-shm-usage, so the default 64 MiB /dev/shm is enough.
+//
+// The history mount is a plain bind mount: docker's bind mounts take no
+// nosuid or nodev option, but hardenArgs cover both, since setuid bits are
+// ignored with no-new-privileges and device nodes can't be made without
+// CAP_MKNOD.
 func (m *Manager) create(ctx context.Context, name, container string, port int, variantName string, set SecretSet, hostIPC bool, volumes []string) error {
-	dataDir := filepath.Join(m.SessionsDir, name)
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	dataDir, err := m.historyDir(name)
+	if err != nil {
 		return err
 	}
 	args := []string{"-d"}
@@ -825,6 +849,7 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 		"--name", container,
 		"--label", config.LabelType+"="+config.TypeSession,
 	)
+	args = append(args, hardenArgs...)
 	args = append(args, publishArgs(port)...)
 	args = append(args, "-v", dataDir+":"+config.ProjectsMount)
 	args = append(args, variantArgs(variantName)...)
@@ -838,8 +863,25 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 		args = append(args, "-v", v)
 	}
 	args = append(args, variant.Image(variantName), "sleep", "infinity")
-	_, err := m.Docker.Run(ctx, args...)
+	_, err = m.Docker.Run(ctx, args...)
 	return err
+}
+
+// historyDir creates a session's history directory, and the directory
+// holding every session's, readable only by the user: they hold transcripts
+// and memory. Ones created open to others, before history was kept private,
+// are restricted too.
+func (m *Manager) historyDir(name string) (string, error) {
+	dir := filepath.Join(m.SessionsDir, name)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	for _, d := range []string{m.SessionsDir, dir} {
+		if err := os.Chmod(d, 0o700); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
 }
 
 // ExpandVolume expands a leading ~ and relative paths in the host part of a
@@ -903,7 +945,8 @@ func (m *Manager) sendQuery(ctx context.Context, container string, native bool, 
 		_, err := m.Docker.Exec(ctx, container, docker.ExecOptions{}, args...)
 		return err
 	}
-	if err := tmux("-l", query); err != nil {
+	// -- keeps a query starting with '-' from being read as options.
+	if err := tmux("-l", "--", query); err != nil {
 		return err
 	}
 	if err := tmux("Enter"); err != nil {

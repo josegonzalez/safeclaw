@@ -56,6 +56,17 @@ func TestIntegrationLifecycle(t *testing.T) {
 	waitHTTP(t, res.URL)
 	if c, err := d.InspectOne(ctx, res.Container); err != nil || c == nil || c.HostConfig.IpcMode == config.IPCHost {
 		t.Errorf("session shares the host IPC namespace: %+v, %v", c, err)
+	} else if !hardened(*c) {
+		t.Errorf("session keeps its capabilities: %v %v", c.HostConfig.CapDrop, c.HostConfig.SecurityOpt)
+	}
+	// Its processes have no capabilities and can't gain privileges, and its
+	// private history directory is still writable from inside.
+	out, err := d.Exec(ctx, res.Container, docker.ExecOptions{}, "sh", "-c", `grep -E '^(CapBnd|NoNewPrivs)' /proc/self/status && touch `+config.ProjectsMount+`/.itest && rm `+config.ProjectsMount+`/.itest`)
+	if err != nil || !strings.Contains(string(out), "CapBnd:\t0000000000000000") || !strings.Contains(string(out), "NoNewPrivs:\t1") {
+		t.Errorf("session privileges = %q, %v", out, err)
+	}
+	if info, err := os.Stat(filepath.Join(m.SessionsDir, name)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("history dir: %v, %v", info, err)
 	}
 	// Without the credential, ttyd refuses the request, and nothing
 	// answers on the dashboard cookie's host.

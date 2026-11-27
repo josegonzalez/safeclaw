@@ -79,6 +79,11 @@ type Container struct {
 		// Tmpfs maps each --tmpfs mount point to its options, e.g.
 		// "rw,size=1073741824".
 		Tmpfs map[string]string `json:"Tmpfs"`
+		// CapDrop are the capabilities dropped with --cap-drop.
+		CapDrop []string `json:"CapDrop"`
+		// SecurityOpt are the --security-opt options, e.g.
+		// "no-new-privileges".
+		SecurityOpt []string `json:"SecurityOpt"`
 	} `json:"HostConfig"`
 	NetworkSettings struct {
 		// Networks are the networks the container is connected to, by name.
