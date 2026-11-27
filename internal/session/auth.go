@@ -121,7 +121,7 @@ func (m *Manager) SetupToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	cleanup := context.WithoutCancel(ctx)
-	m.removeAuthContainers(cleanup)
+	m.RemoveStaleAuthContainers(cleanup)
 
 	id, err := m.Docker.Run(ctx, "-d", "--label", config.LabelAuth+"="+strconv.Itoa(os.Getpid()), config.ImageName, "sleep", "infinity")
 	if err != nil {
@@ -135,17 +135,21 @@ func (m *Manager) SetupToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("claude setup-token: %w", err)
 	}
 	out, err := m.Docker.Exec(ctx, id, docker.ExecOptions{}, "cat", setupTokenLog)
+	// Drop the recording, which holds the token, as soon as it is read, so
+	// it doesn't outlive this process if it is killed before the container
+	// is removed.
+	_, _ = m.Docker.Exec(cleanup, id, docker.ExecOptions{}, "rm", "-f", setupTokenLog)
 	if err != nil {
 		return "", fmt.Errorf("read the setup-token output: %w", err)
 	}
 	return ParseSetupToken(out)
 }
 
-// removeAuthContainers removes sign-in containers left by an earlier login
-// that was killed before it could clean up. Each is labeled with the PID of
-// the safeclaw process that started it, so another login still running is
-// left alone.
-func (m *Manager) removeAuthContainers(ctx context.Context) {
+// RemoveStaleAuthContainers removes sign-in containers left by an earlier
+// login that was killed before it could clean up. Each is labeled with the
+// PID of the safeclaw process that started it, so another login still
+// running is left alone. It is best effort and costs one `docker ps`.
+func (m *Manager) RemoveStaleAuthContainers(ctx context.Context) {
 	out, err := m.Docker.R.Output(ctx, nil, "ps", "-a", "--filter", "label="+config.LabelAuth, "--format", `{{.ID}} {{.Label "`+config.LabelAuth+`"}}`)
 	if err != nil {
 		return

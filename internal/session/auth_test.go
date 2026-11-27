@@ -117,6 +117,7 @@ func TestErrNoClaudeTokenPointsToAuth(t *testing.T) {
 type authWorld struct {
 	noImage  bool
 	execErr  error
+	catErr   error
 	log      string
 	leftover string
 }
@@ -136,7 +137,10 @@ func (w *authWorld) handle(args []string, _ string) ([]byte, error) {
 		if slices.Contains(args, "-it") {
 			return nil, w.execErr
 		}
-		return []byte(w.log), nil
+		if slices.Contains(args, "cat") {
+			return []byte(w.log), w.catErr
+		}
+		return nil, nil
 	}
 	return nil, nil
 }
@@ -163,6 +167,7 @@ func TestSetupToken(t *testing.T) {
 		"run -d --label safeclaw.auth=" + strconv.Itoa(os.Getpid()) + " safeclaw sleep infinity",
 		"exec -it authid script -qec claude setup-token /tmp/setup-token.log",
 		"exec authid cat /tmp/setup-token.log",
+		"exec authid rm -f /tmp/setup-token.log",
 		"rm -v -f authid",
 	}
 	if got := r.Commands(); !slices.Equal(got, want) {
@@ -185,6 +190,41 @@ func TestSetupTokenRemovesContainerOnFailure(t *testing.T) {
 				t.Errorf("container not removed: %v", r.Commands())
 			}
 		})
+	}
+}
+
+// The recording is removed right after it is read, even when reading it
+// fails or it holds no token, so it never waits for the container's removal.
+func TestSetupTokenRemovesLogAfterReading(t *testing.T) {
+	for name, w := range map[string]*authWorld{
+		"token":     {log: fakeToken + "\r\n"},
+		"no token":  {log: "Login cancelled\r\n"},
+		"cat fails": {catErr: errors.New("exit status 1")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, r := newAuthManager(w)
+			_, _ = m.SetupToken(context.Background())
+			got := r.Commands()
+			cat := slices.Index(got, "exec authid cat /tmp/setup-token.log")
+			rm := slices.Index(got, "exec authid rm -f /tmp/setup-token.log")
+			if cat < 0 || rm != cat+1 {
+				t.Errorf("log not removed right after reading:\n%s", strings.Join(got, "\n"))
+			}
+		})
+	}
+}
+
+func TestRemoveStaleAuthContainers(t *testing.T) {
+	w := &authWorld{leftover: "deadid 999999\nliveid 4242\nnolabel \n"}
+	m, r := newAuthManager(w)
+	m.RemoveStaleAuthContainers(context.Background())
+	want := []string{
+		`ps -a --filter label=safeclaw.auth --format {{.ID}} {{.Label "safeclaw.auth"}}`,
+		"rm -v -f deadid",
+		"rm -v -f nolabel",
+	}
+	if got := r.Commands(); !slices.Equal(got, want) {
+		t.Errorf("calls:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 

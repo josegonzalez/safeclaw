@@ -3,11 +3,13 @@ package secrets
 import (
 	"bytes"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -87,6 +89,153 @@ func TestFileStore(t *testing.T) {
 	_ = os.Chtimes(filepath.Join(dir, "NL"), at, at)
 	if got, _ := s.SetAt("NL"); !got.Equal(at) {
 		t.Errorf("SetAt = %v, want the file's mtime %v", got, at)
+	}
+}
+
+func TestFileStoreRejectsTraversalNames(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, ".secrets")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A readable file outside the store that a traversal name would reach.
+	if err := os.WriteFile(filepath.Join(base, "OUTSIDE"), []byte("leak"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := FileStore{Dir: dir}
+	for _, name := range []string{"../OUTSIDE", "/etc/hosts", "a/b", "", "."} {
+		if s.Has(name) {
+			t.Errorf("Has(%q) = true", name)
+		}
+		if v, err := s.Get(name); err == nil || errors.Is(err, os.ErrNotExist) || v != "" {
+			t.Errorf("Get(%q) = %q, %v, want an invalid name error", name, v, err)
+		}
+		if _, err := s.SetAt(name); err == nil || errors.Is(err, os.ErrNotExist) {
+			t.Errorf("SetAt(%q) = %v, want an invalid name error", name, err)
+		}
+	}
+}
+
+func TestFileStoreIgnoresSymlinks(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, ".secrets")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(base, "target")
+	if err := os.WriteFile(target, []byte("outside"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "LINKED")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, "SUBDIR"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A FIFO is refused without blocking the open.
+	if err := syscall.Mkfifo(filepath.Join(dir, "FIFO"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := FileStore{Dir: dir}
+	for _, name := range []string{"LINKED", "SUBDIR", "FIFO"} {
+		if s.Has(name) {
+			t.Errorf("Has(%s) = true for a non-regular entry", name)
+		}
+		if v, err := s.Get(name); !errors.Is(err, os.ErrNotExist) || v != "" {
+			t.Errorf("Get(%s) = %q, %v, want ErrNotExist", name, v, err)
+		}
+		if _, err := s.SetAt(name); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("SetAt(%s) = %v, want ErrNotExist", name, err)
+		}
+	}
+	if keys, _ := s.Keys(); len(keys) != 0 {
+		t.Errorf("Keys = %v", keys)
+	}
+	if all, err := s.All(); err != nil || len(all) != 0 {
+		t.Errorf("All = %+v, %v", all, err)
+	}
+
+	// Set replaces the symlink with a file rather than writing through it.
+	if err := s.Set("LINKED", "new"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != "outside" {
+		t.Errorf("Set wrote through the symlink: target = %q", b)
+	}
+	info, err := os.Lstat(filepath.Join(dir, "LINKED"))
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Errorf("LINKED after Set = %v, %v, want a 0600 regular file", info, err)
+	}
+	if v, _ := s.Get("LINKED"); v != "new" {
+		t.Errorf("Get after Set = %q", v)
+	}
+}
+
+func TestFileStoreSetReplacesLooseFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), ".secrets")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "LOOSE")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := FileStore{Dir: dir}
+	if err := s.Set("LOOSE", "new"); err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("file mode = %v, want 0600", info.Mode().Perm())
+	}
+	if v, _ := s.Get("LOOSE"); v != "new" {
+		t.Errorf("Get = %q", v)
+	}
+	// No temp file is left behind.
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("dir has %d entries, want 1", len(entries))
+	}
+}
+
+func TestFileStoreTightensDirectory(t *testing.T) {
+	for _, mode := range []os.FileMode{0o755, 0o750, 0o777, 0o701} {
+		dir := filepath.Join(t.TempDir(), ".secrets")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		// Chmod, since Mkdir's mode is filtered by the umask.
+		if err := os.Chmod(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := (FileStore{Dir: dir}).Set("A", "1"); err != nil {
+			t.Fatal(err)
+		}
+		if info, _ := os.Stat(dir); info.Mode().Perm() != 0o700 {
+			t.Errorf("dir %v after Set = %v, want 0700", mode, info.Mode().Perm())
+		}
+	}
+}
+
+func TestOpenTightensFileStoreDirectory(t *testing.T) {
+	keyring.MockInitWithError(errors.New("no dbus"))
+	t.Cleanup(keyring.MockInit)
+	dir := filepath.Join(t.TempDir(), ".secrets")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	Open(dir, filepath.Join(t.TempDir(), "secrets.lock"), io.Discard)
+	if info, _ := os.Stat(dir); info.Mode().Perm() != 0o700 {
+		t.Errorf("dir mode = %v, want 0700", info.Mode().Perm())
+	}
+
+	// A missing directory isn't created just by opening the store.
+	missing := filepath.Join(t.TempDir(), "missing")
+	Open(missing, filepath.Join(t.TempDir(), "secrets.lock"), io.Discard)
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Open created %s: %v", missing, err)
 	}
 }
 

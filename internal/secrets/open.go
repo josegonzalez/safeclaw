@@ -10,7 +10,8 @@ import (
 )
 
 // Open returns the keychain store when the system keychain is usable, and
-// otherwise the file store in dir, warning on warn. When the keychain is
+// otherwise the file store in dir, warning on warn and restricting an
+// existing dir to its owner. When the keychain is
 // usable, secrets left in dir by earlier versions are moved into it and dir
 // is removed once empty; a secret that can't be moved stays in dir, with a
 // warning, and is retried next time. lockPath is the file locked while the
@@ -22,7 +23,11 @@ func Open(dir, lockPath string, warn io.Writer) Store {
 	ks := KeyringStore{LockPath: lockPath}
 	if err := Available(ks.service()); err != nil {
 		fmt.Fprintf(warn, "Warning: the system keychain is unavailable (%v), so secrets are stored in %s\n", err, dir)
-		return FileStore{Dir: dir}
+		fs := FileStore{Dir: dir}
+		if err := fs.tighten(); err != nil {
+			fmt.Fprintf(warn, "Warning: %v\n", err)
+		}
+		return fs
 	}
 	if err := migrate(FileStore{Dir: dir}, ks, warn); err != nil {
 		fmt.Fprintf(warn, "Warning: could not move secrets from %s into the keychain: %v\n", dir, err)

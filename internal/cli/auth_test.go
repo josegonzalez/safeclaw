@@ -15,10 +15,32 @@ import (
 	"github.com/josegonzalez/safeclaw/internal/session"
 )
 
-// TestMain keeps every test in this package off the real keychain.
+// staleAuthCleanups counts calls to removeStaleAuthContainers.
+var staleAuthCleanups int
+
+// TestMain keeps every test in this package off the real keychain and
+// docker.
 func TestMain(m *testing.M) {
 	keyring.MockInit()
+	removeStaleAuthContainers = func(context.Context) { staleAuthCleanups++ }
 	os.Exit(m.Run())
+}
+
+func TestAuthCommandsRemoveStaleSignIns(t *testing.T) {
+	freshSecrets(t)
+	for _, args := range [][]string{{"auth", "status"}, {"auth", "logout"}} {
+		before := staleAuthCleanups
+		_, _ = runCLI(t, "", args...)
+		if staleAuthCleanups != before+1 {
+			t.Errorf("%v: stale sign-in cleanups = %d, want 1", args, staleAuthCleanups-before)
+		}
+	}
+	// login cleans up in SetupToken, right before it starts its container.
+	before := staleAuthCleanups
+	_, _ = runCLI(t, "", "auth", "login")
+	if staleAuthCleanups != before {
+		t.Error("login cleaned up twice")
+	}
 }
 
 // runCLI runs safeclaw with args and stdin in a fresh config directory's
