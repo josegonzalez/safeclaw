@@ -86,6 +86,8 @@ var routes = []struct{ method, path, body string }{
 	{"GET", "/sessions/validate?name=x", ""},
 	{"GET", "/sessions/work/info", ""},
 	{"GET", "/sessions/work/actions", ""},
+	{"GET", "/sessions/work/terminal", ""},
+	{"GET", "/sessions/work/terminal/ws", ""},
 	{"POST", "/sessions/work/start", ""},
 	{"POST", "/sessions/work/stop", "confirm=1"},
 	{"POST", "/sessions/work/delete", "confirm=1"},
@@ -153,6 +155,88 @@ func TestEveryRouteNeedsTheToken(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// TestEveryResponseRefusesFraming checks that every response, refusals
+// included, tells the browser not to render it in another page's frame.
+// Only the terminal page, which the dashboard frames itself, may be framed,
+// and only by the dashboard's own origin.
+func TestEveryResponseRefusesFraming(t *testing.T) {
+	h := newAuthServer(t, &fakeSessions{list: sampleSessions()})
+	bearer := map[string]string{"Authorization": "Bearer " + testToken}
+	// The SSE routes stream until the request ends, so they get a request
+	// that has already ended.
+	done, cancel := context.WithCancel(context.Background())
+	cancel()
+	type request struct {
+		name, target string
+		hdr          map[string]string
+	}
+	for _, rt := range routes {
+		cases := []request{
+			{"unauthenticated", "http://127.0.0.1:7680" + rt.path, nil},
+			{"authenticated", "http://127.0.0.1:7680" + rt.path, bearer},
+			{"cross-site", "http://127.0.0.1:7680" + rt.path, map[string]string{"Authorization": bearer["Authorization"], "Sec-Fetch-Site": "cross-site"}},
+			{"foreign host", "http://evil.example" + rt.path, bearer},
+		}
+		if rt.method == "GET" {
+			sep := "?"
+			if strings.Contains(rt.path, "?") {
+				sep = "&"
+			}
+			cases = append(cases,
+				request{"token exchange", "http://127.0.0.1:7680" + rt.path + sep + "token=" + testToken, nil},
+				request{"token exchange on localhost", "http://localhost:7680" + rt.path + sep + "token=" + testToken, nil},
+			)
+		}
+		for _, tc := range cases {
+			req := httptest.NewRequestWithContext(done, rt.method, tc.target, strings.NewReader(rt.body))
+			if strings.HasPrefix(rt.body, "{") {
+				req.Header.Set("Content-Type", "application/json")
+			} else if rt.body != "" {
+				req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
+			for k, v := range tc.hdr {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			xfo, csp := "DENY", "frame-ancestors 'none'"
+			if rt.path == "/sessions/work/terminal" && rec.Code == http.StatusOK {
+				xfo, csp = "SAMEORIGIN", terminalCSP
+			}
+			got := rec.Header()
+			if v := got.Values("X-Frame-Options"); len(v) != 1 || v[0] != xfo {
+				t.Errorf("%s: %s %s = %d, X-Frame-Options %q, want %q", tc.name, rt.method, rt.path, rec.Code, v, xfo)
+			}
+			if v := got.Values("Content-Security-Policy"); len(v) != 1 || v[0] != csp {
+				t.Errorf("%s: %s %s = %d, Content-Security-Policy %q, want %q", tc.name, rt.method, rt.path, rec.Code, v, csp)
+			}
+		}
+	}
+}
+
+// TestTerminalPageFramedOnlyBySelf checks the one page the dashboard frames
+// keeps its own policy, which allows its own origin and no other.
+func TestTerminalPageFramedOnlyBySelf(t *testing.T) {
+	h := newAuthServer(t, &fakeSessions{list: sampleSessions()})
+	rec := send(h, "GET", "http://127.0.0.1:7680/sessions/work/terminal", "", map[string]string{"Authorization": "Bearer " + testToken})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("terminal page = %d", rec.Code)
+	}
+	var ancestors []string
+	for _, d := range strings.Split(rec.Header().Get("Content-Security-Policy"), ";") {
+		if f := strings.Fields(d); len(f) > 0 && f[0] == "frame-ancestors" {
+			ancestors = append(ancestors, strings.Join(f[1:], " "))
+		}
+	}
+	if len(ancestors) != 1 || ancestors[0] != "'self'" {
+		t.Errorf("terminal page frame-ancestors = %q, want only 'self'", ancestors)
+	}
+	if !strings.Contains(rec.Header().Get("Content-Security-Policy"), "script-src 'self'") {
+		t.Errorf("terminal page lost its own policy: %q", rec.Header().Get("Content-Security-Policy"))
 	}
 }
 

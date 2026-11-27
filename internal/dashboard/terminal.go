@@ -22,7 +22,8 @@ const ttydProtocol = "tty"
 const terminalReadLimit = 1 << 20
 
 // terminalCSP keeps the terminal page to the dashboard's own scripts and
-// connections. xterm.js sets inline styles, so those are allowed.
+// connections. xterm.js sets inline styles, so those are allowed. Only the
+// dashboard's own pages may frame it.
 const terminalCSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
 
 // Terminals finds a running session's web terminal. *session.Manager
@@ -42,7 +43,9 @@ func (s *Server) handleTerminal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Security-Policy", terminalCSP)
+	// The dashboard's frames grid iframes this page, so it alone may be
+	// framed, and only by the dashboard's own origin.
+	allowSameOriginFraming(w, terminalCSP)
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	s.render(w, http.StatusOK, "terminal", map[string]string{"Name": name})
 }
