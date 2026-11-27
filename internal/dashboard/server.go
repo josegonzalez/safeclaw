@@ -219,7 +219,33 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events", s.apiEvents)
 
 	cop := http.NewCrossOriginProtection()
-	return s.checkHost(s.access.Middleware(cop.Handler(mux)))
+	return refuseFraming(s.checkHost(s.access.Middleware(cop.Handler(mux))))
+}
+
+// refuseFraming tells the browser not to render any response inside a
+// frame, so another page can't overlay the dashboard and pass clicks
+// through to it. CrossOriginProtection doesn't cover this: a framed
+// dashboard's own requests are same-origin. It wraps every other check, so
+// refusals such as 401 and 403 carry the headers too.
+//
+// A handler whose page the dashboard frames itself replaces them with
+// allowSameOriginFraming.
+func refuseFraming(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
+// allowSameOriginFraming lets only the dashboard's own pages frame the
+// response, replacing refuseFraming's headers. csp is the page's full
+// policy and must have a frame-ancestors 'self' directive: it replaces the
+// default policy rather than adding a second one, since a browser enforces
+// every policy it gets and the default's frame-ancestors 'none' would win.
+func allowSameOriginFraming(w http.ResponseWriter, csp string) {
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+	w.Header().Set("Content-Security-Policy", csp)
 }
 
 // checkHost rejects requests whose Host is not a loopback name, which blocks
