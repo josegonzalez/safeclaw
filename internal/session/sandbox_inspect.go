@@ -265,13 +265,30 @@ func (r SandboxReport) Skipped() []string {
 // the sandbox user: its uid, whether /home/sclaw can be read or entered, the
 // network interfaces, and the kernel's view of its own process and mounts.
 // It only reads.
+//
+// Its output is only advisory: other processes of the sandbox user can
+// write to the probe's stdout or ptrace it, so they can make it say
+// anything. parseProbe refuses output that is not shaped like the probe's,
+// which catches lines added to it, not output replaced wholesale.
 const sandboxProbe = `echo "uid=$(id -u)"
 if [ -r /home/sclaw ] || [ -x /home/sclaw ]; then echo home=readable; else echo home=denied; fi
 for i in /sys/class/net/*; do echo "net=${i##*/}"; done
-echo ---status
+echo ` + probeStatus + `
 cat /proc/self/status
-echo ---mounts
-cat /proc/self/mounts`
+echo ` + probeMounts + `
+cat /proc/self/mounts
+echo ` + probeEnd
+
+// The probe's section markers, in order.
+const (
+	probeStatus = "---status"
+	probeMounts = "---mounts"
+	probeEnd    = "---end"
+)
+
+// probeMaxOutput caps the probe output the host buffers. The probe writes
+// a few KiB, plus about 100 bytes for each mount.
+const probeMaxOutput = 1 << 20
 
 // VerifySandbox checks the named sandbox against the isolation sandboxes
 // promise, first from its docker configuration and then, when it is
@@ -293,13 +310,21 @@ func (m *Manager) VerifySandbox(ctx context.Context, name string) (*SandboxRepor
 		}
 	} else {
 		checks = append(checks, SandboxCheck{Name: "running", OK: true, Detail: "status \"running\""})
-		out, err := m.Docker.Exec(ctx, c.ShortName(), docker.ExecOptions{User: config.SandboxUser}, "/bin/sh", "-c", sandboxProbe)
+		opts := docker.ExecOptions{User: config.SandboxUser, MaxOutput: probeMaxOutput}
+		out, err := m.Docker.Exec(ctx, c.ShortName(), opts, "/bin/sh", "-c", sandboxProbe)
+		var p probe
+		if err == nil {
+			p, err = parseProbe(string(out))
+			if err != nil {
+				err = fmt.Errorf("output looks tampered with: %w", err)
+			}
+		}
 		if err != nil {
 			for _, n := range live {
 				checks = append(checks, SandboxCheck{Name: n, Detail: "probe failed: " + err.Error()})
 			}
 		} else {
-			checks = append(checks, liveChecks(info, parseProbe(string(out)))...)
+			checks = append(checks, liveChecks(info, p)...)
 		}
 	}
 	r := &SandboxReport{Schema: SandboxSchema, Name: name, Container: info.Container, Checks: checks}
@@ -408,8 +433,9 @@ var liveCheckNames = []string{"live-user", "live-home", "live-network", "live-ca
 type probe struct {
 	values map[string][]string
 	status map[string]string
-	// mounts maps each mount point to the options of its topmost mount.
-	mounts map[string]mountEntry
+	// mounts maps each mount point to its mounts, bottom first. A point is
+	// mounted more than once when something is mounted over it.
+	mounts map[string][]mountEntry
 }
 
 type mountEntry struct {
@@ -417,32 +443,87 @@ type mountEntry struct {
 	options string
 }
 
-func parseProbe(out string) probe {
-	p := probe{values: map[string][]string{}, status: map[string]string{}, mounts: map[string]mountEntry{}}
+// probeKeys are the keys the probe's first section has, and whether each
+// appears exactly once.
+var probeKeys = map[string]bool{"uid": true, "home": true, "net": false}
+
+// parseProbe parses sandboxProbe's output, refusing anything not shaped
+// like it rather than letting a later line win: a section or marker out of
+// place or repeated, an unknown or repeated key or interface, a repeated
+// status field, a mount line without its six fields, and anything after
+// the end marker. Lines added by other processes of the sandbox user land
+// in one of those unless they are written to mimic the probe exactly, so
+// the live checks are still only advisory.
+func parseProbe(out string) (probe, error) {
+	p := probe{values: map[string][]string{}, status: map[string]string{}, mounts: map[string][]mountEntry{}}
+	lines := strings.Split(out, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	markers := []string{probeStatus, probeMounts, probeEnd}
+	next := 0
 	section := ""
-	for _, line := range strings.Split(out, "\n") {
-		switch line {
-		case "---status", "---mounts":
+	for i, line := range lines {
+		n := i + 1
+		if section == probeEnd {
+			return probe{}, fmt.Errorf("line %d: output after %s", n, probeEnd)
+		}
+		if strings.HasPrefix(line, "---") {
+			if next >= len(markers) || line != markers[next] {
+				return probe{}, fmt.Errorf("line %d: unexpected section marker", n)
+			}
 			section = line
+			next++
 			continue
 		}
 		switch section {
 		case "":
-			if k, v, ok := strings.Cut(line, "="); ok {
-				p.values[k] = append(p.values[k], v)
+			k, v, ok := strings.Cut(line, "=")
+			once, known := probeKeys[k]
+			switch {
+			case !ok || !known:
+				return probe{}, fmt.Errorf("line %d: unexpected line", n)
+			case once && len(p.values[k]) > 0:
+				return probe{}, fmt.Errorf("line %d: %s repeated", n, k)
+			case slices.Contains(p.values[k], v):
+				return probe{}, fmt.Errorf("line %d: %s %q repeated", n, k, v)
 			}
-		case "---status":
-			if k, v, ok := strings.Cut(line, ":"); ok {
-				p.status[k] = strings.TrimSpace(v)
+			p.values[k] = append(p.values[k], v)
+		case probeStatus:
+			k, v, ok := strings.Cut(line, ":")
+			if !ok || k == "" {
+				return probe{}, fmt.Errorf("line %d: not a status field", n)
 			}
-		case "---mounts":
+			if _, dup := p.status[k]; dup {
+				return probe{}, fmt.Errorf("line %d: status field %q repeated", n, k)
+			}
+			p.status[k] = strings.TrimSpace(v)
+		case probeMounts:
 			f := strings.Fields(line)
-			if len(f) >= 4 {
-				p.mounts[unescapeMount(f[1])] = mountEntry{fstype: f[2], options: f[3]}
+			if len(f) != 6 {
+				return probe{}, fmt.Errorf("line %d: not a mount", n)
 			}
+			point := unescapeMount(f[1])
+			p.mounts[point] = append(p.mounts[point], mountEntry{fstype: f[2], options: f[3]})
 		}
 	}
-	return p
+	if section != probeEnd {
+		return probe{}, fmt.Errorf("output ends before %s", markers[next])
+	}
+	return p, nil
+}
+
+// readOnly reports whether point is mounted and every mount on it is
+// read-only, so a writable mount can't be hidden by another line for the
+// same point.
+func (p probe) readOnly(point string) bool {
+	es := p.mounts[point]
+	for _, e := range es {
+		if !hasOption(e.options, "ro") {
+			return false
+		}
+	}
+	return len(es) > 0
 }
 
 // below returns the mount points strictly below dir, sorted.
@@ -501,24 +582,26 @@ func liveChecks(info SandboxInfo, p probe) []SandboxCheck {
 	}
 	checks = append(checks, check("live-capabilities", capsOK, "%s NoNewPrivs=%s", strings.Join(caps, " "), p.status["NoNewPrivs"]))
 
-	root, ok := p.mounts["/"]
-	// Only the first option, ro or rw, is shown: an overlay root's options
-	// list every layer.
-	rootMode, _, _ := strings.Cut(root.options, ",")
-	checks = append(checks, check("live-read-only-root", ok && hasOption(root.options, "ro"), "/ mounted %q", rootMode))
+	// Only the first option, ro or rw, of each mount on / is shown: an
+	// overlay root's options list every layer.
+	var rootModes []string
+	for _, e := range p.mounts["/"] {
+		mode, _, _ := strings.Cut(e.options, ",")
+		rootModes = append(rootModes, mode)
+	}
+	checks = append(checks, check("live-read-only-root", p.readOnly("/"), "/ mounted %q", nonNil(rootModes)))
 
 	// Every filesystem mounted below a mount must be read-only too: a
 	// writable submount is as writable as the mount itself would be.
 	var bad []string
 	submounts := 0
 	for _, mt := range info.Mounts {
-		e, ok := p.mounts[mt.Destination]
-		if !ok || !hasOption(e.options, "ro") {
+		if !p.readOnly(mt.Destination) {
 			bad = append(bad, mt.Destination)
 		}
 		for _, point := range p.below(mt.Destination) {
 			submounts++
-			if !hasOption(p.mounts[point].options, "ro") {
+			if !p.readOnly(point) {
 				bad = append(bad, point)
 			}
 		}
@@ -526,11 +609,16 @@ func liveChecks(info SandboxInfo, p probe) []SandboxCheck {
 	checks = append(checks, check("live-mounts", len(bad) == 0, "%d mounts, %d submounts, missing or writable: %q",
 		len(info.Mounts), submounts, nonNil(bad)))
 
-	disk, ok := p.mounts[config.SandboxDir]
+	// /sandbox must be one tmpfs: another mount on it could hide its size.
+	disks := p.mounts[config.SandboxDir]
+	var disk mountEntry
+	if len(disks) > 0 {
+		disk = disks[len(disks)-1]
+	}
 	size, _ := ParseSize(tmpfsSize(disk.options))
 	// The kernel rounds a tmpfs size up to whole pages, at most 64 KiB.
 	limit := (info.Limits.DiskBytes + 64<<10 - 1) &^ (64<<10 - 1)
-	checks = append(checks, check("live-disk", ok && disk.fstype == "tmpfs" && size > 0 && size <= limit,
-		"%s %s %q", config.SandboxDir, disk.fstype, disk.options))
+	checks = append(checks, check("live-disk", len(disks) == 1 && disk.fstype == "tmpfs" && size > 0 && size <= limit,
+		"%s %d mounts, %s %q", config.SandboxDir, len(disks), disk.fstype, disk.options))
 	return checks
 }

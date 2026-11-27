@@ -41,6 +41,16 @@ const (
 
 	// copyFileMode is the mode of every copied file, in either direction.
 	copyFileMode = 0o644
+
+	// MaxCopyIndex is the highest N cp-in names a file N-name with.
+	MaxCopyIndex = 999_999_999
+	// copyListMaxOutput caps the cp-in destination listing the host
+	// buffers: room for over 30,000 names of the longest kind and far more
+	// of the usual length.
+	copyListMaxOutput = 8 << 20
+	// copyQuietMaxOutput caps the output of cp-in's mkdir, which prints
+	// nothing, though code in the sandbox can write to its stdout.
+	copyQuietMaxOutput = 64 << 10
 )
 
 // ErrSymlink is returned when cp-in is given a symbolic link.
@@ -51,6 +61,10 @@ var ErrNotRegular = errors.New("is not a regular file")
 
 // ErrCopyDest is returned when a cp-in destination is outside /sandbox.
 var ErrCopyDest = errors.New("must be " + config.SandboxDir + " or a directory under it")
+
+// ErrCopyIndex is returned when cp-in has no numbers left to name files
+// with, because the destination holds one numbered near MaxCopyIndex.
+var ErrCopyIndex = fmt.Errorf("has no file numbers left: cp-in numbers files up to %d", MaxCopyIndex)
 
 // ErrNoGlob is returned when cp-out is given no --only glob.
 var ErrNoGlob = errors.New("at least one --only glob is required")
@@ -171,7 +185,10 @@ func sandboxDest(dest string) (string, error) {
 }
 
 // nextIndex returns the number after the highest N in the N-name entries
-// of an `ls -1A` listing, 1 when there are none.
+// of an `ls -1A` listing, 1 when there are none. Numbers above
+// MaxCopyIndex are ignored: no run of copies gets near it, so they can only
+// have been made in the sandbox, and leaving them out keeps the names
+// cp-in picks short and their numbers far from overflowing.
 func nextIndex(listing []byte) int {
 	highest := 0
 	for line := range strings.SplitSeq(string(listing), "\n") {
@@ -180,7 +197,7 @@ func nextIndex(listing []byte) int {
 			continue
 		}
 		n, err := strconv.Atoi(digits)
-		if err != nil || n == math.MaxInt {
+		if err != nil || n > MaxCopyIndex {
 			continue
 		}
 		highest = max(highest, n)
@@ -258,14 +275,26 @@ func (m *Manager) CopyIn(ctx context.Context, name string, files []string, dest 
 		return nil, err
 	}
 	defer unlock()
-	if _, err := m.Docker.Exec(ctx, container, copyExec, copyCommand(mkdirBin, "-p", "--", dest)...); err != nil {
+	quiet := copyExec
+	quiet.MaxOutput = copyQuietMaxOutput
+	if _, err := m.Docker.Exec(ctx, container, quiet, copyCommand(mkdirBin, "-p", "--", dest)...); err != nil {
 		return nil, err
 	}
-	listing, err := m.Docker.Exec(ctx, container, copyExec, copyCommand(lsBin, "-1A", "--", dest)...)
+	list := copyExec
+	list.MaxOutput = copyListMaxOutput
+	listing, err := m.Docker.Exec(ctx, container, list, copyCommand(lsBin, "-1A", "--", dest)...)
+	if errors.Is(err, docker.ErrOutputTooLarge) {
+		return nil, fmt.Errorf("list %s: %w: remove files from it or copy with another --to", dest, err)
+	}
 	if err != nil {
 		return nil, err
 	}
 	first := nextIndex(listing)
+	// first is at most MaxCopyIndex+1, so neither this nor first+i can
+	// overflow.
+	if first > MaxCopyIndex-len(srcs)+1 {
+		return nil, fmt.Errorf("%s %w", dest, ErrCopyIndex)
+	}
 	names := make([]string, len(srcs))
 	paths := make([]string, len(srcs))
 	for i, s := range srcs {

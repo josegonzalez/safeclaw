@@ -378,7 +378,8 @@ func newSandboxCopyInCommand() *cobra.Command {
 		Long: "Copy regular host files into a running sandbox, owned by the sandbox user.\n\n" +
 			"Symbolic links and anything that is not a regular file are refused before anything is copied. " +
 			"Each file is named N-NAME, with N continuing after the highest number already in the destination, " +
-			"so files with the same name never overwrite each other. The container path of each file is printed, in order, " +
+			"so files with the same name never overwrite each other. Numbers above 999999999 are ignored, and a destination " +
+			"whose listing is over 8 MiB is refused. The container path of each file is printed, in order, " +
 			"quoted when it is not printable text.",
 		Args:              cobra.MinimumNArgs(2),
 		ValidArgsFunction: completeSandboxFirst,

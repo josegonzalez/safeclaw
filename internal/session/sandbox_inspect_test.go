@@ -79,7 +79,13 @@ proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
 tmpfs /tmp tmpfs rw,nosuid,nodev,relatime,size=262144k 0 0
 tmpfs /sandbox tmpfs rw,nosuid,nodev,relatime,size=1048576k,mode=700,uid=2000,gid=2000 0 0
 /dev/vda1 /in ext4 ro,relatime 0 0
+---end
 `
+
+// withMounts returns goodProbe with lines added to its mounts.
+func withMounts(lines string) string {
+	return strings.Replace(goodProbe, "---end\n", lines+"---end\n", 1)
+}
 
 // inspectWorld answers inspect with c and the probe exec with probe.
 type inspectWorld struct {
@@ -310,17 +316,117 @@ func TestVerifySandboxLiveFailures(t *testing.T) {
 	}
 }
 
-func TestVerifySandboxLaterMountWins(t *testing.T) {
-	probe := goodProbe + "tmpfs /in tmpfs rw 0 0\n"
-	if got := failedChecks(t, &inspectWorld{c: goodSandbox(), probe: probe}); !slices.Equal(got, []string{"live-mounts"}) {
-		t.Errorf("failed = %q", got)
+// A point mounted more than once is read-only only when every mount on it
+// is, so neither a writable mount over it nor a read-only line added after
+// a writable one passes.
+func TestVerifySandboxRepeatedMountPoint(t *testing.T) {
+	for _, tt := range []struct {
+		name, probe string
+		want        []string
+	}{
+		{"writable over", withMounts("tmpfs /in tmpfs rw 0 0\n"), []string{"live-mounts"}},
+		{"read-only after writable", withMounts("tmpfs /in/sub tmpfs rw 0 0\ntmpfs /in/sub tmpfs ro 0 0\n"), []string{"live-mounts"}},
+		{"read-only twice", withMounts("tmpfs /in/sub tmpfs ro 0 0\ntmpfs /in/sub tmpfs ro 0 0\n"), nil},
+		{"root again", withMounts("overlay / overlay ro 0 0\n"), nil},
+		{"root rw then ro", strings.Replace(withMounts("overlay / overlay ro 0 0\n"), "overlay / overlay ro,", "overlay / overlay rw,", 1),
+			[]string{"live-read-only-root"}},
+		{"second disk", withMounts("tmpfs /sandbox tmpfs rw,size=4k 0 0\n"), []string{"live-disk"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := failedChecks(t, &inspectWorld{c: goodSandbox(), probe: tt.probe}); !slices.Equal(got, tt.want) {
+				t.Errorf("failed = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Probe output not shaped like the probe's, as when other processes of the
+// sandbox user write to its stdout, fails every live check rather than
+// letting a later line win.
+func TestVerifySandboxTamperedProbe(t *testing.T) {
+	tests := []struct {
+		name, probe, reason string
+	}{
+		{"second uid", strings.Replace(goodProbe, "home=denied", "uid=2000\nhome=denied", 1), "line 2: uid repeated"},
+		{"second home", strings.Replace(goodProbe, "net=lo", "home=denied\nnet=lo", 1), "line 3: home repeated"},
+		{"repeated interface", strings.Replace(goodProbe, "net=lo", "net=lo\nnet=lo", 1), `line 4: net "lo" repeated`},
+		{"unknown key", strings.Replace(goodProbe, "net=lo", "net=lo\nroot=no", 1), "line 4: unexpected line"},
+		{"stray line", strings.Replace(goodProbe, "net=lo", "net=lo\nhello", 1), "line 4: unexpected line"},
+		{"repeated status", strings.Replace(goodProbe, "NoNewPrivs:\t1", "NoNewPrivs:\t0\nNoNewPrivs:\t1", 1), `line 12: status field "NoNewPrivs" repeated`},
+		{"status not a field", strings.Replace(goodProbe, "NoNewPrivs:\t1", "NoNewPrivs:\t1\nnope", 1), "line 12: not a status field"},
+		{"second mounts", withMounts("---mounts\noverlay / overlay ro 0 0\n"), "line 18: unexpected section marker"},
+		{"second status", withMounts("---status\nCapEff:\t0\n"), "line 18: unexpected section marker"},
+		{"sections swapped", strings.NewReplacer("---status", "---mounts", "---mounts", "---status").Replace(goodProbe), "line 4: unexpected section marker"},
+		{"short mount", withMounts("tmpfs /x tmpfs\n"), "line 18: not a mount"},
+		{"after end", goodProbe + "---mounts\noverlay / overlay ro 0 0\n", "line 19: output after ---end"},
+		{"after end, blank", goodProbe + "\n", "line 19: output after ---end"},
+		{"no end", strings.Replace(goodProbe, "---end\n", "", 1), "output ends before ---end"},
+		{"empty", "", "output ends before ---status"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.probe == goodProbe {
+				t.Fatal("the probe is unchanged")
+			}
+			m, _ := newInspectManager(t, &inspectWorld{c: goodSandbox(), probe: tt.probe})
+			rep, err := m.VerifySandbox(context.Background(), "box")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(rep.Failed(), liveCheckNames) {
+				t.Errorf("failed = %q", rep.Failed())
+			}
+			want := "probe failed: output looks tampered with: " + tt.reason
+			for _, c := range rep.Checks {
+				if strings.HasPrefix(c.Name, "live-") && c.Detail != want {
+					t.Errorf("%s detail = %q, want %q", c.Name, c.Detail, want)
+				}
+			}
+		})
+	}
+}
+
+// The probe's own output parses, and so does a /proc/self/status with
+// fields the live checks don't read.
+func TestParseProbe(t *testing.T) {
+	p, err := parseProbe(goodProbe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.status["NoNewPrivs"] != "1" || !slices.Equal(p.values["net"], []string{"lo"}) || len(p.mounts) != 5 {
+		t.Errorf("probe = %+v", p)
+	}
+	if _, err := parseProbe(strings.TrimSuffix(goodProbe, "\n")); err != nil {
+		t.Errorf("no trailing newline: %v", err)
+	}
+	if !strings.Contains(sandboxProbe, "echo ---end") {
+		t.Error("the probe does not print its end marker")
+	}
+}
+
+// Probe output past probeMaxOutput fails the live checks without being
+// parsed.
+func TestVerifySandboxProbeTooLarge(t *testing.T) {
+	probe := withMounts(strings.Repeat("tmpfs /in/x tmpfs ro 0 0\n", probeMaxOutput/25+1))
+	m, _ := newInspectManager(t, &inspectWorld{c: goodSandbox(), probe: probe})
+	rep, err := m.VerifySandbox(context.Background(), "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(rep.Failed(), liveCheckNames) {
+		t.Errorf("failed = %q", rep.Failed())
+	}
+	for _, c := range rep.Checks {
+		if c.Name == "live-user" && !strings.Contains(c.Detail, "output exceeds 1048576 bytes") {
+			t.Errorf("detail = %q", c.Detail)
+		}
 	}
 }
 
 // Every submount below a bind must be read-only too, and only mounts below
 // it count.
 func TestVerifySandboxSubmounts(t *testing.T) {
-	probe := goodProbe + "sysfs /in/fs/cgroup cgroup2 ro,nosuid 0 0\ntmpfs /in/sub tmpfs ro 0 0\ntmpfs /inbox tmpfs rw 0 0\n"
+	probe := withMounts("sysfs /in/fs/cgroup cgroup2 ro,nosuid 0 0\ntmpfs /in/sub tmpfs ro 0 0\ntmpfs /inbox tmpfs rw 0 0\n")
 	m, _ := newInspectManager(t, &inspectWorld{c: goodSandbox(), probe: probe})
 	rep, err := m.VerifySandbox(context.Background(), "box")
 	if err != nil {
@@ -359,7 +465,7 @@ func TestVerifySandboxSeveralMounts(t *testing.T) {
 		}
 		return c
 	}
-	probe := goodProbe + "/dev/vda1 /opt/tools ext4 ro,relatime 0 0\n"
+	probe := withMounts("/dev/vda1 /opt/tools ext4 ro,relatime 0 0\n")
 	if got := failedChecks(t, &inspectWorld{c: two(false), probe: probe}); len(got) != 0 {
 		t.Errorf("failed = %q", got)
 	}

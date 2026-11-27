@@ -122,6 +122,8 @@ safeclaw sandbox inspect triage   # its isolation settings, limits, and mounts a
 safeclaw sandbox verify triage    # checks each isolation guarantee, exits non-zero naming any that fail
 ```
 
+Only the checks `verify` makes from the docker configuration are authoritative. Its live checks run inside the sandbox as the sandbox user, so code already running there can make them report anything: treat them as advisory. See [inspecting and verifying](docs/architecture.md#inspecting-and-verifying).
+
 ## Taking a session offline
 
 While an interactive session handles something untrusted, take it offline. `safeclaw net off` saves the session's networks and disconnects it from them, and `safeclaw net on` reconnects it to exactly those networks. Its web terminal is unreachable while it is offline, and it stays offline across restarts.
@@ -287,7 +289,7 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, sparse files, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given, `--max-size` (default `1g`) caps the total, and `--max-files` (default `1000`) caps the number of files. |
 | `safeclaw sandbox ls` | List sandboxes |
 | `safeclaw sandbox inspect NAME` | Print a sandbox's status, variant, network, user, capabilities, read-only root, limits including `--disk`, mounts, and safeclaw labels as JSON with a versioned schema |
-| `safeclaw sandbox verify NAME` | Check a sandbox's configuration and, when it is running, what the sandbox user sees inside it against the sandbox's isolation guarantees, exiting non-zero and naming the failed checks. `--json` prints the report as JSON. |
+| `safeclaw sandbox verify NAME` | Check a sandbox's configuration and, when it is running, what the sandbox user sees inside it against the sandbox's isolation guarantees, exiting non-zero and naming the failed checks. The configuration checks are authoritative, and the live checks advisory, since the sandbox can lie to them. `--json` prints the report as JSON. |
 | `safeclaw sandbox stop NAME` | Stop a sandbox, emptying its `/sandbox` |
 | `safeclaw sandbox rm NAME` | Delete a sandbox |
 | `safeclaw variant ls` | List image variants, whether their images exist, and which session types default to them |
