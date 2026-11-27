@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
@@ -280,7 +281,12 @@ func (s *Server) checkHost(next http.Handler) http.Handler {
 // [::1]:PORT would get the launch token sent to localhost. Startup fails
 // when something else holds it; a host without IPv6 loopback, where nothing
 // can, gets a warning and 127.0.0.1 only.
+//
+// SIGHUP stops it too, as SIGINT and SIGTERM do through the CLI's context,
+// so closing its terminal still removes the token file.
 func (s *Server) ListenAndServe(ctx context.Context, out io.Writer) error {
+	ctx, stop := signal.NotifyContext(ctx, syscall.SIGHUP)
+	defer stop()
 	port := strconv.Itoa(s.port)
 	ln, err := net.Listen("tcp", net.JoinHostPort(cookieHost, port))
 	if err != nil {
