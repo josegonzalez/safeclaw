@@ -89,6 +89,40 @@ func TestBuildInputsAreFetchedSafely(t *testing.T) {
 	}
 }
 
+// TestDockerfilePinsClaudeCodeTipsByCommit checks that claude-code-tips, the
+// source of the status line script and the dx plugin, is fetched by commit
+// SHA rather than by a tag, and that the status line script is checksummed.
+func TestDockerfilePinsClaudeCodeTipsByCommit(t *testing.T) {
+	b, err := fs.ReadFile(BuildContext, "Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(b)
+	if !regexp.MustCompile(`(?m)^ARG CLAUDE_CODE_TIPS_COMMIT=[0-9a-f]{40}$`).MatchString(dockerfile) {
+		t.Error("Dockerfile does not pin CLAUDE_CODE_TIPS_COMMIT to a 40-hex commit SHA")
+	}
+	if !regexp.MustCompile(`(?m)^ARG CONTEXT_BAR_SHA256=[0-9a-f]{64}$`).MatchString(dockerfile) {
+		t.Error("Dockerfile does not pin CONTEXT_BAR_SHA256 to a SHA-256")
+	}
+	for _, want := range []string{
+		"https://raw.githubusercontent.com/ykdojo/claude-code-tips/${CLAUDE_CODE_TIPS_COMMIT}/scripts/context-bar.sh",
+		`echo "${CONTEXT_BAR_SHA256}  /home/sclaw/.claude/scripts/context-bar.sh" | sha256sum -c -`,
+		"claude plugin marketplace add https://github.com/ykdojo/claude-code-tips.git#${CLAUDE_CODE_TIPS_COMMIT}",
+		`test "$(git -C /home/sclaw/.claude/plugins/marketplaces/ykdojo rev-parse HEAD)" = "${CLAUDE_CODE_TIPS_COMMIT}"`,
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("Dockerfile is missing %q", want)
+		}
+	}
+	// Every fetch of claude-code-tips names the pinned commit.
+	ref := regexp.MustCompile(`ykdojo/claude-code-tips(?:\.git#|/)(\S+?)[/\s]`)
+	for _, m := range ref.FindAllStringSubmatch(dockerfile, -1) {
+		if m[1] != "${CLAUDE_CODE_TIPS_COMMIT}" {
+			t.Errorf("Dockerfile fetches claude-code-tips at %q, not ${CLAUDE_CODE_TIPS_COMMIT}", m[1])
+		}
+	}
+}
+
 // TestDockerfileRootOwnsWhatClaudeCodeLoads checks that the files and folders
 // Claude Code and the shell load are made root-owned, so the agent cannot
 // rewrite them, and that MCP servers come only from the managed config.
