@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
+	"github.com/josegonzalez/safeclaw/internal/hangup"
 	"github.com/josegonzalez/safeclaw/internal/session"
 	"github.com/josegonzalez/safeclaw/internal/variant"
 )
@@ -289,10 +290,14 @@ func (s *Server) checkHost(next http.Handler) http.Handler {
 // can, gets a warning and 127.0.0.1 only.
 //
 // SIGHUP stops it too, as SIGINT and SIGTERM do through the CLI's context,
-// so closing its terminal still removes the token file.
+// so closing its terminal still removes the token file. A dashboard started
+// with SIGHUP ignored, as under nohup, keeps ignoring it and keeps running.
 func (s *Server) ListenAndServe(ctx context.Context, out io.Writer) error {
-	ctx, stop := signal.NotifyContext(ctx, syscall.SIGHUP)
-	defer stop()
+	if sigs := hangup.Signals(syscall.SIGHUP); len(sigs) > 0 {
+		var stop context.CancelFunc
+		ctx, stop = signal.NotifyContext(ctx, sigs...)
+		defer stop()
+	}
 	port := strconv.Itoa(s.port)
 	ln, err := net.Listen("tcp", net.JoinHostPort(cookieHost, port))
 	if err != nil {

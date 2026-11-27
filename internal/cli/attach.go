@@ -58,7 +58,8 @@ type relayOptions struct {
 // output through termtext.Filter to stdout, and resizes it from size each
 // time winch fires, which the kernel passes on to the command as SIGWINCH.
 // SIGINT, SIGTERM, SIGHUP and SIGQUIT sent to safeclaw are forwarded to the
-// command, so the caller's terminal is restored when it exits. It returns
+// command (SIGHUP only when it wasn't ignored at start, see
+// forwardedSignals), so the caller's terminal is restored when it exits. It returns
 // the command's exit code as runChild does.
 func relayPTY(argv []string, o relayOptions) (int, error) {
 	c := exec.Command(argv[0], argv[1:]...)
