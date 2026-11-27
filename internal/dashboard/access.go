@@ -1,7 +1,9 @@
 package dashboard
 
 import (
+	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
@@ -71,6 +73,15 @@ var pageRoutes = []string{"GET /{$}", "GET /static/", "GET /sessions/{name}/term
 // secret.
 var ticketRoutes = []string{"GET /sessions/{name}/terminal/ws"}
 
+// loginIdle is how long a browser login lasts with no request in flight,
+// loginLifetime how long it lasts at most, which is also its cookie's
+// Max-Age, and maxLogins bounds how many are kept at once.
+const (
+	loginIdle     = 12 * time.Hour
+	loginLifetime = 7 * 24 * time.Hour
+	maxLogins     = 32
+)
+
 // Access authenticates dashboard callers. Browsers open the URL carrying
 // the launch token once and get an HttpOnly, SameSite=Strict cookie in
 // exchange, plus a second secret in the redirect's fragment, which app.js
@@ -83,14 +94,12 @@ var ticketRoutes = []string{"GET /sessions/{name}/terminal/ws"}
 // then replay it from any client with any headers. So the cookie alone only
 // opens the page shells. Storage is scoped to the origin, port included, and
 // no route returns the secret, so such a listener can't get it.
+//
+// Each exchange makes a login of its own, with its own cookie value and
+// secret, so one browser logging out or expiring leaves the others working.
 type Access struct {
-	token string
-	// session is the cookie's value and secret the value that must come
-	// with it. Both are only kept in memory, so they stop working when the
-	// dashboard stops.
-	session string
-	secret  string
-	cookie  string
+	token  string
+	cookie string
 	// port is the dashboard's port, which its proofs are bound to.
 	port int
 	// file is where the token is stored for API callers, named in the 401
@@ -100,15 +109,44 @@ type Access struct {
 	pages    *http.ServeMux
 	ticketed *http.ServeMux
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// logins are keyed by the SHA-256 of their cookie's value, so finding
+	// one doesn't compare the value itself in variable time. They are only
+	// kept in memory, so they stop working when the dashboard stops.
+	logins  map[[sha256.Size]byte]*login
 	tickets map[string]ticket
 	now     func() time.Time
 }
 
-// ticket lets the cookie open path once, until expires.
+// login is one browser's login: the secret that must come with its cookie,
+// and when it ends. ctx is canceled when it ends, which ends its requests
+// still in flight, such as an SSE stream or a terminal WebSocket.
+type login struct {
+	secret  string
+	expires time.Time
+	used    time.Time
+	// active counts its requests in flight. It doesn't idle out while any
+	// are, so an open dashboard tab, whose SSE stream stays open, keeps it.
+	active int
+	ctx    context.Context
+	cancel context.CancelFunc
+}
+
+// ticket lets the cookie of login open path once, until expires. A ticket
+// minted with the bearer token has no login, and works with any.
 type ticket struct {
 	path    string
+	login   *login
 	expires time.Time
+}
+
+// loginKey is the request context key of the login a request came with.
+type loginKey struct{}
+
+// requestLogin returns the login r came with, or nil for the bearer token.
+func requestLogin(r *http.Request) *login {
+	l, _ := r.Context().Value(loginKey{}).(*login)
+	return l
 }
 
 // NewAccess returns an Access for token. The cookie is named after port so
@@ -116,13 +154,12 @@ type ticket struct {
 func NewAccess(token string, port int, file string) *Access {
 	return &Access{
 		token:    token,
-		session:  rand.Text(),
-		secret:   rand.Text(),
 		cookie:   "safeclaw_dashboard_" + strconv.Itoa(port),
 		port:     port,
 		file:     file,
 		pages:    routeSet(pageRoutes),
 		ticketed: routeSet(ticketRoutes),
+		logins:   map[[sha256.Size]byte]*login{},
 		tickets:  map[string]ticket{},
 		now:      time.Now,
 	}
@@ -151,13 +188,17 @@ func isRoute(m *http.ServeMux, r *http.Request) bool {
 }
 
 // Middleware lets a request through to next only when it carries the token
-// in its Authorization header, or the session cookie with the second secret
-// in its Safeclaw-Secret header. The cookie alone is enough for pageRoutes,
-// and with a ticket for ticketRoutes. A GET carrying the token in the query
-// is answered with the cookie and a redirect to the same URL without the
-// token, with the secret in its fragment. A request for dashproof.Path is
-// answered with the proof that this dashboard holds the token, with no
-// login needed. Anything else gets 401 without reaching next.
+// in its Authorization header, or a live login's cookie with that login's
+// second secret in its Safeclaw-Secret header. The cookie alone is enough
+// for pageRoutes, and with a ticket for ticketRoutes. A GET carrying the
+// token in the query is answered with a new login's cookie and a redirect to
+// the same URL without the token, with the secret in its fragment. A request
+// for dashproof.Path is answered with the proof that this dashboard holds
+// the token, with no login needed. Anything else gets 401 without reaching
+// next.
+//
+// A request that came with a login ends with it: its context is canceled
+// when the login logs out or expires.
 //
 // A handler behind it that forwards requests elsewhere, such as a session's
 // web terminal, must drop the cookie and Authorization header first.
@@ -172,44 +213,177 @@ func (a *Access) Middleware(next http.Handler) http.Handler {
 			a.exchange(w, r, q)
 			return
 		}
-		if a.allowed(r) {
+		l, ok := a.allowed(r)
+		if !ok {
+			a.unauthorized(w)
+			return
+		}
+		if l == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
-		a.unauthorized(w)
+		// The deadline is the wall clock's, whatever a.now says.
+		ctx, cancel := context.WithDeadline(r.Context(), time.Now().Add(a.acquire(l)))
+		defer cancel()
+		defer a.release(l)
+		stop := context.AfterFunc(l.ctx, cancel)
+		defer stop()
+		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, loginKey{}, l)))
 	})
 }
 
-// allowed reports whether r may reach the route it asks for. A bearer
-// header decides on its own, so a cookie can't make up for a wrong token.
-// Neither the token nor the cookie is accepted in place of the other.
-func (a *Access) allowed(r *http.Request) bool {
+// allowed reports whether r may reach the route it asks for, and the login
+// it came with, which is nil for the bearer token. A bearer header decides
+// on its own, so a cookie can't make up for a wrong token. Neither the token
+// nor the cookie is accepted in place of the other.
+func (a *Access) allowed(r *http.Request) (*login, bool) {
 	if scheme, tok, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "Bearer") {
-		return equal(strings.TrimSpace(tok), a.token)
+		return nil, equal(strings.TrimSpace(tok), a.token)
 	}
-	c, err := r.Cookie(a.cookie)
-	if err != nil || !equal(c.Value, a.session) {
-		return false
+	l := a.find(r)
+	if l == nil {
+		return nil, false
 	}
 	switch {
-	case equal(r.Header.Get(secretHeader), a.secret):
-		return true
+	case equal(r.Header.Get(secretHeader), l.secret):
+		return l, true
 	case isRoute(a.pages, r):
-		return true
+		return l, true
 	case isRoute(a.ticketed, r):
-		return a.redeem(r.URL.Query().Get(ticketParam), r.URL.Path)
+		return l, a.redeem(r.URL.Query().Get(ticketParam), r.URL.Path, l)
 	}
-	return false
+	return nil, false
 }
 
 func equal(got, want string) bool {
 	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
-// exchange swaps the token in the query for the session cookie and
+func cookieKey(v string) [sha256.Size]byte { return sha256.Sum256([]byte(v)) }
+
+// find returns the live login whose cookie r carries, or nil. Every cookie
+// with the dashboard's name is tried, so one that another 127.0.0.1
+// listener set for a narrower path, which the browser sends first, doesn't
+// hide the real one.
+func (a *Access) find(r *http.Request) *login {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	for _, c := range r.CookiesNamed(a.cookie) {
+		if c.Value == "" {
+			continue
+		}
+		k := cookieKey(c.Value)
+		l, ok := a.logins[k]
+		if !ok {
+			continue
+		}
+		if l.ended(now) {
+			a.end(k, l)
+			continue
+		}
+		return l
+	}
+	return nil
+}
+
+// ended reports whether l has expired by now, or idled out.
+func (l *login) ended(now time.Time) bool {
+	return !now.Before(l.expires) || (l.active == 0 && now.Sub(l.used) >= loginIdle)
+}
+
+// end forgets the login under k, ends its requests in flight, and drops its
+// tickets. a.mu must be held.
+func (a *Access) end(k [sha256.Size]byte, l *login) {
+	delete(a.logins, k)
+	l.cancel()
+	for v, t := range a.tickets {
+		if t.login == l {
+			delete(a.tickets, v)
+		}
+	}
+}
+
+// acquire marks a request of l in flight and returns how long l has left.
+func (a *Access) acquire(l *login) time.Duration {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	l.active++
+	l.used = now
+	return l.expires.Sub(now)
+}
+
+// release marks a request of l done.
+func (a *Access) release(l *login) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	l.active--
+	l.used = a.now()
+}
+
+// newLogin makes a login and returns its cookie value and secret. It ends
+// the login whose cookie r carries, since the browser replaces that cookie
+// with the new one, and ends the least recently used login when maxLogins
+// are kept.
+func (a *Access) newLogin(r *http.Request) (value, secret string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now()
+	for _, c := range r.CookiesNamed(a.cookie) {
+		k := cookieKey(c.Value)
+		if l, ok := a.logins[k]; ok {
+			a.end(k, l)
+		}
+	}
+	var oldest *login
+	var oldestKey [sha256.Size]byte
+	for k, l := range a.logins {
+		if l.ended(now) {
+			a.end(k, l)
+			continue
+		}
+		if oldest == nil || l.used.Before(oldest.used) {
+			oldest, oldestKey = l, k
+		}
+	}
+	if len(a.logins) >= maxLogins {
+		a.end(oldestKey, oldest)
+	}
+	value, secret = rand.Text(), rand.Text()
+	ctx, cancel := context.WithCancel(context.Background())
+	a.logins[cookieKey(value)] = &login{secret: secret, expires: now.Add(loginLifetime), used: now, ctx: ctx, cancel: cancel}
+	return value, secret
+}
+
+// logout ends l, if it is still live.
+func (a *Access) logout(l *login) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for k, v := range a.logins {
+		if v == l {
+			a.end(k, l)
+		}
+	}
+}
+
+// sessionCookie returns the login cookie with value, kept for maxAge
+// seconds.
+func (a *Access) sessionCookie(value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name:     a.cookie,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+	}
+}
+
+// exchange swaps the token in the query for a new login's cookie and
 // redirects to the URL without it, so the token leaves the address bar and
-// history. The redirect's fragment carries the second secret, which the
-// browser never sends to a server or in a Referer; app.js stores it and
+// history. The redirect's fragment carries the login's second secret, which
+// the browser never sends to a server or in a Referer; app.js stores it and
 // removes it from the address bar. On any host other than 127.0.0.1 it
 // first redirects there, keeping the token.
 func (a *Access) exchange(w http.ResponseWriter, r *http.Request, q url.Values) {
@@ -232,17 +406,31 @@ func (a *Access) exchange(w http.ResponseWriter, r *http.Request, q url.Values) 
 		http.Redirect(w, r, u.String(), http.StatusTemporaryRedirect)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     a.cookie,
-		Value:    a.session,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
-	})
+	value, secret := a.newLogin(r)
+	http.SetCookie(w, a.sessionCookie(value, int(loginLifetime/time.Second)))
 	delete(q, tokenParam)
 	// A path starting with // would redirect to another host.
 	u := url.URL{Path: "/" + strings.TrimLeft(r.URL.Path, "/"), RawQuery: q.Encode()}
-	http.Redirect(w, r, u.RequestURI()+"#"+secretFragment+"="+a.secret, http.StatusSeeOther)
+	http.Redirect(w, r, u.RequestURI()+"#"+secretFragment+"="+secret, http.StatusSeeOther)
+}
+
+// handleLogout ends the login the request came with, so its cookie and
+// secret stop working and its streams and terminals close, and clears the
+// cookie. It is behind Middleware like every route, and isn't a page or
+// ticket route, so it needs the cookie with the secret, which a form on
+// another site can't send, and CrossOriginProtection applies too. The
+// bearer token has no login to end.
+func (a *Access) handleLogout(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	l := requestLogin(r)
+	if l == nil {
+		http.Error(w, "only a browser login can log out", http.StatusBadRequest)
+		return
+	}
+	a.logout(l)
+	http.SetCookie(w, a.sessionCookie("", -1))
+	w.Header().Set("HX-Trigger", "logged-out")
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleTicket answers with a ticket that lets the cookie open the path in
@@ -257,7 +445,7 @@ func (a *Access) handleTicket(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "tickets are only for the terminal WebSocket", http.StatusBadRequest)
 		return
 	}
-	t, ok := a.mint(u.Path)
+	t, ok := a.mint(u.Path, requestLogin(r))
 	if !ok {
 		http.Error(w, "too many outstanding tickets", http.StatusServiceUnavailable)
 		return
@@ -266,9 +454,9 @@ func (a *Access) handleTicket(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.WriteString(w, t)
 }
 
-// mint returns a new ticket for path, or false when maxTickets are still
-// outstanding. Expired tickets are dropped first.
-func (a *Access) mint(path string) (string, bool) {
+// mint returns a new ticket for path that l's cookie can use, or false when
+// maxTickets are still outstanding. Expired tickets are dropped first.
+func (a *Access) mint(path string, l *login) (string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := a.now()
@@ -281,13 +469,13 @@ func (a *Access) mint(path string) (string, bool) {
 		return "", false
 	}
 	v := rand.Text()
-	a.tickets[v] = ticket{path: path, expires: now.Add(ticketTTL)}
+	a.tickets[v] = ticket{path: path, login: l, expires: now.Add(ticketTTL)}
 	return v, true
 }
 
-// redeem reports whether v is an unexpired ticket for path, and uses it up
-// whether or not it is.
-func (a *Access) redeem(v, path string) bool {
+// redeem reports whether v is an unexpired ticket for path that l's cookie
+// can use, and uses it up whether or not it is.
+func (a *Access) redeem(v, path string, l *login) bool {
 	if v == "" {
 		return false
 	}
@@ -298,7 +486,7 @@ func (a *Access) redeem(v, path string) bool {
 		return false
 	}
 	delete(a.tickets, v)
-	return t.path == path && a.now().Before(t.expires)
+	return t.path == path && (t.login == nil || t.login == l) && a.now().Before(t.expires)
 }
 
 // prove answers the nonce in r with the proof that this dashboard holds the

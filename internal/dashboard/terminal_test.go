@@ -180,7 +180,7 @@ func TestTerminalProxyNeedsDashboardAuth(t *testing.T) {
 	for name, hdr := range map[string]map[string]string{
 		"no auth":      {"Origin": srv.URL},
 		"wrong cookie": {"Origin": srv.URL, "Cookie": "safeclaw_dashboard_7680=nope"},
-		"cookie only":  {"Origin": srv.URL, "Cookie": login(t, srv.Config.Handler)},
+		"cookie only":  {"Origin": srv.URL, "Cookie": loginCookie(t, srv.Config.Handler)},
 		"ttyd basic":   {"Origin": srv.URL, "Authorization": "Basic " + testCred.Token()},
 	} {
 		h := http.Header{}

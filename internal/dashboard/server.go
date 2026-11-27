@@ -228,6 +228,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events", s.apiEvents)
 
 	mux.HandleFunc("POST /tickets", s.access.handleTicket)
+	mux.HandleFunc("POST /logout", s.access.handleLogout)
 
 	cop := http.NewCrossOriginProtection()
 	return refuseFraming(s.checkHost(s.access.Middleware(cop.Handler(mux))))
