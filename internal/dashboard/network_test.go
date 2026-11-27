@@ -39,7 +39,7 @@ func TestOfflineRendering(t *testing.T) {
 	if !strings.Contains(body, `class="frame-offline-placeholder" id="offline-safeclaw-triage"`) {
 		t.Error("offline placeholder lost its own class")
 	}
-	if !strings.Contains(body, `<iframe id="iframe-safeclaw-work" src="/sessions/work/terminal">`) {
+	if !strings.Contains(body, `<iframe id="iframe-safeclaw-work" src="/sessions/work/terminal" sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox">`) {
 		t.Error("online frame missing")
 	}
 	for _, want := range []string{
@@ -79,7 +79,7 @@ func TestOfflineAction(t *testing.T) {
 
 func TestOnlineActionForceConfirm(t *testing.T) {
 	f := &fakeSessions{list: networkSessions()}
-	held := []session.Hold{{Owner: "job"}}
+	held := []session.Hold{{Owner: "job", Reason: "opening a pdf"}}
 	f.netOnFn = func(n string, o session.NetOnOptions) (*session.NetResult, error) {
 		if o.Force {
 			return &session.NetResult{Name: n}, nil
@@ -88,19 +88,41 @@ func TestOnlineActionForceConfirm(t *testing.T) {
 	}
 	h := newTestServer(t, f)
 
+	// The click opens the force dialog in place of the info dialog.
 	rec := do(h, "POST", "/sessions/triage/online", url.Values{}, nil)
 	body := rec.Body.String()
-	if rec.Code != http.StatusOK || !strings.Contains(body, "force online?") || !strings.Contains(body, `title="held offline by job"`) ||
-		!strings.Contains(body, `hx-vals='{"force": "1", "variant": ""}'`) {
-		t.Errorf("first click = %d %s", rec.Code, body)
+	if rec.Code != http.StatusOK || rec.Header().Get("HX-Retarget") != "#session-info" || rec.Header().Get("HX-Reswap") != "innerHTML" {
+		t.Errorf("first click = %d %v", rec.Code, rec.Header())
 	}
-	if !strings.Contains(body, "/sessions/triage/actions?kind=online") {
-		t.Error("force confirm does not revert")
+	for _, want := range []string{
+		`<li>job (opening a pdf)</li>`,
+		`hx-post="/sessions/triage/online" hx-vals='{&#34;force&#34;:&#34;1&#34;}'`,
+		`name="confirm_name" data-confirm-name="triage"`,
+		`data-confirm-submit disabled`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("force dialog missing %s: %s", want, body)
+		}
 	}
 
-	rec = do(h, "POST", "/sessions/triage/online", url.Values{"force": {"1"}}, nil)
+	// Forcing needs the session name typed.
+	for _, typed := range []string{"", "Triage", "work"} {
+		rec = do(h, "POST", "/sessions/triage/online", url.Values{"force": {"1"}, "confirm_name": {typed}}, nil)
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), `type &#34;triage&#34; to force it online`) {
+			t.Errorf("force with %q = %d %s", typed, rec.Code, rec.Body.String())
+		}
+	}
+	if len(f.netOns) != 1 {
+		t.Fatalf("a mistyped name reached NetOn: %+v", f.netOns)
+	}
+
+	rec = do(h, "POST", "/sessions/triage/online", url.Values{"force": {"1"}, "confirm_name": {"triage"}}, nil)
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("force = %d %s", rec.Code, rec.Body.String())
+	}
+	var trig map[string]bool
+	if err := json.Unmarshal([]byte(rec.Header().Get("HX-Trigger")), &trig); err != nil || !trig["sessions"] || !trig["close-dialog"] {
+		t.Errorf("force trigger = %q", rec.Header().Get("HX-Trigger"))
 	}
 	if len(f.netOns) != 2 || f.netOns[0].Force || !f.netOns[1].Force {
 		t.Errorf("net ons = %+v", f.netOns)
@@ -110,8 +132,13 @@ func TestOnlineActionForceConfirm(t *testing.T) {
 	f.netOnFn = func(n string, _ session.NetOnOptions) (*session.NetResult, error) {
 		return &session.NetResult{Name: n, Offline: true, Holds: held}, nil
 	}
-	if body := do(h, "POST", "/sessions/triage/online", url.Values{}, nil).Body.String(); !strings.Contains(body, "force online?") {
-		t.Errorf("partial release = %s", body)
+	if rec := do(h, "POST", "/sessions/triage/online", url.Values{}, nil); rec.Header().Get("HX-Retarget") != "#session-info" || !strings.Contains(rec.Body.String(), "data-confirm-name") {
+		t.Errorf("partial release = %s", rec.Body.String())
+	}
+	// A force that still leaves holds says so in the dialog.
+	rec = do(h, "POST", "/sessions/triage/online", url.Values{"force": {"1"}, "confirm_name": {"triage"}}, nil)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "still held offline by job") {
+		t.Errorf("force with holds left = %d %s", rec.Code, rec.Body.String())
 	}
 
 	if body := do(h, "GET", "/sessions/triage/actions?kind=online", nil, nil).Body.String(); !strings.Contains(body, `hx-post="/sessions/triage/online"`) || strings.Contains(body, "force") {

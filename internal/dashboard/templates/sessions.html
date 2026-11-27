@@ -11,7 +11,7 @@
                 <td><span class="session-name">{{.Name}}</span> <span class="badge" title="headless sandbox: manage with safeclaw sandbox">sandbox</span>{{if .IsOneOff}} <span class="badge" title="one-off sandbox: removed when stopped">one-off</span>{{end}}{{template "variant-badge" .}}</td>
                 <td id="url-{{.Container}}" class="inactive">-</td>
                 {{- else}}
-                <td><a href="#" class="session-name" hx-get="/sessions/{{.Name}}/info" hx-target="#session-info">{{.Name}}</a>{{template "variant-badge" .}}{{template "secrets-badge" .Secrets}}{{template "offline-badge" .}}</td>
+                <td><a href="#" class="session-name" hx-get="{{path .Name "info"}}" hx-target="#session-info">{{.Name}}</a>{{template "variant-badge" .}}{{template "secrets-badge" .Secrets}}{{template "offline-badge" .}}</td>
                 <td id="url-{{.Container}}">{{if and .Active .IsOffline}}<span class="inactive" title="the web terminal is unreachable while the session is offline">offline</span>{{else if .Active}}<a href="{{terminal .Name}}" target="_blank">{{display .URL}}</a>{{else}}{{template "action" (action .Name "start" "")}}{{end}}</td>
                 {{- end}}
                 <td class="volume">{{.Volume}}</td>
@@ -64,7 +64,7 @@
         {{- if .IsOffline}}
         <div class="frame-offline-placeholder" id="offline-{{.Container}}"><p>offline</p><p>run <code>safeclaw net on {{.Name}}</code> or click online to reconnect</p></div>
         {{- else}}
-        <iframe id="iframe-{{.Container}}" src="{{terminal .Name}}"></iframe>
+        <iframe id="iframe-{{.Container}}" src="{{terminal .Name}}" sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
         {{- end}}
     </div>
 {{- end}}

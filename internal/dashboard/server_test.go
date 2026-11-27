@@ -112,8 +112,8 @@ func (f *fakeSessions) NetOn(_ context.Context, n string, o session.NetOnOptions
 
 func sampleSessions() []session.Session {
 	return []session.Session{
-		{Container: "safeclaw-work", Name: "work", Active: true, Port: 7681, URL: "http://localhost:7681", Volume: "/p:/home/sclaw/p"},
-		{Container: "safeclaw-old", Name: "old", Volume: "-"},
+		{Container: "safeclaw-work", Name: "work", Active: true, Port: 7681, URL: "http://localhost:7681", Volume: "/p:/home/sclaw/p", Type: "session"},
+		{Container: "safeclaw-old", Name: "old", Volume: "-", Type: "session"},
 	}
 }
 
@@ -172,7 +172,7 @@ func TestIndexRendersSessionsAndFrames(t *testing.T) {
 		`hx-post="/sessions/old/delete"`,
 		`class="inactive-row"`,
 		`/p:/home/sclaw/p`,
-		`<iframe id="iframe-safeclaw-work" src="/sessions/work/terminal">`,
+		`<iframe id="iframe-safeclaw-work" src="/sessions/work/terminal" sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox">`,
 		`class="frames single"`,
 		`<dialog id="new-session-modal"`,
 	} {
@@ -199,7 +199,7 @@ func TestConfirmFlow(t *testing.T) {
 
 	rec := do(h, "POST", "/sessions/work/stop", url.Values{}, nil)
 	body := rec.Body.String()
-	if !strings.Contains(body, "stop?") || !strings.Contains(body, `"confirm": "1"`) || !strings.Contains(body, `hx-trigger="load delay:3s"`) {
+	if !strings.Contains(body, "stop?") || !strings.Contains(body, `hx-vals='{&#34;confirm&#34;:&#34;1&#34;,&#34;variant&#34;:&#34;&#34;}'`) || !strings.Contains(body, `hx-trigger="load delay:3s"`) {
 		t.Errorf("confirm fragment wrong: %s", body)
 	}
 	if len(f.stopped) != 0 {

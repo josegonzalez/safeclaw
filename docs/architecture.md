@@ -45,7 +45,7 @@ The dashboard listens on `127.0.0.1`, but that only keeps other machines out: co
 - API clients send `Authorization: Bearer TOKEN`, reading the token from `~/.config/safeclaw/dashboard/PORT.token` (honoring `XDG_CONFIG_HOME`). The directory is 0700 and the file 0600; it is replaced on start and removed on exit
 - Anything else, static files included, gets 401 before any session or docker call. Tokens are compared in constant time
 
-The cookie is only ever set for `127.0.0.1`, and the token URL on `localhost` or `::1` first redirects there. Cookies aren't scoped by port, and session terminals are served from inside their containers at `localhost:PORT` and published on `[::1]`, so neither name a session can serve on gets the cookie. Restarting the dashboard makes a new token, so open the newly printed URL again.
+The cookie is only ever set for `127.0.0.1`, and the token URL on `localhost` first redirects there. Any other `Host`, `::1` included, is refused. Cookies aren't scoped by port, and session terminals are served from inside their containers at `localhost:PORT` and published on `[::1]`, so neither name a session can serve on gets the cookie. Restarting the dashboard makes a new token, so open the newly printed URL again.
 
 The dashboard shows each session's terminal through itself rather than framing ttyd:
 

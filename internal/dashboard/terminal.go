@@ -173,5 +173,5 @@ func relay(ctx context.Context, dst, src *websocket.Conn) error {
 
 // terminalPath returns the path of a session's terminal page.
 func terminalPath(name string) string {
-	return "/sessions/" + config.SessionName(name) + "/terminal"
+	return sessionPath(config.SessionName(name), "terminal")
 }

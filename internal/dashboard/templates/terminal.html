@@ -11,7 +11,7 @@
     <script src="/static/app.js" defer></script>
 </head>
 <body class="terminal-page">
-    <div id="terminal" data-terminal="/sessions/{{.Name}}/terminal/ws"></div>
+    <div id="terminal" data-terminal="{{path .Name "terminal" "ws"}}"></div>
 </body>
 </html>
 {{end}}
