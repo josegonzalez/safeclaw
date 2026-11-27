@@ -1,6 +1,7 @@
 package safeclaw
 
 import (
+	"encoding/json"
 	"io/fs"
 	"regexp"
 	"strings"
@@ -20,6 +21,12 @@ func TestBuildContextHasEverythingTheDockerfileNeeds(t *testing.T) {
 		"setup/settings.json",
 		"setup/managed-mcp.json",
 		"setup/safeclaw-session.json",
+		"setup/apt/nodesource.asc",
+		"setup/apt/githubcli-archive-keyring.gpg",
+		"setup/apt/verify-keyring.sh",
+		"setup/npm/package.json",
+		"setup/npm/package-lock.json",
+		"setup/playwright/archives.sha256",
 		"setup/skills/gdoc/SKILL.md",
 		"cmd/safeclaw/main.go",
 		"internal/cli/root.go",
@@ -109,6 +116,10 @@ func TestDockerfilePinsClaudeCodeTipsByCommit(t *testing.T) {
 		`echo "${CONTEXT_BAR_SHA256}  /home/sclaw/.claude/scripts/context-bar.sh" | sha256sum -c -`,
 		"claude plugin marketplace add https://github.com/ykdojo/claude-code-tips.git#${CLAUDE_CODE_TIPS_COMMIT}",
 		`test "$(git -C /home/sclaw/.claude/plugins/marketplaces/ykdojo rev-parse HEAD)" = "${CLAUDE_CODE_TIPS_COMMIT}"`,
+		// dx's source is the pinned marketplace checkout itself, and the
+		// installed plugin records the pinned commit.
+		`jq -e '[.plugins[] | select(.name == "dx")] | length == 1 and .[0].source == "./"' /home/sclaw/.claude/plugins/marketplaces/ykdojo/.claude-plugin/marketplace.json`,
+		`jq -e --arg commit "${CLAUDE_CODE_TIPS_COMMIT}" '.plugins["dx@ykdojo"] | length == 1 and .[0].gitCommitSha == $commit' /home/sclaw/.claude/plugins/installed_plugins.json`,
 	} {
 		if !strings.Contains(dockerfile, want) {
 			t.Errorf("Dockerfile is missing %q", want)
@@ -297,5 +308,243 @@ func TestDockerfileRootOwnsSecretsAndGitConfig(t *testing.T) {
 	}
 	if !strings.Contains(string(bashrc), ". "+config.EnvFile+"\n") || strings.Contains(string(bashrc), config.LegacyEnvFile) {
 		t.Errorf("setup/.bashrc does not source %s:\n%s", config.EnvFile, bashrc)
+	}
+}
+
+func readBuildContext(t *testing.T, path string) string {
+	t.Helper()
+	b, err := fs.ReadFile(BuildContext, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestDockerfilePinsAptKeyrings checks that the nodesource and GitHub CLI apt
+// keyrings are committed rather than fetched, and that the build checks them
+// against recorded primary key fingerprints.
+func TestDockerfilePinsAptKeyrings(t *testing.T) {
+	dockerfile := readBuildContext(t, "Dockerfile")
+	for _, arg := range []string{"NODESOURCE_APT_FINGERPRINTS", "GH_CLI_APT_FINGERPRINTS"} {
+		re := regexp.MustCompile(`(?m)^ARG ` + arg + `=("?)[0-9A-F]{40}( [0-9A-F]{40})*("?)$`)
+		m := re.FindStringSubmatch(dockerfile)
+		if m == nil || m[1] != m[3] {
+			t.Errorf("Dockerfile does not pin %s to 40-hex fingerprints", arg)
+		}
+	}
+	for _, want := range []string{
+		"COPY setup/apt/nodesource.asc /etc/apt/keyrings/nodesource.asc\n",
+		"COPY setup/apt/githubcli-archive-keyring.gpg /usr/share/keyrings/githubcli-archive-keyring.gpg\n",
+		"sh /tmp/verify-keyring.sh /etc/apt/keyrings/nodesource.asc ${NODESOURCE_APT_FINGERPRINTS} &&",
+		"sh /tmp/verify-keyring.sh /usr/share/keyrings/githubcli-archive-keyring.gpg ${GH_CLI_APT_FINGERPRINTS} &&",
+		"signed-by=/etc/apt/keyrings/nodesource.asc]",
+		"signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg]",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("Dockerfile is missing %q", want)
+		}
+	}
+	for _, bad := range []string{"gpgkey", "githubcli-archive-keyring.gpg |", "gpg --dearmor"} {
+		if strings.Contains(dockerfile, bad) {
+			t.Errorf("Dockerfile fetches an apt keyring (%q)", bad)
+		}
+	}
+	if !strings.HasPrefix(readBuildContext(t, "setup/apt/nodesource.asc"), "-----BEGIN PGP PUBLIC KEY BLOCK-----") {
+		t.Error("setup/apt/nodesource.asc is not an armored public key")
+	}
+	// A binary keyring starts with a public key packet: tag 6 in the old
+	// (0x98, 0x99) or new (0xc6) packet format.
+	gh := readBuildContext(t, "setup/apt/githubcli-archive-keyring.gpg")
+	if gh == "" || (gh[0] != 0x98 && gh[0] != 0x99 && gh[0] != 0xc6) {
+		t.Error("setup/apt/githubcli-archive-keyring.gpg is not a binary OpenPGP keyring")
+	}
+}
+
+// TestDockerfilePinsClaudeCodeBinary checks that the Claude Code binary is
+// fetched for the pinned version directly, not through install.sh, and is
+// checked against a pinned SHA-256 for each architecture before and after it
+// installs itself.
+func TestDockerfilePinsClaudeCodeBinary(t *testing.T) {
+	dockerfile := readBuildContext(t, "Dockerfile")
+	if !regexp.MustCompile(`(?m)^ARG CLAUDE_CODE_VERSION=\d+\.\d+\.\d+$`).MatchString(dockerfile) {
+		t.Error("Dockerfile does not pin CLAUDE_CODE_VERSION to an exact version")
+	}
+	for _, arch := range []string{"X64", "ARM64"} {
+		if !regexp.MustCompile(`(?m)^ARG CLAUDE_CODE_SHA256_LINUX_` + arch + `=[0-9a-f]{64}$`).MatchString(dockerfile) {
+			t.Errorf("Dockerfile does not pin CLAUDE_CODE_SHA256_LINUX_%s to a SHA-256", arch)
+		}
+	}
+	for _, want := range []string{
+		"x86_64) platform=linux-x64 sum=${CLAUDE_CODE_SHA256_LINUX_X64} ;;",
+		"aarch64) platform=linux-arm64 sum=${CLAUDE_CODE_SHA256_LINUX_ARM64} ;;",
+		`"https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/${platform}/claude"`,
+		`echo "${sum}  /tmp/claude-install/claude" | sha256sum -c -`,
+		`./claude install "${CLAUDE_CODE_VERSION}"`,
+		`echo "${sum}  /home/sclaw/.local/share/claude/versions/${CLAUDE_CODE_VERSION}" | sha256sum -c -`,
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("Dockerfile is missing %q", want)
+		}
+	}
+	if regexp.MustCompile(`install\.sh\s*\|`).MatchString(dockerfile) {
+		t.Error("Dockerfile runs claude.ai/install.sh, which fetches the latest binary")
+	}
+}
+
+// TestDockerfileInstallsNpmPackagesFromLockfile checks that the image's npm
+// packages, yarn included, are installed with npm ci from the committed
+// lockfile at exact versions with integrity hashes, never with npm install.
+func TestDockerfileInstallsNpmPackagesFromLockfile(t *testing.T) {
+	dockerfile := readBuildContext(t, "Dockerfile")
+	if regexp.MustCompile(`npm (install|i)\s`).MatchString(dockerfile) {
+		t.Error("Dockerfile runs npm install; install from setup/npm/package-lock.json with npm ci")
+	}
+	for _, want := range []string{
+		"COPY setup/npm/package.json setup/npm/package-lock.json /opt/safeclaw/npm/\n",
+		"npm ci --ignore-scripts --no-audit --no-fund &&",
+		"ENV NODE_PATH=/opt/safeclaw/npm/node_modules\n",
+		"ln -s /opt/safeclaw/npm/node_modules/.bin/yarn /usr/local/bin/yarn &&",
+		"ln -s /opt/safeclaw/npm/node_modules/.bin/playwright-mcp /usr/local/bin/playwright-mcp &&",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("Dockerfile is missing %q", want)
+		}
+	}
+
+	var pkg struct {
+		Dependencies map[string]string `json:"dependencies"`
+	}
+	if err := json.Unmarshal([]byte(readBuildContext(t, "setup/npm/package.json")), &pkg); err != nil {
+		t.Fatal(err)
+	}
+	exact := regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+	for _, name := range []string{"@playwright/mcp", "node-lief", "yarn"} {
+		if !exact.MatchString(pkg.Dependencies[name]) {
+			t.Errorf("setup/npm/package.json does not pin %s to an exact version: %q", name, pkg.Dependencies[name])
+		}
+	}
+
+	var lock struct {
+		LockfileVersion int `json:"lockfileVersion"`
+		Packages        map[string]struct {
+			Version      string            `json:"version"`
+			Resolved     string            `json:"resolved"`
+			Integrity    string            `json:"integrity"`
+			Dependencies map[string]string `json:"dependencies"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal([]byte(readBuildContext(t, "setup/npm/package-lock.json")), &lock); err != nil {
+		t.Fatal(err)
+	}
+	if lock.LockfileVersion != 3 {
+		t.Errorf("package-lock.json has lockfileVersion %d, want 3", lock.LockfileVersion)
+	}
+	for name, version := range pkg.Dependencies {
+		if lock.Packages[""].Dependencies[name] != version {
+			t.Errorf("package-lock.json is out of date with package.json for %s", name)
+		}
+		if got := lock.Packages["node_modules/"+name].Version; got != version {
+			t.Errorf("package-lock.json installs %s %q, want %q", name, got, version)
+		}
+	}
+	for path, p := range lock.Packages {
+		if path == "" {
+			continue
+		}
+		if !strings.HasPrefix(p.Resolved, "https://registry.npmjs.org/") {
+			t.Errorf("package-lock.json resolves %s from %q, not the npm registry", path, p.Resolved)
+		}
+		if !strings.HasPrefix(p.Integrity, "sha512-") {
+			t.Errorf("package-lock.json has no sha512 integrity for %s", path)
+		}
+	}
+}
+
+// TestDockerfileChecksumsPlaywrightBrowsers checks that every Playwright
+// browser archive is checked, before it is unzipped, against a SHA-256
+// recorded for its URL, for both architectures the image is built for.
+func TestDockerfileChecksumsPlaywrightBrowsers(t *testing.T) {
+	dockerfile := readBuildContext(t, "Dockerfile")
+	for _, want := range []string{
+		"COPY setup/playwright/archives.sha256 /tmp/pw-archives.sha256\n",
+		`sum=$(awk -v u="$url" '$2 == u { print $1 }' /tmp/pw-archives.sha256);`,
+		`[ -n "$sum" ] || {`,
+		"echo \"$sum  /tmp/pw.zip\" | sha256sum -c - || exit 1; \\\n        unzip -q -o /tmp/pw.zip",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("Dockerfile is missing %q", want)
+		}
+	}
+	line := regexp.MustCompile(`^[0-9a-f]{64}  https://\S+\.zip$`)
+	seen := map[string]bool{}
+	for _, l := range strings.Split(strings.TrimSpace(readBuildContext(t, "setup/playwright/archives.sha256")), "\n") {
+		if !line.MatchString(l) {
+			t.Errorf("setup/playwright/archives.sha256 has a bad line: %q", l)
+			continue
+		}
+		url := strings.Fields(l)[1]
+		if seen[url] {
+			t.Errorf("setup/playwright/archives.sha256 lists %s twice", url)
+		}
+		seen[url] = true
+	}
+	for _, want := range []string{
+		"/linux64/chrome-linux64.zip",
+		"/linux64/chrome-headless-shell-linux64.zip",
+		"/ffmpeg-linux.zip",
+		"/linux-arm64/chrome-linux-arm64.zip",
+		"/linux-arm64/chrome-headless-shell-linux-arm64.zip",
+		"/ffmpeg-linux-arm64.zip",
+	} {
+		found := false
+		for url := range seen {
+			found = found || strings.HasSuffix(url, want)
+		}
+		if !found {
+			t.Errorf("setup/playwright/archives.sha256 has no checksum for *%s", want)
+		}
+	}
+}
+
+// TestDockerfileRootOwnsPlaywright checks that the browsers and npm packages
+// the managed MCP config launches are root-owned and not writable by sclaw.
+func TestDockerfileRootOwnsPlaywright(t *testing.T) {
+	dockerfile := readBuildContext(t, "Dockerfile")
+	for _, want := range []string{
+		"chown -R root:root /opt/safeclaw /ms-playwright &&",
+		"chmod -R a+rX,go-w /opt/safeclaw /ms-playwright\n",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("Dockerfile is missing %q", want)
+		}
+	}
+	if regexp.MustCompile(`chown[^\n]*sclaw[^\n]*(/ms-playwright|/opt/safeclaw)`).MatchString(dockerfile) {
+		t.Error("Dockerfile gives sclaw /ms-playwright or /opt/safeclaw")
+	}
+	var mcp struct {
+		MCPServers map[string]struct {
+			Command string `json:"command"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(readBuildContext(t, "setup/managed-mcp.json")), &mcp); err != nil {
+		t.Fatal(err)
+	}
+	if got := mcp.MCPServers["playwright"].Command; got != "/usr/local/bin/playwright-mcp" {
+		t.Errorf("managed MCP config runs %q, want the root-owned /usr/local/bin/playwright-mcp", got)
+	}
+}
+
+// TestDockerignoreExcludesLocalState checks that a `--context .` build does
+// not send Claude Code's local state and worktrees, the built binary or
+// secrets to the docker daemon.
+func TestDockerignoreExcludesLocalState(t *testing.T) {
+	lines := map[string]bool{}
+	for _, l := range strings.Split(readBuildContext(t, ".dockerignore"), "\n") {
+		lines[strings.TrimSpace(l)] = true
+	}
+	for _, want := range []string{".git", ".claude", "safeclaw", "tmp", "dist", "**/.env", "**/*.pem"} {
+		if !lines[want] {
+			t.Errorf(".dockerignore does not exclude %s", want)
+		}
 	}
 }

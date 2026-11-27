@@ -57,9 +57,15 @@ FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da0
 ARG DEBIAN_FRONTEND=noninteractive
 ARG TZ=America/Los_Angeles
 ARG NODE_VERSION=26
-ARG PLAYWRIGHT_MCP_VERSION=0.0.86
+# The primary key fingerprints of the committed apt keyrings in setup/apt.
+# The build fails if a keyring holds any other keys.
+ARG NODESOURCE_APT_FINGERPRINTS=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
+ARG GH_CLI_APT_FINGERPRINTS="2C6106201985B60E6C7AC87323F3D4EA75716059 7F38BBB59D064DBCB3D84D725612B36462313325"
+# The Claude Code binary is checked against these, the checksums in the
+# version's signed manifest.json
 ARG CLAUDE_CODE_VERSION=2.1.332
-ARG NODE_LIEF_VERSION=1.3.2
+ARG CLAUDE_CODE_SHA256_LINUX_X64=a2df1f41bb00250992926420d0063f89b127cb81abdd284dbefb80c50ff1d026
+ARG CLAUDE_CODE_SHA256_LINUX_ARM64=50c305fcb8912851ce774429131d94ed6f84edbe3d8d0ed7a59dade5d893acc0
 # claude-code-tips is pinned by commit (tag v0.26.39), not by tag, so a moved
 # tag can't change what the build fetches
 ARG CLAUDE_CODE_TIPS_COMMIT=ed25f97beae8fa1755c6ba90cc670944316e21ae
@@ -72,23 +78,26 @@ ENV LC_ALL=C.UTF-8
 
 # === INSTALL Node.js ===
 
+# The nodesource and GitHub CLI apt keyrings are committed in setup/apt rather
+# than fetched, and checked against their recorded fingerprints
+COPY setup/apt/nodesource.asc /etc/apt/keyrings/nodesource.asc
+COPY setup/apt/githubcli-archive-keyring.gpg /usr/share/keyrings/githubcli-archive-keyring.gpg
+COPY setup/apt/verify-keyring.sh /tmp/verify-keyring.sh
+
 RUN apt-get update && \
-    # Install Node.js
     apt-get install -y curl wget gpg ca-certificates && \
-    mkdir -p /etc/apt/keyrings && \
-    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_VERSION}.x nodistro main" >> /etc/apt/sources.list.d/nodesource.list && \
-    apt-get update && \
-    apt-get install -y nodejs && \
+    sh /tmp/verify-keyring.sh /etc/apt/keyrings/nodesource.asc ${NODESOURCE_APT_FINGERPRINTS} && \
+    sh /tmp/verify-keyring.sh /usr/share/keyrings/githubcli-archive-keyring.gpg ${GH_CLI_APT_FINGERPRINTS} && \
+    rm /tmp/verify-keyring.sh && \
+    # Install Node.js
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.asc] https://deb.nodesource.com/node_${NODE_VERSION}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list && \
     # Install GitHub CLI
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && \
-    apt-get install -y gh && \
+    apt-get install -y nodejs gh && \
     apt-get install -y --no-install-recommends git openssh-client jq tmux vim python3-pip unzip && \
     # ttyd's libraries; ttyd itself is built above
     apt-get install -y --no-install-recommends libjson-c5 libwebsockets-evlib-uv libuv1t64 zlib1g libssl3t64 && \
-    npm install -g yarn && \
     # clean apt cache
     rm -rf /var/lib/apt/lists/* && \
     # Create the sclaw user, with a home only it can read
@@ -99,46 +108,59 @@ RUN apt-get update && \
     mkdir -m 700 /sandbox && \
     chown sandbox:sandbox /sandbox
 
-# === INSTALL Playwright MCP + browsers ===
+# === INSTALL Playwright MCP, node-lief, yarn + browsers ===
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV NODE_PATH=/opt/safeclaw/npm/node_modules
 
-# Install MCP globally, then prefetch the Chromium browser artifacts with curl.
-# Playwright's own downloader has no stall timeout: on some networks the CDN
-# connection establishes but then stops sending data mid-transfer, and the
-# install hangs forever. curl's --speed-time aborts a stalled transfer and
-# --retry reconnects until one succeeds. We fetch each artifact (URLs/paths come
-# from --dry-run, so this stays version-agnostic) into Playwright's browser dir
-# and mark it INSTALLATION_COMPLETE, so `playwright install` finds them already
-# present and skips its download. The final install is a fast no-op verification
-# (timeout-guarded so a missed artifact fails the build instead of hanging).
-RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} && \
+# The npm packages and every transitive dependency come from the committed
+# lockfile in setup/npm, checked against its integrity hashes, with install
+# scripts off. Their commands are linked into /usr/local/bin.
+COPY setup/npm/package.json setup/npm/package-lock.json /opt/safeclaw/npm/
+COPY setup/playwright/archives.sha256 /tmp/pw-archives.sha256
+
+# Prefetch the Chromium browser artifacts with curl. Playwright's own
+# downloader has no stall timeout: on some networks the CDN connection
+# establishes but then stops sending data mid-transfer, and the install hangs
+# forever. curl's --speed-time aborts a stalled transfer and --retry reconnects
+# until one succeeds. We fetch each artifact (URLs/paths come from --dry-run)
+# into Playwright's browser dir, check it against its SHA-256 in
+# setup/playwright/archives.sha256 (an artifact with no line there fails the
+# build), and mark it INSTALLATION_COMPLETE, so `playwright install` finds them
+# already present and skips its download. The final install is a fast no-op
+# verification (timeout-guarded so a missed artifact fails the build instead
+# of hanging). /ms-playwright is root-owned and read-only for everyone else,
+# so the agent cannot replace the chromium the managed MCP config launches.
+RUN cd /opt/safeclaw/npm && \
+    npm ci --ignore-scripts --no-audit --no-fund && \
+    ln -s /opt/safeclaw/npm/node_modules/.bin/playwright-mcp /usr/local/bin/playwright-mcp && \
+    ln -s /opt/safeclaw/npm/node_modules/.bin/yarn /usr/local/bin/yarn && \
+    ln -s /opt/safeclaw/npm/node_modules/.bin/yarnpkg /usr/local/bin/yarnpkg && \
     mkdir -p /ms-playwright && \
-    PW=/usr/lib/node_modules/@playwright/mcp/node_modules/.bin/playwright && \
+    PW=/opt/safeclaw/npm/node_modules/.bin/playwright && \
     "$PW" install-deps chromium && \
     "$PW" install --dry-run chromium | \
         awk '/Install location:/{loc=$3} /Download url:/{print loc, $3}' | \
         sort -u > /tmp/pw-pairs.txt && \
+    test -s /tmp/pw-pairs.txt && \
     while read -r loc url; do \
         echo "prefetching $loc"; \
+        sum=$(awk -v u="$url" '$2 == u { print $1 }' /tmp/pw-archives.sha256); \
+        [ -n "$sum" ] || { echo "no SHA-256 for $url in setup/playwright/archives.sha256" >&2; exit 1; }; \
         mkdir -p "$loc" || exit 1; \
         curl -fL --retry 8 --retry-all-errors --retry-delay 2 --connect-timeout 20 \
              --speed-limit 50000 --speed-time 15 -o /tmp/pw.zip "$url" || exit 1; \
+        echo "$sum  /tmp/pw.zip" | sha256sum -c - || exit 1; \
         unzip -q -o /tmp/pw.zip -d "$loc" || exit 1; \
         touch "$loc/INSTALLATION_COMPLETE"; \
         rm -f /tmp/pw.zip; \
     done < /tmp/pw-pairs.txt && \
     timeout 300 "$PW" install chromium && \
-    rm -f /tmp/pw-pairs.txt && \
+    rm -f /tmp/pw-pairs.txt /tmp/pw-archives.sha256 && \
     rm -rf /var/lib/apt/lists/* && \
     rm -rf ~/.npm/ && \
-    chown -R sclaw:sclaw /ms-playwright && \
-    chmod -R go-w /ms-playwright
-
-# === INSTALL node-lief ===
-
-RUN npm install -g node-lief@${NODE_LIEF_VERSION}
-ENV NODE_PATH=/usr/lib/node_modules
+    chown -R root:root /opt/safeclaw /ms-playwright && \
+    chmod -R a+rX,go-w /opt/safeclaw /ms-playwright
 
 # === INSTALL yt-dlp ===
 
@@ -188,15 +210,35 @@ RUN mkdir -p /home/sclaw/.claude/scripts && \
     echo "${CONTEXT_BAR_SHA256}  /home/sclaw/.claude/scripts/context-bar.sh" | sha256sum -c - && \
     chmod +x /home/sclaw/.claude/scripts/context-bar.sh
 
-RUN curl -fsSL https://claude.ai/install.sh | bash -s -- ${CLAUDE_CODE_VERSION}
+# Fetch the Claude Code binary for this version directly, rather than through
+# claude.ai/install.sh (which fetches the latest binary and checks it against a
+# checksum from the same host), check it against the pinned SHA-256, and let
+# it install itself. The installed binary must match the pinned SHA-256 too.
+RUN case "$(uname -m)" in \
+      x86_64) platform=linux-x64 sum=${CLAUDE_CODE_SHA256_LINUX_X64} ;; \
+      aarch64) platform=linux-arm64 sum=${CLAUDE_CODE_SHA256_LINUX_ARM64} ;; \
+      *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    mkdir -p /tmp/claude-install && \
+    curl -fsSLo /tmp/claude-install/claude \
+      "https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}/${platform}/claude" && \
+    echo "${sum}  /tmp/claude-install/claude" | sha256sum -c - && \
+    chmod 755 /tmp/claude-install/claude && \
+    (cd /tmp/claude-install && ./claude install "${CLAUDE_CODE_VERSION}") && \
+    rm -rf /tmp/claude-install && \
+    echo "${sum}  /home/sclaw/.local/share/claude/versions/${CLAUDE_CODE_VERSION}" | sha256sum -c - && \
+    test "$(readlink /home/sclaw/.local/bin/claude)" = "/home/sclaw/.local/share/claude/versions/${CLAUDE_CODE_VERSION}"
 
 # === SETUP Claude Code ===
 
 # Install DX plugin. The marketplace is checked out at the pinned commit, and
-# dx's source is that same checkout ("./" in its marketplace.json).
+# dx's source must be that same checkout ("./" in its marketplace.json), so
+# no second input needs pinning. The installed plugin must record that commit.
 RUN claude plugin marketplace add https://github.com/ykdojo/claude-code-tips.git#${CLAUDE_CODE_TIPS_COMMIT} && \
     test "$(git -C /home/sclaw/.claude/plugins/marketplaces/ykdojo rev-parse HEAD)" = "${CLAUDE_CODE_TIPS_COMMIT}" && \
-    claude plugin install dx@ykdojo
+    jq -e '[.plugins[] | select(.name == "dx")] | length == 1 and .[0].source == "./"' /home/sclaw/.claude/plugins/marketplaces/ykdojo/.claude-plugin/marketplace.json && \
+    claude plugin install dx@ykdojo && \
+    jq -e --arg commit "${CLAUDE_CODE_TIPS_COMMIT}" '.plugins["dx@ykdojo"] | length == 1 and .[0].gitCommitSha == $commit' /home/sclaw/.claude/plugins/installed_plugins.json
 
 # The Playwright MCP server is the only MCP server. Claude Code's managed MCP
 # config takes exclusive control of the server list, so servers added to
