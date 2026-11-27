@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
 )
 
@@ -336,11 +337,53 @@ func TestNextIndex(t *testing.T) {
 		"007-a":                     8,
 		"x-1\n-2\n3x-a\n4":          1,
 		"99999999999999999999999-a": 1,
+		"9223372036854775806-a":     1,
+		"1000000000-a\n5-b":         6,
+		"999999999-a":               MaxCopyIndex + 1,
+		"0000000000000000000012-a":  13,
 	}
 	for listing, want := range cases {
 		if got := nextIndex([]byte(listing)); got != want {
 			t.Errorf("nextIndex(%q) = %d, want %d", listing, got, want)
 		}
+	}
+}
+
+// A destination numbered up to MaxCopyIndex by the sandbox leaves cp-in no
+// numbers, which is refused before anything is sent.
+func TestCopyInNoNumbersLeft(t *testing.T) {
+	dir := t.TempDir()
+	a := writeFile(t, filepath.Join(dir, "a"), "a")
+	b := writeFile(t, filepath.Join(dir, "b"), "b")
+	m, r := newCopyManager(t, &copyFake{listing: "999999998-x\n"})
+	if _, err := m.CopyIn(context.Background(), "box", []string{a, b}, ""); !errors.Is(err, ErrCopyIndex) {
+		t.Errorf("err = %v, want ErrCopyIndex", err)
+	}
+	if hasCall(r, "exec -i ") {
+		t.Errorf("tar -x ran: %v", r.Commands())
+	}
+	m, _ = newCopyManager(t, &copyFake{listing: "999999998-x\n"})
+	paths, err := m.CopyIn(context.Background(), "box", []string{a}, "")
+	if err != nil || len(paths) != 1 || paths[0] != "/sandbox/in/999999999-a" {
+		t.Errorf("last number: paths = %v, err = %v", paths, err)
+	}
+}
+
+// A listing past copyListMaxOutput, as when the sandbox floods the ls exec,
+// fails the copy with an error saying what to do.
+func TestCopyInListingTooLarge(t *testing.T) {
+	file := writeFile(t, filepath.Join(t.TempDir(), "x.txt"), "x")
+	m, r := newCopyManager(t, &copyFake{listing: strings.Repeat("a\n", copyListMaxOutput/2+1)})
+	_, err := m.CopyIn(context.Background(), "box", []string{file}, "")
+	if !errors.Is(err, docker.ErrOutputTooLarge) || !strings.Contains(err.Error(), "list /sandbox/in") || !strings.Contains(err.Error(), "--to") {
+		t.Errorf("err = %v", err)
+	}
+	if hasCall(r, "exec -i ") {
+		t.Errorf("tar -x ran: %v", r.Commands())
+	}
+	m, _ = newCopyManager(t, &copyFake{listing: strings.Repeat("a\n", copyListMaxOutput/2)})
+	if _, err := m.CopyIn(context.Background(), "box", []string{file}, ""); err != nil {
+		t.Errorf("listing at the limit: %v", err)
 	}
 }
 

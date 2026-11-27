@@ -47,6 +47,9 @@ func newSandboxVerifyCommand() *cobra.Command {
 			"The docker configuration is checked first, then, when the sandbox is running, what the sandbox user sees inside it: " +
 			"uid 2000, an unreadable /home/sclaw, only a loopback interface, no capabilities, and read-only mounts. " +
 			"The live checks only read, and a stopped sandbox fails the running check.\n\n" +
+			"The checks of the docker configuration are authoritative. The live checks are advisory: they are reported by a probe " +
+			"running as the sandbox user, which code already in the sandbox can write to or trace, so a sandbox can lie to them. " +
+			"Probe output that is repeated, out of order, or past 1 MiB fails every live check, but output faked to look right can't be told apart.\n\n" +
 			"Each check is printed with ok or FAIL. It exits non-zero, naming the failed checks, if any check fails. " +
 			"With --json the report is printed as JSON instead.",
 		Args:              cobra.ExactArgs(1),

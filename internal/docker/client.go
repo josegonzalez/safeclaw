@@ -403,7 +403,26 @@ type ExecOptions struct {
 	User string
 	// Workdir runs the command in this directory instead of the container's.
 	Workdir string
+	// MaxOutput, when above zero, is the most stdout Exec buffers, in place
+	// of the runner's MaxOutput: a command that writes more is stopped and
+	// Exec returns an *OutputLimitError. It can't be used with Stdin or
+	// Detach.
+	MaxOutput int
 }
+
+// OutputLimitError is returned by Exec when a command writes more than its
+// ExecOptions.MaxOutput. It matches ErrOutputTooLarge with errors.Is.
+type OutputLimitError struct {
+	Args []string
+	Max  int
+}
+
+func (e *OutputLimitError) Error() string {
+	return fmt.Sprintf("docker %s: output exceeds %d bytes", firstArg(e.Args), e.Max)
+}
+
+// Is reports whether target is ErrOutputTooLarge.
+func (e *OutputLimitError) Is(target error) bool { return target == ErrOutputTooLarge }
 
 func (o ExecOptions) args(name string, cmd []string) []string {
 	args := []string{"exec"}
@@ -423,9 +442,46 @@ func (o ExecOptions) args(name string, cmd []string) []string {
 	return append(args, cmd...)
 }
 
-// Exec runs a command in a container and returns its stdout.
+// Exec runs a command in a container and returns its stdout, at most
+// opts.MaxOutput bytes of it when that is set.
 func (c *Client) Exec(ctx context.Context, name string, opts ExecOptions, cmd ...string) ([]byte, error) {
+	if opts.MaxOutput > 0 {
+		return c.execLimited(ctx, name, opts, cmd)
+	}
 	return c.R.Output(ctx, opts.Stdin, opts.args(name, cmd)...)
+}
+
+// execLimited runs a command with Stream, reading at most opts.MaxOutput
+// bytes of its stdout. Past that, docker is killed and an
+// *OutputLimitError returned, so a command flooding its stdout costs the
+// host no more than the limit.
+func (c *Client) execLimited(ctx context.Context, name string, opts ExecOptions, cmd []string) ([]byte, error) {
+	if opts.Stdin != nil || opts.Detach {
+		return nil, errors.New("docker exec: MaxOutput can't be used with Stdin or Detach")
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	args := opts.args(name, cmd)
+	out, wait, err := c.R.Stream(ctx, args...)
+	if err != nil {
+		return nil, err
+	}
+	b, rerr := io.ReadAll(io.LimitReader(out, int64(opts.MaxOutput)+1))
+	over := len(b) > opts.MaxOutput
+	if over || rerr != nil {
+		// Docker may still be writing, so wait would block until it exits
+		// on its own.
+		cancel()
+	}
+	_ = out.Close()
+	werr := wait()
+	switch {
+	case over:
+		return nil, &OutputLimitError{Args: args, Max: opts.MaxOutput}
+	case rerr != nil:
+		return nil, fmt.Errorf("read docker %s output: %w", firstArg(args), rerr)
+	}
+	return b, werr
 }
 
 // ExecStream runs a command in a container and returns its stdout as it is

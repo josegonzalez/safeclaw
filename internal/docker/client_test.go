@@ -367,6 +367,63 @@ func TestExecStream(t *testing.T) {
 	}
 }
 
+func TestExecMaxOutput(t *testing.T) {
+	failed := errors.New("exit 2")
+	r := &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
+		if args[len(args)-1] == "fail" {
+			return []byte("12"), failed
+		}
+		return []byte(args[len(args)-1]), nil
+	}}
+	c := r.Client()
+	opts := docker.ExecOptions{User: "sandbox", MaxOutput: 4}
+	if out, err := c.Exec(context.Background(), "safeclaw-a", opts, "echo", "1234"); err != nil || string(out) != "1234" {
+		t.Errorf("at the limit: %q, %v", out, err)
+	}
+	_, err := c.Exec(context.Background(), "safeclaw-a", opts, "echo", "12345")
+	var le *docker.OutputLimitError
+	if !errors.As(err, &le) || le.Max != 4 || !errors.Is(err, docker.ErrOutputTooLarge) {
+		t.Errorf("past the limit: err = %v", err)
+	}
+	if err == nil || err.Error() != "docker exec: output exceeds 4 bytes" {
+		t.Errorf("message = %v", err)
+	}
+	if out, err := c.Exec(context.Background(), "safeclaw-a", opts, "fail"); !errors.Is(err, failed) || string(out) != "12" {
+		t.Errorf("failed command: %q, %v", out, err)
+	}
+	if got := r.Commands()[0]; got != "exec --user sandbox safeclaw-a echo 1234" {
+		t.Errorf("exec = %q", got)
+	}
+	for _, o := range []docker.ExecOptions{{MaxOutput: 1, Detach: true}, {MaxOutput: 1, Stdin: strings.NewReader("x")}} {
+		if _, err := c.Exec(context.Background(), "safeclaw-a", o, "true"); err == nil {
+			t.Errorf("%+v should be refused", o)
+		}
+	}
+}
+
+// A command that keeps writing past MaxOutput is killed rather than waited
+// for.
+func TestExecMaxOutputKillsDocker(t *testing.T) {
+	script := filepath.Join(t.TempDir(), "docker")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexec yes\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	c := &docker.Client{R: docker.ExecRunner{Binary: script}}
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Exec(context.Background(), "safeclaw-a", docker.ExecOptions{MaxOutput: 1 << 20}, "yes")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, docker.ErrOutputTooLarge) {
+			t.Errorf("err = %v, want the output limit", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Exec is still reading past MaxOutput")
+	}
+}
+
 func TestRemoveDropsAnonymousVolumes(t *testing.T) {
 	r := &dockertest.Runner{}
 	c := r.Client()
