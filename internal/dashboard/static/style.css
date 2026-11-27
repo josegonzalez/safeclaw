@@ -506,3 +506,14 @@ body.terminal-page {
     height: 100%;
     padding: 4px;
 }
+table.sessions th:nth-child(1) { width: 34%; }
+table.sessions th:nth-child(2) { width: 22%; }
+table.sessions th:nth-child(4) { width: 200px; }
+table.sessions td {
+    overflow-wrap: anywhere;
+}
+table.sessions td[id^="url-"] {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
