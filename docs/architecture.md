@@ -41,7 +41,7 @@ Sessions are published on `[::1]` rather than `127.0.0.1` because `127.0.0.1` is
 
 The dashboard listens on `127.0.0.1`, but that only keeps other machines out: code inside a session container can reach host loopback through the runtime's host gateway on some runtimes (observed on OrbStack via `host.docker.internal`), and any local process can connect too. Every route therefore needs a token that `safeclaw dashboard` makes with `crypto/rand` each time it starts:
 
-- The printed URL, `http://127.0.0.1:PORT/?token=...`, swaps the token for an HttpOnly, SameSite=Strict cookie named `safeclaw_dashboard_PORT` and redirects to the same URL without it, so the token leaves the address bar and history
+- The printed URL, `http://127.0.0.1:PORT/?token=...`, swaps the token for an HttpOnly, SameSite=Strict cookie named `safeclaw_dashboard_PORT` and redirects to the same URL without it, so the token leaves the address bar and history. The cookie holds a separate random value that the dashboard keeps in memory, not the token, so it only works as that cookie and only until the dashboard stops
 - API clients send `Authorization: Bearer TOKEN`, reading the token from `~/.config/safeclaw/dashboard/PORT.token` (honoring `XDG_CONFIG_HOME`). The directory is 0700 and the file 0600; it is replaced on start and removed on exit
 - Anything else, static files included, gets 401 before any session or docker call. Tokens are compared in constant time
 

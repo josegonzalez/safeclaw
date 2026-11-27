@@ -36,12 +36,22 @@ func NewToken() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// Access authenticates dashboard callers with the launch token. Browsers
-// open the URL carrying the token once and get an HttpOnly, SameSite=Strict
-// cookie in exchange; other clients send it as `Authorization: Bearer`.
+// Access authenticates dashboard callers. Browsers open the URL carrying
+// the launch token once and get an HttpOnly, SameSite=Strict cookie in
+// exchange; other clients send the token as `Authorization: Bearer`.
+//
+// The cookie holds a separate random value, not the token. Cookies are not
+// scoped by port, so the browser also sends it to anything else listening
+// on 127.0.0.1, such as a session published there before sessions moved to
+// [::1]. What such a listener gets is only good as this cookie, for this
+// run of the dashboard: it is not the bearer token that the token file and
+// the CLI use.
 type Access struct {
-	token  string
-	cookie string
+	token string
+	// session is the cookie's value. It is only kept in memory, so it stops
+	// working when the dashboard stops.
+	session string
+	cookie  string
 	// file is where the token is stored for API callers, named in the 401
 	// response.
 	file string
@@ -50,13 +60,13 @@ type Access struct {
 // NewAccess returns an Access for token. The cookie is named after port so
 // dashboards on different ports don't overwrite each other's cookie.
 func NewAccess(token string, port int, file string) *Access {
-	return &Access{token: token, cookie: "safeclaw_dashboard_" + strconv.Itoa(port), file: file}
+	return &Access{token: token, session: rand.Text(), cookie: "safeclaw_dashboard_" + strconv.Itoa(port), file: file}
 }
 
 // Middleware lets a request through to next only when it carries the
-// token in its cookie or Authorization header. A GET carrying the token in
-// the query is answered with the cookie and a redirect to the same URL
-// without the token. Anything else gets 401 without reaching next.
+// session cookie or the token in its Authorization header. A GET carrying
+// the token in the query is answered with the cookie and a redirect to the
+// same URL without the token. Anything else gets 401 without reaching next.
 //
 // A handler behind it that forwards requests elsewhere, such as a session's
 // web terminal, must drop the cookie and Authorization header first.
@@ -75,29 +85,30 @@ func (a *Access) Middleware(next http.Handler) http.Handler {
 	})
 }
 
-// Authorized reports whether r carries the token as a bearer token or in
-// the cookie.
+// Authorized reports whether r carries the token as a bearer token or the
+// session value in the cookie. Neither is accepted in place of the other.
 func (a *Access) Authorized(r *http.Request) bool {
 	if scheme, tok, ok := strings.Cut(r.Header.Get("Authorization"), " "); ok && strings.EqualFold(scheme, "Bearer") {
-		return a.valid(strings.TrimSpace(tok))
+		return equal(strings.TrimSpace(tok), a.token)
 	}
 	if c, err := r.Cookie(a.cookie); err == nil {
-		return a.valid(c.Value)
+		return equal(c.Value, a.session)
 	}
 	return false
 }
 
-func (a *Access) valid(tok string) bool {
-	return tok != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(a.token)) == 1
+func equal(got, want string) bool {
+	return got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
-// exchange swaps the token in the query for the cookie and redirects to the
-// URL without it, so the token leaves the address bar and history. On any
-// host other than 127.0.0.1 it first redirects there, keeping the token.
+// exchange swaps the token in the query for the session cookie and
+// redirects to the URL without it, so the token leaves the address bar and
+// history. On any host other than 127.0.0.1 it first redirects there,
+// keeping the token.
 func (a *Access) exchange(w http.ResponseWriter, r *http.Request, q url.Values) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	if !a.valid(q.Get(tokenParam)) {
+	if !equal(q.Get(tokenParam), a.token) {
 		a.unauthorized(w)
 		return
 	}
@@ -116,7 +127,7 @@ func (a *Access) exchange(w http.ResponseWriter, r *http.Request, q url.Values) 
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     a.cookie,
-		Value:    a.token,
+		Value:    a.session,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,

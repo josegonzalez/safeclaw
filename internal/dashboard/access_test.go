@@ -113,6 +113,18 @@ func newAuthServer(t *testing.T, sessions Sessions) http.Handler {
 	return s.Handler()
 }
 
+// login opens the launch URL on h like a browser and returns the session
+// cookie it gets, as a Cookie header value.
+func login(t *testing.T, h http.Handler) string {
+	t.Helper()
+	rec := send(h, "GET", "http://127.0.0.1:7680/?token="+testToken, "", nil)
+	cookies := rec.Result().Cookies()
+	if rec.Code != http.StatusSeeOther || len(cookies) != 1 {
+		t.Fatalf("exchange = %d, cookies %v", rec.Code, cookies)
+	}
+	return cookies[0].Name + "=" + cookies[0].Value
+}
+
 func send(h http.Handler, method, target, body string, hdr map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
 	if strings.HasPrefix(body, "{") {
@@ -137,6 +149,9 @@ func TestEveryRouteNeedsTheToken(t *testing.T) {
 		"basic":               {"Authorization": "Basic " + testToken},
 		"wrong cookie":        {"Cookie": "safeclaw_dashboard_7680=nope"},
 		"other port's cookie": {"Cookie": "safeclaw_dashboard_7690=" + testToken},
+		// Another 127.0.0.1 port gets the cookie, so it must not be the
+		// token, and the token is no good as the cookie.
+		"token as cookie":     {"Cookie": "safeclaw_dashboard_7680=" + testToken},
 		"same-origin browser": {"Sec-Fetch-Site": "same-origin", "Origin": "http://127.0.0.1:7680"},
 	}
 	for name, hdr := range creds {
@@ -251,10 +266,11 @@ func TestTokenInPOSTQueryIsRefused(t *testing.T) {
 func TestBearerAndCookieAuthorize(t *testing.T) {
 	f := &fakeSessions{list: sampleSessions()}
 	h := newAuthServer(t, f)
+	cookie := login(t, h)
 	for name, hdr := range map[string]map[string]string{
 		"bearer":           {"Authorization": "Bearer " + testToken},
 		"lowercase bearer": {"Authorization": "bearer " + testToken},
-		"cookie":           {"Cookie": "safeclaw_dashboard_7680=" + testToken},
+		"cookie":           {"Cookie": cookie},
 	} {
 		for _, path := range []string{"/", "/static/app.js", "/fragments/sessions", "/api/sessions"} {
 			if rec := send(h, "GET", "http://127.0.0.1:7680"+path, "", hdr); rec.Code != http.StatusOK {
@@ -271,11 +287,51 @@ func TestBearerAndCookieAuthorize(t *testing.T) {
 		t.Errorf("foreign Host with the token = %d", rec.Code)
 	}
 	rec = send(h, "POST", "http://127.0.0.1:7680/sessions/work/stop", "confirm=1", map[string]string{
-		"Cookie":         "safeclaw_dashboard_7680=" + testToken,
+		"Cookie":         cookie,
 		"Sec-Fetch-Site": "cross-site",
 	})
 	if rec.Code != http.StatusForbidden {
 		t.Errorf("cross-site POST with the cookie = %d", rec.Code)
+	}
+}
+
+// TestCookieIsNotTheToken is the regression test for the cookie reaching
+// other 127.0.0.1 ports: what they get is not the bearer token, works only
+// as the cookie, and only for this run of the dashboard.
+func TestCookieIsNotTheToken(t *testing.T) {
+	h := newAuthServer(t, &fakeSessions{list: sampleSessions()})
+	cookie := login(t, h)
+	name, value, _ := strings.Cut(cookie, "=")
+	if name != "safeclaw_dashboard_7680" || value == testToken || strings.Contains(value, testToken) || len(value) < 26 {
+		t.Fatalf("cookie = %q", cookie)
+	}
+	if again := login(t, h); again != cookie {
+		t.Errorf("second login got %q, want the same cookie %q", again, cookie)
+	}
+	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", map[string]string{"Cookie": cookie}); rec.Code != http.StatusOK {
+		t.Errorf("cookie = %d", rec.Code)
+	}
+	for name, hdr := range map[string]map[string]string{
+		"cookie value as bearer": {"Authorization": "Bearer " + value},
+		"cookie value as token":  nil,
+	} {
+		target := "http://127.0.0.1:7680/api/sessions"
+		if hdr == nil {
+			target = "http://127.0.0.1:7680/?token=" + value
+		}
+		if rec := send(h, "GET", target, "", hdr); rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s = %d, want 401", name, rec.Code)
+		}
+	}
+	// A bearer header decides on its own; a valid cookie beside a wrong
+	// bearer doesn't let it through.
+	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", map[string]string{"Cookie": cookie, "Authorization": "Bearer nope"}); rec.Code != http.StatusUnauthorized {
+		t.Errorf("wrong bearer with the cookie = %d", rec.Code)
+	}
+	// Another run of the dashboard, with the same token, refuses it.
+	other := newAuthServer(t, &fakeSessions{list: sampleSessions()})
+	if rec := send(other, "GET", "http://127.0.0.1:7680/api/sessions", "", map[string]string{"Cookie": cookie}); rec.Code != http.StatusUnauthorized {
+		t.Errorf("cookie from another run = %d", rec.Code)
 	}
 }
 
@@ -294,7 +350,7 @@ func TestTokenExchange(t *testing.T) {
 		t.Fatalf("cookies = %v", cookies)
 	}
 	c := cookies[0]
-	if c.Name != "safeclaw_dashboard_7680" || c.Value != testToken || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" {
+	if c.Name != "safeclaw_dashboard_7680" || c.Value == "" || c.Value == testToken || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" {
 		t.Errorf("cookie = %+v", c)
 	}
 
@@ -350,6 +406,9 @@ func TestBrowserFlow(t *testing.T) {
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || resp.Request.URL.String() != srv.URL+"/" || !bytes.Contains(body, []byte(`hx-sse:connect="/events"`)) {
 		t.Fatalf("launch = %d at %s", resp.StatusCode, resp.Request.URL)
+	}
+	if c := jar.Cookies(resp.Request.URL); len(c) != 1 || c[0].Value == testToken {
+		t.Errorf("browser cookies = %v, want one that is not the token", c)
 	}
 
 	resp, err = client.Get(srv.URL + "/events")
