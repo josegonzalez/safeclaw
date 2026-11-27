@@ -720,7 +720,12 @@ func TestList(t *testing.T) {
 }
 
 func TestNormalizeAndValidate(t *testing.T) {
-	cases := map[string]string{"": "default", "  ": "default", "My Project": "my-project", "work": "work"}
+	cases := map[string]string{
+		"": "default", "  ": "default", "My Project": "my-project", "work": "work",
+		// One container prefix is removed, as Ensure does; ValidateName
+		// refuses what is left of a doubled one.
+		"safeclaw-work": "work", "SafeClaw-Work": "work", "safeclaw-safeclaw-x": "safeclaw-x", "safeclaw-": "safeclaw",
+	}
 	for in, want := range cases {
 		if got := NormalizeName(in); got != want {
 			t.Errorf("NormalizeName(%q) = %q, want %q", in, got, want)

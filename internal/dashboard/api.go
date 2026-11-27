@@ -208,8 +208,13 @@ func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {
 	// Like the new session dialog, create refuses a name in use. With
 	// recreate set it goes on as `safeclaw run` does: it starts the
 	// session, recreating it when a volume is given or the variant or
-	// secrets differ.
+	// secrets differ. The name is checked in the form Ensure uses, so a
+	// name with the container prefix can't skip the check.
 	name := session.NormalizeName(req.Name)
+	if err := session.ValidateName(name); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, apiResult{Error: err.Error()})
+		return
+	}
 	x, err := s.taken(r.Context(), name)
 	switch {
 	case err != nil:
