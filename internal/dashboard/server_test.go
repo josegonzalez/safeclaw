@@ -296,7 +296,7 @@ func TestCreate(t *testing.T) {
 func TestInfo(t *testing.T) {
 	h := newTestServer(t, &fakeSessions{})
 	body := do(h, "GET", "/sessions/work/info", nil, nil).Body.String()
-	if !strings.Contains(body, `value="docker exec -it safeclaw-work tmux attach -t main"`) {
+	if !strings.Contains(body, `value="safeclaw attach work"`) {
 		t.Errorf("info: %s", body)
 	}
 }

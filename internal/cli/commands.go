@@ -4,9 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"os/exec"
-	"syscall"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -341,12 +338,19 @@ func newAttachCommand() *cobra.Command {
 			if err := session.NewManager(nil).RequireType(cmd.Context(), args[0], config.TypeSession); err != nil {
 				return err
 			}
-			bin, err := exec.LookPath("docker")
+			// The tmux server runs as the session's own user, so code in
+			// the session can make it send anything to attached clients.
+			// Its output is filtered on the host, not passed straight to
+			// this terminal.
+			argv := []string{"docker", "exec", "-it", config.ContainerName(args[0]), "tmux", "attach", "-t", config.TmuxSession}
+			code, err := attachTerminal(argv)
 			if err != nil {
 				return err
 			}
-			argv := []string{"docker", "exec", "-it", config.ContainerName(args[0]), "tmux", "attach", "-t", config.TmuxSession}
-			return syscall.Exec(bin, argv, os.Environ())
+			if code != 0 {
+				return exitCodeError{code}
+			}
+			return nil
 		},
 	}
 }

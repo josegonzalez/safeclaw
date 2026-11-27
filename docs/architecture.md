@@ -21,6 +21,19 @@ Containers created from the upstream image don't contain the `safeclaw` binary, 
 
 Some Docker versions start `docker exec` processes with a umask of `0000` instead of the container's, and safeclaw starts everything in a session with `docker exec`. So ttyd is started under `umask 022`, and `safeclaw ttyd-wrapper` sets it again before it runs tmux, which covers `run -q` starting the tmux session without ttyd. The tmux server, every shell in it, and Claude Code inherit it, so files they create, including in the history mount on the host, are not world-writable. `safeclaw attach` only runs a tmux client, so its shells come from the same server. The legacy tmux script and the git config script run under `umask 022` too, and the env file and the terminal credential are written under `umask 077`. A running session picks this up on its next `run`, which restarts ttyd and tmux.
 
+### Attaching from the host
+
+`safeclaw attach NAME` runs `docker exec -it safeclaw-NAME tmux attach -t main`, but not on the host terminal. The tmux server runs as `sclaw`, the same user as Claude Code and everything it starts, so code in the session can change any tmux option and make tmux send attached clients anything, such as an OSC 52 clipboard write from `tmux set-buffer -w` or a pane's sequence wrapped in tmux passthrough. So `attach` puts the host terminal in raw mode, runs docker on a pseudo-terminal of its own, copies keystrokes to it, resizes it when the host terminal is resized, and passes its output to the host terminal through a filter that drops:
+
+- OSC sequences other than window titles (0, 1, 2), hyperlinks (8), and default and cursor colours (10, 11, 12, and the resets 104, 110, 111, 112), which drops OSC 52 clipboard writes and reads. An allowed OSC is dropped too when it is longer than 8 KiB or holds a control character
+- DCS, SOS, PM, and APC strings, which drops tmux passthrough, terminal capability queries, and graphics and terminal-specific commands carried in them
+- CSI `t` window operations other than the size reports and the title stack (14, 15, 16, 18, 19, 22, 23), so the session can't move, resize, or iconify the host window or read its title
+- C1 control bytes, raw or UTF-8 encoded
+
+Text, colours, cursor movement, the alternate screen, mouse and bracketed paste modes, and queries whose replies go back to the session pass through unchanged. The session can't set the host clipboard, so tmux copy mode only copies into tmux's own buffers. The dashboard's session info dialog gives the `safeclaw attach NAME` command for the same reason, rather than the raw `docker exec`, which would connect the host terminal to tmux directly.
+
+`safeclaw ttyd-wrapper` also starts the tmux server with `set-clipboard off` and `allow-passthrough off`, so programs that leave those options alone don't send clipboard writes or passthrough to any client, including the web terminal. That is not the control: code in the session can turn both back on.
+
 ### Terminal credential
 
 The published port is not private to the session's owner: other session containers can reach it through the runtime's host gateway or the default bridge, and so can any local process or a browser page allowed to open a WebSocket to loopback. So ttyd runs with `-c` and `-O`:

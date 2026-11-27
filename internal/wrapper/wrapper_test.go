@@ -45,6 +45,8 @@ func TestRunCreatesSessionAndAttaches(t *testing.T) {
 		"tmux -f /dev/null new -d -s main",
 		"tmux set -t main status off",
 		"tmux set -t main mouse on",
+		"tmux set -s set-clipboard off",
+		"tmux set -g allow-passthrough off",
 		"tmux send-keys -t main claude --dangerously-skip-permissions Enter",
 	}
 	if !slices.Equal(f.runs, want) {
