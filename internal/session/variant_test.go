@@ -34,7 +34,7 @@ func TestEnsureVariant(t *testing.T) {
 	if _, err := m.Ensure(ctx, Options{Name: "docs", Variant: "sandbox", NoOpen: true}); err != nil {
 		t.Fatal(err)
 	}
-	run, _ := r.Find("run -d --ipc=host --name safeclaw-docs")
+	run, _ := r.Find("run -d --name safeclaw-docs")
 	if !strings.Contains(run.String(), " --label safeclaw.variant=sandbox ") || !strings.HasSuffix(run.String(), " safeclaw:sandbox sleep infinity") {
 		t.Errorf("run = %q", run.String())
 	}

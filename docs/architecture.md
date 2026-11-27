@@ -35,16 +35,22 @@ The `Host` check (against DNS rebinding) and `http.CrossOriginProtection` (again
 
 1. Pick the [image variant](#image-variants) and check its image exists, pick the [secrets](#choosing-secrets) the session receives, then check that the Claude token is present if the session receives it (prompting for it only in `run`) and that every listed secret exists
 2. Reuse the container's existing port, or pick the lowest port no `safeclaw-*` container reserves and nothing on the host is listening on
-3. Create, start, or refresh the container. With `-v`, a `--variant` other than the container's, or a different set of secrets, an existing container is recreated, keeping its port and whichever of its mount, variant, and secrets were not given again. Every volume is checked before the old container is removed, and if the new one can't be created, the old one is created again with its port, mounts, variant, and secrets, so a failed recreate never loses the session's secret set. A running container has ttyd and tmux restarted so new env vars take effect. An [offline](#offline-sessions) session is never recreated, and starting it keeps it offline
+3. Create, start, or refresh the container. With `-v`, a `--variant` other than the container's, a different set of secrets, or a different [`--host-ipc`](#ipc-namespace) choice, an existing container is recreated, keeping its port and whichever of its mount, variant, secrets, and IPC choice were not given again. Every volume is checked before the old container is removed, and if the new one can't be created, the old one is created again with its port, mounts, variant, secrets, and IPC choice, so a failed recreate never loses the session's secret set. A running container has ttyd and tmux restarted so new env vars take effect. An [offline](#offline-sessions) session is never recreated, and starting it keeps it offline
 4. Write `/home/sclaw/.env` from the secrets the session receives
 5. Configure git from the GitHub account if the session receives `GH_TOKEN`
 6. Start ttyd, and with `-q`, wait for Claude Code's input prompt before sending the query
+
+### IPC namespace
+
+A session gets docker's default private IPC namespace and its own `/dev/shm`, so code Claude Code runs can't see or attach to the docker host's shared memory, semaphores, or message queues. On a native Linux docker host that is the real host's; on Docker Desktop or OrbStack it is the Linux VM's. No `--shm-size` is set: Playwright starts Chromium with `--disable-dev-shm-usage`, so the browser works with docker's default 64 MB `/dev/shm`.
+
+`--host-ipc` on `run` or `new` opts a session into `--ipc=host`, recorded in the `safeclaw.ipc=host` label so recreates keep it, and `--host-ipc=false` moves it back to a private namespace. Sessions created before private namespaces became the default share the host's without the label: `run` keeps them as they are with a warning, `--host-ipc=false` or `--host-ipc` recreates them with that choice, and any other recreate gives them a private namespace.
 
 ## Sandboxes
 
 `safeclaw sandbox run -s NAME` creates a headless container for opening untrusted files with `docker exec`, for example extracting text from PDFs, archives, or emails that have not been checked. It shares the `safeclaw-NAME` namespace with interactive sessions and is marked with the `safeclaw.type=sandbox` label. Containers without the label are interactive sessions.
 
-A sandbox is created with none of what an interactive session gets: no secrets are written and no Claude token is needed, there is no git configuration, no ttyd, tmux, or Claude Code, no published port, no `--ipc=host`, and no history mount. Instead it runs with:
+A sandbox is created with none of what an interactive session gets: no secrets are written and no Claude token is needed, there is no git configuration, no ttyd, tmux, or Claude Code, no published port, no option to share the host's IPC namespace, and no history mount. Instead it runs with:
 
 - `--network none`, so loopback is the only interface
 - `--user sandbox`, an unprivileged, non-login user (uid 2000) whose home and working directory is `/sandbox`. `/home/sclaw` is mode 700, so it can't be read
@@ -91,7 +97,7 @@ The status comes from docker: a session attached to no network is offline. `safe
 While a session is offline:
 
 - `run` and the dashboard's start still start or refresh it, warning that the web terminal is unreachable, and a started session is disconnected again if docker attached any network
-- `run` refuses to recreate it for a new `-v`, `--variant`, or set of secrets, so it can't come back online as a new container
+- `run` refuses to recreate it for a new `-v`, `--variant`, set of secrets, or `--host-ipc` choice, so it can't come back online as a new container
 - `safeclaw build --recreate` skips it, and the stale report marks it `(offline)`
 - `safeclaw rm` removes its saved state along with the container
 

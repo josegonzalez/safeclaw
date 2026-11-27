@@ -205,13 +205,24 @@ safeclaw run -s chat --all-secrets                        # back to every secret
 
 The choice is remembered for the session, so rerunning `safeclaw run -s chat` or starting it from the dashboard keeps it. It is kept with the container, so give it again after `safeclaw rm`. Giving a different set recreates the container, keeping its port, mounts, and variant. Listed secrets must exist. A session that does not receive `CLAUDE_CODE_OAUTH_TOKEN` starts Claude Code logged out, and one that does not receive `GH_TOKEN` gets no git configuration. Sandboxes never receive secrets.
 
+### Sharing the host's IPC namespace
+
+Sessions get a private IPC namespace and `/dev/shm`, so they can't reach the docker host's shared memory. If something in a session needs the host's, opt in with `--host-ipc`:
+
+```bash
+safeclaw run -s work --host-ipc          # share the host's IPC namespace
+safeclaw run -s work --host-ipc=false    # back to a private one
+```
+
+The choice is remembered for the session like its secrets, and changing it recreates the container. See [architecture](docs/architecture.md#ipc-namespace) for details.
+
 ## Commands
 
 | Command | Description |
 |---------|-------------|
 | `safeclaw build` | Build the image from the build context embedded in the binary (`--context .` for a checkout), then each `--variant` and every variant already built. Warns about sessions on an older image; `--recreate` removes them, skipping offline sessions. |
 | `safeclaw pull` | Pull `ghcr.io/josegonzalez/safeclaw` for this version and tag it `safeclaw`, then fetch each `--variant` and every variant already present |
-| `safeclaw run` | Start/reuse a container, inject auth, start ttyd. `-s name` for named sessions, `-v` for volumes, `--variant` for an image variant, `--secrets`, `--no-secrets`, or `--all-secrets` to choose the secrets it receives, `-n` to skip opening the browser, `-q "question"` to start with a query. |
+| `safeclaw run` | Start/reuse a container, inject auth, start ttyd. `-s name` for named sessions, `-v` for volumes, `--variant` for an image variant, `--secrets`, `--no-secrets`, or `--all-secrets` to choose the secrets it receives, `--host-ipc` to share the host's IPC namespace, `-n` to skip opening the browser, `-q "question"` to start with a query. |
 | `safeclaw new` | Same as `run` but never prompts (used by the dashboard) |
 | `safeclaw dashboard` | Web dashboard for managing sessions |
 | `safeclaw auth login` | Sign in with `claude setup-token` in a container and store the token |

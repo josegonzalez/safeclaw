@@ -56,6 +56,14 @@ const (
 	// without it get every secret, and an empty value means none.
 	LabelSecrets = "safeclaw.secrets"
 
+	// LabelIPC is the container label that records an interactive session's
+	// IPC namespace. IPCHost means it shares the docker host's, which the
+	// user opted into; containers without it get a private one.
+	LabelIPC = "safeclaw.ipc"
+	// IPCHost is the LabelIPC value, and docker IpcMode, for the host's IPC
+	// namespace.
+	IPCHost = "host"
+
 	// LabelAuth marks the short-lived container `safeclaw auth login` runs
 	// `claude setup-token` in.
 	LabelAuth = "safeclaw.auth"

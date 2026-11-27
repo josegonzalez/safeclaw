@@ -53,6 +53,9 @@ func TestIntegrationLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitHTTP(t, res.URL)
+	if c, err := d.InspectOne(ctx, res.Container); err != nil || c == nil || c.HostConfig.IpcMode == config.IPCHost {
+		t.Errorf("session shares the host IPC namespace: %+v, %v", c, err)
+	}
 
 	if err := m.Stop(ctx, name); err != nil {
 		t.Fatal(err)

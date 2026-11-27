@@ -18,7 +18,7 @@ const inspectJSON = `[{
   "Image": "sha256:abc",
   "Config": {"Labels": {"safeclaw.type": "sandbox", "safeclaw.secrets": ""}},
   "State": {"Status": "exited", "Running": false},
-  "HostConfig": {"PortBindings": {"7681/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7683"}]}, "AutoRemove": true, "NetworkMode": "bridge"},
+  "HostConfig": {"PortBindings": {"7681/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7683"}]}, "AutoRemove": true, "NetworkMode": "bridge", "IpcMode": "host"},
   "NetworkSettings": {"Networks": {
     "bridge": {"Aliases": null, "IPAMConfig": null},
     "work": {"Aliases": ["safeclaw-work", "api"], "Links": ["db:db"], "IPAMConfig": {"IPv4Address": "10.1.0.5"}}
@@ -60,8 +60,8 @@ func TestParseInspect(t *testing.T) {
 	if !c.HostConfig.AutoRemove {
 		t.Error("AutoRemove = false, want true")
 	}
-	if c.ID != "abc123def456789" || c.HostConfig.NetworkMode != "bridge" {
-		t.Errorf("ID, NetworkMode = %q, %q", c.ID, c.HostConfig.NetworkMode)
+	if c.ID != "abc123def456789" || c.HostConfig.NetworkMode != "bridge" || c.HostConfig.IpcMode != "host" {
+		t.Errorf("ID, NetworkMode, IpcMode = %q, %q, %q", c.ID, c.HostConfig.NetworkMode, c.HostConfig.IpcMode)
 	}
 	work := c.NetworkSettings.Networks["work"]
 	if len(c.NetworkSettings.Networks) != 2 || !reflect.DeepEqual(work.Aliases, []string{"safeclaw-work", "api"}) ||

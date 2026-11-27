@@ -72,6 +72,7 @@ type runFlags struct {
 	noOpen                          bool
 	secrets                         []string
 	noSecrets, allSecrets           bool
+	hostIPC                         bool
 }
 
 func (f *runFlags) register(cmd *cobra.Command) {
@@ -86,6 +87,16 @@ func (f *runFlags) register(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&f.noSecrets, "no-secrets", false, "give the session no secrets")
 	cmd.Flags().BoolVar(&f.allSecrets, "all-secrets", false, "give the session every secret, including ones added later (default for new sessions)")
 	cmd.MarkFlagsMutuallyExclusive("secrets", "no-secrets", "all-secrets")
+	cmd.Flags().BoolVar(&f.hostIPC, "host-ipc", false, "share the docker host's IPC namespace and /dev/shm with the session, or --host-ipc=false for a private one (new sessions get a private one; a different choice recreates an existing container)")
+}
+
+// hostIPCChoice returns the IPC choice the flags ask for, nil to keep the
+// session's current one.
+func (f *runFlags) hostIPCChoice(cmd *cobra.Command) *bool {
+	if !cmd.Flags().Changed("host-ipc") {
+		return nil
+	}
+	return &f.hostIPC
 }
 
 // secretSet returns the secret set the flags ask for, nil to keep the
@@ -121,6 +132,7 @@ func (f *runFlags) options(cmd *cobra.Command, interactive bool) (session.Option
 		Volume:      f.volume,
 		Variant:     f.variant,
 		Secrets:     set,
+		HostIPC:     f.hostIPCChoice(cmd),
 		Query:       f.query,
 		NoOpen:      f.noOpen,
 		Interactive: interactive,

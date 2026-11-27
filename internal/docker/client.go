@@ -73,6 +73,9 @@ type Container struct {
 		// NetworkMode is the network the container was created with, e.g.
 		// "bridge", "default", "host", "none", or "container:ID".
 		NetworkMode string `json:"NetworkMode"`
+		// IpcMode is the IPC namespace the container was created with, e.g.
+		// "private", "shareable", or "host".
+		IpcMode string `json:"IpcMode"`
 	} `json:"HostConfig"`
 	NetworkSettings struct {
 		// Networks are the networks the container is connected to, by name.
