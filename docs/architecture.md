@@ -45,6 +45,15 @@ With `-v`, a host directory is mounted read-only, whatever options the spec carr
 
 The two types are kept apart. `safeclaw run`, the dashboard's start, and the API refuse a sandbox name, `safeclaw stop`, `rm`, and `attach` refuse sandboxes, and the `safeclaw sandbox` commands refuse interactive sessions. `safeclaw ls` lists both with a TYPE column, and `safeclaw sandbox ls` lists only sandboxes.
 
+### One-off sandboxes
+
+A one-off sandbox lives for exactly one job, so callers sharing the host need no locking, no detection of a sandbox recreated under the same name, and no per-job cleanup. If something removes one mid-job, the job is simply run again. One-off sandboxes are created with docker's `--rm`, so docker itself removes the container and its `/sandbox` volume when it stops, and they get the same isolation, limits, and read-only `-v` as any other sandbox. Without `-s` they get a random `tmp-<8 hex>` name, and a name any container already has is refused rather than reused.
+
+- `safeclaw sandbox exec --ephemeral -- CMD` checks the image and name, then replaces itself with `docker run --rm --init` in the foreground. Cleanup does not depend on safeclaw staying alive, the command's exit code is returned as is, `--init` forwards signals to the command instead of leaving it as PID 1, and nothing but the command writes to stdout
+- `safeclaw sandbox run --rm` creates a detached one-off sandbox for jobs with several steps (`docker cp`, then several `sandbox exec` calls). Progress goes to stderr and only its name to stdout, and `safeclaw sandbox stop` removes it
+
+`safeclaw sandbox ls` marks them in a ONE-OFF column, and `safeclaw ls` lists their type as `sandbox (one-off)`.
+
 ## Authentication
 
 All secrets are stored on the host in `~/.config/safeclaw/.secrets/`. Each file becomes an environment variable (filename = env var name).

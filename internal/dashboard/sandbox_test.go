@@ -16,6 +16,7 @@ func withSandboxes() []session.Session {
 	return append(sampleSessions(),
 		session.Session{Container: "safeclaw-box", Name: "box", Active: true, Volume: "/in:/in", Type: "sandbox"},
 		session.Session{Container: "safeclaw-crate", Name: "crate", Volume: "-", Type: "sandbox"},
+		session.Session{Container: "safeclaw-tmp-1", Name: "tmp-1", Active: true, Volume: "-", Type: "sandbox", AutoRemove: true},
 	)
 }
 
@@ -86,8 +87,11 @@ func TestSandboxJSONAPI(t *testing.T) {
 
 	var list []apiSession
 	_ = json.Unmarshal(do(h, "GET", "/api/sessions", nil, nil).Body.Bytes(), &list)
-	if len(list) != 4 || list[2].Name != "safeclaw-box" || list[2].Type != "sandbox" || list[2].Port != nil || list[2].URL != nil {
+	if len(list) != 5 || list[2].Name != "safeclaw-box" || list[2].Type != "sandbox" || list[2].Port != nil || list[2].URL != nil {
 		t.Errorf("api sessions = %+v", list)
+	}
+	if list[2].AutoRemove || !list[4].AutoRemove || list[4].Name != "safeclaw-tmp-1" {
+		t.Errorf("api autoRemove = %+v", list)
 	}
 
 	for _, path := range []string{"/api/start", "/api/create"} {
@@ -100,5 +104,19 @@ func TestSandboxJSONAPI(t *testing.T) {
 		if rec.Code != http.StatusConflict || r.Success || !strings.Contains(r.Error, "is a sandbox") {
 			t.Errorf("%s = %d %+v", path, rec.Code, r)
 		}
+	}
+}
+
+func TestOneOffSandboxBadge(t *testing.T) {
+	h := newTestServer(t, &fakeSessions{list: withSandboxes()})
+	body := do(h, "GET", "/fragments/sessions", nil, nil).Body.String()
+	badge := `<span class="badge" title="one-off sandbox: removed when stopped">one-off</span>`
+	if strings.Count(body, badge) != 1 {
+		t.Errorf("want one one-off badge, got %d", strings.Count(body, badge))
+	}
+	_, row, ok := strings.Cut(body, `id="row-safeclaw-tmp-1"`)
+	row, _, _ = strings.Cut(row, "</tr>")
+	if !ok || !strings.Contains(row, badge) || !strings.Contains(row, `hx-post="/sessions/tmp-1/stop"`) {
+		t.Errorf("one-off row = %s", row)
 	}
 }

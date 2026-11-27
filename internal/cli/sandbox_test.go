@@ -1,7 +1,10 @@
 package cli
 
 import (
+	"errors"
+	"io"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/josegonzalez/safeclaw/internal/session"
@@ -23,6 +26,10 @@ func TestSandboxFlagsOptions(t *testing.T) {
 	if f.options(func(name string) bool { return name == "volume" }).Recreate {
 		t.Error("--volume recreates through Volume, not Recreate")
 	}
+	f.remove = true
+	if !f.options(none).Remove {
+		t.Error("--rm should set Remove")
+	}
 }
 
 func TestSandboxRunFlags(t *testing.T) {
@@ -38,8 +45,81 @@ func TestSandboxRunFlags(t *testing.T) {
 	}
 	cmd = newSandboxRunCommand()
 	cmd.SetArgs([]string{})
-	if err := cmd.Execute(); err == nil {
-		t.Error("sandbox run without -s should fail")
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); !errors.Is(err, session.ErrSandboxName) {
+		t.Errorf("sandbox run without -s or --rm: err = %v, want ErrSandboxName", err)
+	}
+	cmd = newSandboxRunCommand()
+	if err := cmd.ParseFlags([]string{"--rm"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.ValidateRequiredFlags(); err != nil {
+		t.Errorf("--rm without -s: %v", err)
+	}
+	if rm, _ := cmd.Flags().GetBool("rm"); !rm {
+		t.Error("--rm not parsed")
+	}
+}
+
+func TestSandboxExecArgs(t *testing.T) {
+	cases := []struct {
+		flags []string
+		args  []string
+		err   string
+	}{
+		{nil, []string{"box", "ls"}, ""},
+		{nil, []string{"box"}, "a sandbox name and command are required"},
+		{[]string{"--ephemeral"}, []string{"ls"}, ""},
+		{[]string{"--ephemeral", "-s", "job", "-v", "/in:/in", "--memory", "2g"}, []string{"ls", "/in"}, ""},
+		{[]string{"--ephemeral"}, nil, "a command is required"},
+		{[]string{"-s", "job"}, []string{"box", "ls"}, "--session can only be used with --ephemeral"},
+		{[]string{"-v", "/in:/in"}, []string{"box", "ls"}, "--volume can only be used with --ephemeral"},
+		{[]string{"--cpus", "2"}, []string{"box", "ls"}, "--cpus can only be used with --ephemeral"},
+		{[]string{"-i", "-t"}, []string{"box", "ls"}, ""},
+	}
+	for _, tc := range cases {
+		cmd := newSandboxExecCommand()
+		if err := cmd.ParseFlags(tc.flags); err != nil {
+			t.Fatal(err)
+		}
+		err := cmd.Args(cmd, tc.args)
+		switch {
+		case tc.err == "" && err != nil:
+			t.Errorf("%v %v: %v", tc.flags, tc.args, err)
+		case tc.err != "" && (err == nil || !strings.Contains(err.Error(), tc.err)):
+			t.Errorf("%v %v: err = %v, want %q", tc.flags, tc.args, err, tc.err)
+		}
+	}
+}
+
+func TestWriteSandboxes(t *testing.T) {
+	list := []session.Session{
+		{Name: "job", Status: "running", Volume: "-", Type: "sandbox", AutoRemove: true},
+		{Name: "box", Status: "exited", Volume: "/in:/in", Type: "sandbox"},
+		{Name: "work", Status: "running", Volume: "-", Type: "session"},
+	}
+	var b strings.Builder
+	if err := writeSandboxes(&b, list); err != nil {
+		t.Fatal(err)
+	}
+	want := "SANDBOX   STATUS    ONE-OFF   VOLUME\n" +
+		"job       running   yes       -\n" +
+		"box       exited    -         /in:/in\n"
+	if b.String() != want {
+		t.Errorf("sandbox ls =\n%s\nwant\n%s", b.String(), want)
+	}
+
+	b.Reset()
+	if err := writeSessions(&b, list); err != nil {
+		t.Fatal(err)
+	}
+	want = "SESSION   TYPE                STATUS    URL   VOLUME\n" +
+		"job       sandbox (one-off)   running   -     -\n" +
+		"box       sandbox             exited    -     /in:/in\n" +
+		"work      session             running   -     -\n"
+	if b.String() != want {
+		t.Errorf("ls =\n%s\nwant\n%s", b.String(), want)
 	}
 }
 

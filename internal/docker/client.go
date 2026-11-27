@@ -47,6 +47,8 @@ type Container struct {
 	} `json:"State"`
 	HostConfig struct {
 		PortBindings map[string][]PortBinding `json:"PortBindings"`
+		// AutoRemove is set for containers created with `docker run --rm`.
+		AutoRemove bool `json:"AutoRemove"`
 	} `json:"HostConfig"`
 	Mounts []Mount `json:"Mounts"`
 }

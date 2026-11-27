@@ -16,7 +16,7 @@ make lint               # golangci-lint
 make test-integration   # real docker; needs the safeclaw image
 ```
 
-Unit tests use `internal/docker/dockertest`, a fake docker runner that records every command. The integration tests (`-tags integration`) create, restart, and delete a real session container, and check a real sandbox's isolation: its user, network, read-only mounts and root fs, `docker cp` into `/sandbox`, and that removing it removes its volume.
+Unit tests use `internal/docker/dockertest`, a fake docker runner that records every command. The integration tests (`-tags integration`) create, restart, and delete a real session container, and check a real sandbox's isolation: its user, network, read-only mounts and root fs, `docker cp` into `/sandbox`, and that removing it removes its volume. They also check that a one-off sandbox from `sandbox run --rm` is removed with its volume when stopped, and that `sandbox exec --ephemeral` passes stdin, stdout, and the exit code through and leaves no container behind.
 
 ## End to end
 
@@ -41,6 +41,16 @@ safeclaw sandbox exec t -- id                # uid=2000(sandbox)
 safeclaw sandbox exec t -- ls /home/sclaw    # permission denied
 safeclaw sandbox exec t -- touch /in/x       # read-only file system
 safeclaw sandbox rm -f t
+```
+
+For one-off sandboxes:
+
+```bash
+safeclaw sandbox exec --ephemeral -i -- cat < README.md   # prints the file
+safeclaw sandbox exec --ephemeral -- false; echo $?       # 1
+name=$(safeclaw sandbox run --rm -v ./docs:/in)
+safeclaw sandbox ls                                       # yes under ONE-OFF
+safeclaw sandbox stop "$name"                             # and it is gone
 ```
 
 ## Dashboard hot reload

@@ -18,6 +18,9 @@ type apiSession struct {
 	Volume string  `json:"volume"`
 	Active bool    `json:"active"`
 	Type   string  `json:"type"`
+	// AutoRemove is set for one-off sandboxes, which are removed when
+	// they stop.
+	AutoRemove bool `json:"autoRemove"`
 }
 
 type apiResult struct {
@@ -57,7 +60,7 @@ func (s *Server) apiSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]apiSession, 0, len(list))
 	for _, x := range list {
-		a := apiSession{Name: x.Container, Volume: x.Volume, Active: x.Active, Type: x.Type}
+		a := apiSession{Name: x.Container, Volume: x.Volume, Active: x.Active, Type: x.Type, AutoRemove: x.IsOneOff()}
 		if x.Port > 0 {
 			p := strconv.Itoa(x.Port)
 			u := x.URL

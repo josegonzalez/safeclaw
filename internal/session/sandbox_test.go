@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -202,5 +203,195 @@ func TestReadOnlyVolume(t *testing.T) {
 		if _, err := ReadOnlyVolume(bad); err == nil {
 			t.Errorf("ReadOnlyVolume(%q) should fail", bad)
 		}
+	}
+}
+
+// stubNames makes randomName return names in order, then the last one.
+func stubNames(t *testing.T, names ...string) {
+	t.Helper()
+	orig := randomName
+	t.Cleanup(func() { randomName = orig })
+	i := 0
+	randomName = func() string {
+		n := names[min(i, len(names)-1)]
+		i++
+		return n
+	}
+}
+
+func TestRandomName(t *testing.T) {
+	a, b := randomName(), randomName()
+	if !strings.HasPrefix(a, "tmp-") || len(a) != len("tmp-")+8 || ValidateName(a) != nil {
+		t.Errorf("random name = %q", a)
+	}
+	if a == b {
+		t.Errorf("random names repeat: %q", a)
+	}
+}
+
+func TestEnsureSandboxRemove(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{}}
+	m, r := newTestManager(t, w)
+	res, err := m.EnsureSandbox(context.Background(), SandboxOptions{Name: "job", Remove: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Name != "job" || res.Container != "safeclaw-job" {
+		t.Errorf("result = %+v", res)
+	}
+	run, _ := r.Find("run ")
+	want := strings.Replace(sandboxRunPrefix, "run -d --name safeclaw-box", "run -d --rm --name safeclaw-job", 1) +
+		" --memory 1g --pids-limit 256 --cpus 1 safeclaw sleep infinity"
+	if run.String() != want {
+		t.Errorf("run = %q\nwant  %q", run.String(), want)
+	}
+	for _, c := range r.Commands() {
+		if strings.HasPrefix(c, "exec ") {
+			t.Errorf("sandbox should run nothing in the container: %q", c)
+		}
+	}
+	// Stopping it removes it.
+	if err := m.Stop(context.Background(), "job"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := w.containers["safeclaw-job"]; ok {
+		t.Error("one-off sandbox survived stop")
+	}
+}
+
+func TestEnsureSandboxRemoveRandomName(t *testing.T) {
+	w := &world{image: "img", containers: map[string]*fakeContainer{
+		"safeclaw-tmp-taken": {Running: true, Image: "img", Labels: sandboxLabels},
+	}}
+	m, r := newTestManager(t, w)
+	stubNames(t, "tmp-taken", "tmp-free")
+	res, err := m.EnsureSandbox(context.Background(), SandboxOptions{Remove: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Name != "tmp-free" {
+		t.Errorf("name = %q, want tmp-free", res.Name)
+	}
+	if !hasCall(r, "run -d --rm --name safeclaw-tmp-free ") || hasCall(r, "rm ") {
+		t.Errorf("calls = %v", r.Commands())
+	}
+
+	stubNames(t, "tmp-taken")
+	if _, err := m.EnsureSandbox(context.Background(), SandboxOptions{Remove: true}); err == nil {
+		t.Error("expected an error when every random name is taken")
+	}
+}
+
+func TestEnsureSandboxRemoveRefusesExisting(t *testing.T) {
+	for _, existing := range []*fakeContainer{
+		{Running: true, Image: "img", Labels: sandboxLabels},
+		{Running: false, Image: "img", Labels: sandboxLabels},
+		{Running: true, Port: 7681, Image: "img"},
+	} {
+		w := &world{image: "img", containers: map[string]*fakeContainer{"safeclaw-job": existing}}
+		m, r := newTestManager(t, w)
+		_, err := m.EnsureSandbox(context.Background(), SandboxOptions{Name: "job", Remove: true, Volume: "/in:/in", Recreate: true})
+		if !errors.Is(err, ErrExists) || !strings.Contains(err.Error(), `"job"`) {
+			t.Errorf("err = %v, want ErrExists naming the sandbox", err)
+		}
+		for _, p := range []string{"rm ", "run ", "start ", "stop "} {
+			if hasCall(r, p) {
+				t.Errorf("unexpected %q in %v", p, r.Commands())
+			}
+		}
+	}
+}
+
+func TestEnsureSandboxRemoveErrors(t *testing.T) {
+	ctx := context.Background()
+	m, _ := newTestManager(t, &world{containers: map[string]*fakeContainer{}})
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Remove: true}); !errors.Is(err, ErrNoImage) {
+		t.Errorf("err = %v, want ErrNoImage", err)
+	}
+	m, _ = newTestManager(t, &world{image: "img", containers: map[string]*fakeContainer{}})
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: "bad name", Remove: true}); err == nil {
+		t.Error("invalid name accepted")
+	}
+}
+
+func TestEphemeralRunArgs(t *testing.T) {
+	isolation := strings.TrimPrefix(sandboxRunPrefix, "run -d ")
+	limits := " --memory 1g --pids-limit 256 --cpus 1"
+	cases := []struct {
+		i, t bool
+		opts SandboxOptions
+		want string
+	}{
+		{false, false, SandboxOptions{}, "--rm --init " + isolation + limits + " safeclaw pdftotext - -"},
+		{true, false, SandboxOptions{}, "--rm --init -i " + isolation + limits + " safeclaw pdftotext - -"},
+		{true, true, SandboxOptions{}, "--rm --init -i -t " + isolation + limits + " safeclaw pdftotext - -"},
+		{false, false, SandboxOptions{Volume: "/in:/in:rw", Memory: "2g", PidsLimit: 8, CPUs: "2"},
+			"--rm --init " + isolation + " --memory 2g --pids-limit 8 --cpus 2 -v /in:/in:ro safeclaw pdftotext - -"},
+	}
+	for _, tc := range cases {
+		got, err := EphemeralRunArgs("safeclaw-box", tc.opts, tc.i, tc.t, []string{"pdftotext", "-", "-"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if s := strings.Join(got, " "); s != tc.want {
+			t.Errorf("args = %q\nwant   %q", s, tc.want)
+		}
+	}
+	if _, err := EphemeralRunArgs("safeclaw-box", SandboxOptions{Volume: "/in"}, false, false, []string{"ls"}); err == nil {
+		t.Error("invalid volume accepted")
+	}
+}
+
+func TestPrepareEphemeral(t *testing.T) {
+	ctx := context.Background()
+	w := &world{image: "img", containers: map[string]*fakeContainer{}}
+	m, r := newTestManager(t, w)
+	out := &strings.Builder{}
+	m.Out = out
+	stubNames(t, "tmp-abcd1234")
+	argv, name, err := m.PrepareEphemeral(ctx, SandboxOptions{}, true, false, []string{"cat"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "tmp-abcd1234" {
+		t.Errorf("name = %q", name)
+	}
+	want, _ := EphemeralRunArgs("safeclaw-tmp-abcd1234", SandboxOptions{}, true, false, []string{"cat"})
+	if !slices.Equal(argv, append([]string{"docker", "run"}, want...)) {
+		t.Errorf("argv = %v", argv)
+	}
+	// The caller runs the container; preparing only inspects.
+	for _, c := range r.Commands() {
+		if !strings.HasPrefix(c, "image inspect") && !strings.HasPrefix(c, "container inspect") {
+			t.Errorf("unexpected docker call: %q", c)
+		}
+	}
+	if out.Len() != 0 {
+		t.Errorf("PrepareEphemeral printed %q", out)
+	}
+
+	argv, name, err = m.PrepareEphemeral(ctx, SandboxOptions{Name: "job"}, false, false, []string{"ls"})
+	if err != nil || name != "job" || !slices.Contains(argv, "safeclaw-job") {
+		t.Errorf("named: %v %q %v", argv, name, err)
+	}
+}
+
+func TestPrepareEphemeralErrors(t *testing.T) {
+	ctx := context.Background()
+	m, _ := newTestManager(t, &world{image: "img", containers: map[string]*fakeContainer{
+		"safeclaw-job": {Running: true, Image: "img", Labels: sandboxLabels},
+	}})
+	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{Name: "job"}, false, false, []string{"ls"}); !errors.Is(err, ErrExists) {
+		t.Errorf("err = %v, want ErrExists", err)
+	}
+	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{}, false, false, nil); !errors.Is(err, ErrNoCommand) {
+		t.Errorf("err = %v, want ErrNoCommand", err)
+	}
+	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{PidsLimit: -1}, false, false, []string{"ls"}); err == nil {
+		t.Error("negative pids limit accepted")
+	}
+	m, _ = newTestManager(t, &world{containers: map[string]*fakeContainer{}})
+	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{}, false, false, []string{"ls"}); !errors.Is(err, ErrNoImage) {
+		t.Errorf("err = %v, want ErrNoImage", err)
 	}
 }

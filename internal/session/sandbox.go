@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -36,9 +38,27 @@ var ErrNotFound = errors.New("not found")
 // ErrSandboxName is returned when a sandbox is requested without a name.
 var ErrSandboxName = errors.New("a sandbox name is required (-s NAME)")
 
-// SandboxOptions configures EnsureSandbox.
+// ErrExists is returned when a one-off sandbox is requested with the name of
+// a container that already exists.
+var ErrExists = errors.New("already exists: one-off sandboxes are always new")
+
+// ErrNoCommand is returned when a one-off sandbox command is empty.
+var ErrNoCommand = errors.New("a command is required")
+
+// oneOffPrefix starts the names generated for one-off sandboxes.
+const oneOffPrefix = "tmp-"
+
+// randomName returns a name for a one-off sandbox started without one.
+var randomName = func() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return oneOffPrefix + hex.EncodeToString(b)
+}
+
+// SandboxOptions configures EnsureSandbox and PrepareEphemeral.
 type SandboxOptions struct {
-	// Name is the sandbox name. It is required.
+	// Name is the sandbox name. It is required unless Remove is set, and
+	// optional for PrepareEphemeral.
 	Name string
 	// Volume is an optional host:container bind mount, always mounted
 	// read-only. Setting it recreates an existing sandbox.
@@ -52,6 +72,10 @@ type SandboxOptions struct {
 	// Recreate removes an existing sandbox first, e.g. because its limits
 	// changed.
 	Recreate bool
+	// Remove makes a one-off sandbox: docker removes it, with its /sandbox
+	// volume, when it stops. Name is optional, a random one is picked
+	// without it, and an existing container with the name is refused.
+	Remove bool
 }
 
 func (o SandboxOptions) withDefaults() SandboxOptions {
@@ -74,30 +98,45 @@ func wrongType(name string, err error) error {
 // EnsureSandbox creates or starts a headless sandbox container. Unlike
 // Ensure it writes no secrets or git config, starts no ttyd, tmux or Claude
 // Code, publishes no port, and runs the container without a network as the
-// unprivileged sandbox user.
+// unprivileged sandbox user. With opts.Remove it always creates a new
+// one-off sandbox that docker removes when it stops.
 func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if opts.Name == "" {
+	if opts.Name == "" && !opts.Remove {
 		return nil, ErrSandboxName
-	}
-	name := config.SessionName(opts.Name)
-	if err := ValidateName(name); err != nil {
-		return nil, err
 	}
 	if opts.PidsLimit < 0 {
 		return nil, fmt.Errorf("invalid pids limit %d", opts.PidsLimit)
 	}
 	opts = opts.withDefaults()
-	container := config.ContainerName(name)
+	if opts.Remove {
+		if err := m.checkImage(ctx); err != nil {
+			return nil, err
+		}
+		name, err := m.pickName(ctx, opts.Name)
+		if err != nil {
+			return nil, err
+		}
+		container := config.ContainerName(name)
+		m.printf("Creating one-off sandbox: %s\n", container)
+		if err := m.createSandbox(ctx, container, opts); err != nil {
+			return nil, err
+		}
+		m.printf("\nSandbox is ready: %s\n", container)
+		m.printf("Run commands with: safeclaw sandbox exec %s -- <command>\n", name)
+		m.printf("It is removed when stopped: safeclaw sandbox stop %s\n", name)
+		return &Result{Name: name, Container: container}, nil
+	}
 
-	imageID, err := m.Docker.ImageID(ctx, config.ImageName)
-	if err != nil {
+	name := config.SessionName(opts.Name)
+	if err := ValidateName(name); err != nil {
 		return nil, err
 	}
-	if imageID == "" {
-		return nil, ErrNoImage
+	container := config.ContainerName(name)
+	if err := m.checkImage(ctx); err != nil {
+		return nil, err
 	}
 
 	existing, err := m.Docker.InspectOne(ctx, container)
@@ -137,11 +176,119 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	return &Result{Name: name, Container: container}, nil
 }
 
-// SandboxRunArgs returns the `docker run` arguments for a sandbox container.
+// checkImage returns ErrNoImage unless the safeclaw image exists.
+func (m *Manager) checkImage(ctx context.Context) error {
+	imageID, err := m.Docker.ImageID(ctx, config.ImageName)
+	if err != nil {
+		return err
+	}
+	if imageID == "" {
+		return ErrNoImage
+	}
+	return nil
+}
+
+// pickName returns the session name for a new one-off sandbox. A given name
+// must be valid and not taken by any container. Without one, a random name
+// is picked.
+func (m *Manager) pickName(ctx context.Context, name string) (string, error) {
+	if name != "" {
+		name = config.SessionName(name)
+		if err := ValidateName(name); err != nil {
+			return "", err
+		}
+		c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
+		if err != nil {
+			return "", err
+		}
+		if c != nil {
+			return "", fmt.Errorf("session %q %w", name, ErrExists)
+		}
+		return name, nil
+	}
+	for range 5 {
+		name := randomName()
+		c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
+		if err != nil {
+			return "", err
+		}
+		if c == nil {
+			return name, nil
+		}
+	}
+	return "", errors.New("could not pick an unused sandbox name")
+}
+
+// PrepareEphemeral checks that a one-off sandbox can run cmd and returns the
+// `docker run --rm` argv that runs it in the foreground, along with the
+// sandbox name. The caller runs the argv, so docker removes the container
+// when cmd exits even if the caller is killed. It prints nothing: stdout
+// belongs to cmd. If the name is taken between this check and `docker run`,
+// docker refuses the name itself.
+func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, interactive, tty bool, cmd []string) ([]string, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if len(cmd) == 0 {
+		return nil, "", ErrNoCommand
+	}
+	if opts.PidsLimit < 0 {
+		return nil, "", fmt.Errorf("invalid pids limit %d", opts.PidsLimit)
+	}
+	if err := m.checkImage(ctx); err != nil {
+		return nil, "", err
+	}
+	name, err := m.pickName(ctx, opts.Name)
+	if err != nil {
+		return nil, "", err
+	}
+	args, err := EphemeralRunArgs(config.ContainerName(name), opts, interactive, tty, cmd)
+	if err != nil {
+		return nil, "", err
+	}
+	return append([]string{"docker", "run"}, args...), name, nil
+}
+
+// SandboxRunArgs returns the `docker run` arguments for a detached sandbox
+// container.
 func SandboxRunArgs(container string, opts SandboxOptions) ([]string, error) {
+	args := []string{"-d"}
+	if opts.Remove {
+		args = append(args, "--rm")
+	}
+	shared, err := sandboxArgs(container, opts)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, shared...)
+	return append(args, config.ImageName, "sleep", "infinity"), nil
+}
+
+// EphemeralRunArgs returns the `docker run` arguments that run cmd in a
+// one-off sandbox in the foreground. --init forwards signals to cmd, which
+// would otherwise run as PID 1 and ignore them.
+func EphemeralRunArgs(container string, opts SandboxOptions, interactive, tty bool, cmd []string) ([]string, error) {
+	args := []string{"--rm", "--init"}
+	if interactive {
+		args = append(args, "-i")
+	}
+	if tty {
+		args = append(args, "-t")
+	}
+	shared, err := sandboxArgs(container, opts)
+	if err != nil {
+		return nil, err
+	}
+	args = append(args, shared...)
+	args = append(args, config.ImageName)
+	return append(args, cmd...), nil
+}
+
+// sandboxArgs returns the `docker run` flags every sandbox gets: its name,
+// label, isolation, limits, and optional read-only volume.
+func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 	opts = opts.withDefaults()
 	args := []string{
-		"-d",
 		"--name", container,
 		"--label", config.LabelType + "=" + config.TypeSandbox,
 		"--network", "none",
@@ -166,7 +313,7 @@ func SandboxRunArgs(container string, opts SandboxOptions) ([]string, error) {
 		}
 		args = append(args, "-v", v)
 	}
-	return append(args, config.ImageName, "sleep", "infinity"), nil
+	return args, nil
 }
 
 func (m *Manager) createSandbox(ctx context.Context, container string, opts SandboxOptions) error {
@@ -216,11 +363,12 @@ func (m *Manager) Get(ctx context.Context, name string) (*Session, error) {
 		return nil, fmt.Errorf("session %q %w", name, ErrNotFound)
 	}
 	return &Session{
-		Container: c.ShortName(),
-		Name:      name,
-		Active:    c.State.Running,
-		Status:    c.State.Status,
-		Type:      TypeOf(*c),
+		Container:  c.ShortName(),
+		Name:       name,
+		Active:     c.State.Running,
+		Status:     c.State.Status,
+		Type:       TypeOf(*c),
+		AutoRemove: c.HostConfig.AutoRemove,
 	}, nil
 }
 

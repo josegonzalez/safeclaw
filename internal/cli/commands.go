@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
@@ -151,18 +152,27 @@ func newListCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 3, ' ', 0)
-			fmt.Fprintln(w, "SESSION\tTYPE\tSTATUS\tURL\tVOLUME")
-			for _, s := range list {
-				url := s.URL
-				if url == "" {
-					url = "-"
-				}
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.Name, s.Type, s.Status, url, s.Volume)
-			}
-			return w.Flush()
+			return writeSessions(cmd.OutOrStdout(), list)
 		},
 	}
+}
+
+// writeSessions writes the `safeclaw ls` table.
+func writeSessions(out io.Writer, list []session.Session) error {
+	w := tabwriter.NewWriter(out, 0, 0, 3, ' ', 0)
+	fmt.Fprintln(w, "SESSION\tTYPE\tSTATUS\tURL\tVOLUME")
+	for _, s := range list {
+		url := s.URL
+		if url == "" {
+			url = "-"
+		}
+		typ := s.Type
+		if s.IsOneOff() {
+			typ += " (one-off)"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", s.Name, typ, s.Status, url, s.Volume)
+	}
+	return w.Flush()
 }
 
 func newStopCommand() *cobra.Command {

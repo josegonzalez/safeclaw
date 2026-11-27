@@ -4,10 +4,13 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -183,5 +186,127 @@ func TestIntegrationSandbox(t *testing.T) {
 	}
 	if _, err := d.R.Output(ctx, nil, "volume", "inspect", volume); err == nil {
 		t.Errorf("volume %s survived sandbox removal", volume)
+	}
+}
+
+// waitGone polls until a container no longer exists.
+func waitGone(t *testing.T, d *docker.Client, container string) {
+	t.Helper()
+	ctx := context.Background()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := d.InspectOne(ctx, container)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c == nil {
+			return
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Errorf("%s still exists", container)
+}
+
+// TestIntegrationSandboxRemove checks that a one-off sandbox from
+// `sandbox run --rm` is removed, with its volume, when it stops.
+func TestIntegrationSandboxRemove(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+	dir := t.TempDir()
+	m := &Manager{
+		Docker:      d,
+		Secrets:     secrets.Store{Dir: filepath.Join(dir, ".secrets")},
+		SessionsDir: filepath.Join(dir, "sessions"),
+		Out:         os.Stdout,
+	}
+	res, err := m.EnsureSandbox(ctx, SandboxOptions{Remove: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Remove(ctx, res.Container, true) })
+	if !strings.HasPrefix(res.Name, "tmp-") {
+		t.Errorf("name = %q", res.Name)
+	}
+
+	s, err := m.Get(ctx, res.Name)
+	if err != nil || !s.IsOneOff() {
+		t.Fatalf("get = %+v, %v", s, err)
+	}
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: res.Name, Remove: true}); !errors.Is(err, ErrExists) {
+		t.Errorf("reusing the name: err = %v, want ErrExists", err)
+	}
+	if out, err := d.Exec(ctx, res.Container, docker.ExecOptions{}, "id", "-un"); err != nil || strings.TrimSpace(string(out)) != config.SandboxUser {
+		t.Errorf("exec user = %q, %v", out, err)
+	}
+
+	out, err := d.R.Output(ctx, nil, "container", "inspect", "--format", `{{range .Mounts}}{{if eq .Destination "/sandbox"}}{{.Name}}{{end}}{{end}}`, res.Container)
+	volume := strings.TrimSpace(string(out))
+	if err != nil || volume == "" {
+		t.Fatalf("sandbox volume = %q, %v", volume, err)
+	}
+	if err := m.Stop(ctx, res.Name); err != nil {
+		t.Fatal(err)
+	}
+	waitGone(t, d, res.Container)
+	if _, err := d.R.Output(ctx, nil, "volume", "inspect", volume); err == nil {
+		t.Errorf("volume %s survived one-off sandbox removal", volume)
+	}
+}
+
+// TestIntegrationSandboxEphemeral runs `sandbox exec --ephemeral`'s argv
+// and checks the command's input, output, user, and exit code pass through
+// and that nothing is left behind.
+func TestIntegrationSandboxEphemeral(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in")
+	if err := os.MkdirAll(in, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(in, "doc.txt"), []byte("untrusted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := &Manager{Docker: d}
+	run := func(opts SandboxOptions, stdin string, cmd ...string) (string, error) {
+		t.Helper()
+		argv, name, err := m.PrepareEphemeral(ctx, opts, stdin != "", false, cmd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		container := config.ContainerName(name)
+		t.Cleanup(func() { _ = d.Remove(ctx, container, true) })
+		var r io.Reader
+		if stdin != "" {
+			r = strings.NewReader(stdin)
+		}
+		out, err := d.R.Output(ctx, r, argv[1:]...)
+		waitGone(t, d, container)
+		return strings.TrimSpace(string(out)), err
+	}
+
+	if out, err := run(SandboxOptions{}, "from stdin\n", "cat"); err != nil || out != "from stdin" {
+		t.Errorf("stdin = %q, %v", out, err)
+	}
+	if out, err := run(SandboxOptions{}, "", "id", "-un"); err != nil || out != config.SandboxUser {
+		t.Errorf("user = %q, %v", out, err)
+	}
+	name := fmt.Sprintf("itest-ephemeral-%d", rand.IntN(1_000_000))
+	if out, err := run(SandboxOptions{Name: name, Volume: in + ":/in"}, "", "cat", "/in/doc.txt"); err != nil || out != "untrusted" {
+		t.Errorf("mounted file = %q, %v", out, err)
+	}
+	if _, err := run(SandboxOptions{Volume: in + ":/in"}, "", "touch", "/in/x"); err == nil {
+		t.Error("the volume should be read-only")
+	}
+	_, err := run(SandboxOptions{}, "", "sh", "-c", "exit 3")
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 3 {
+		t.Errorf("exit code: err = %v, want exit status 3", err)
 	}
 }

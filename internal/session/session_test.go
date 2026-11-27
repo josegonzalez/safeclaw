@@ -22,6 +22,8 @@ type fakeContainer struct {
 	Mounts  []string // source:destination bind mounts, or a bare anonymous volume path
 	Image   string
 	Labels  map[string]string
+	// AutoRemove is set for containers run with --rm.
+	AutoRemove bool
 }
 
 // world is a tiny fake docker daemon.
@@ -62,7 +64,7 @@ func (w *world) inspectJSON(names []string) []byte {
 			"Image":      c.Image,
 			"Config":     map[string]any{"Labels": c.Labels},
 			"State":      map[string]any{"Status": status, "Running": c.Running},
-			"HostConfig": map[string]any{"PortBindings": bindings},
+			"HostConfig": map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove},
 			"Mounts":     mounts,
 		})
 	}
@@ -94,9 +96,12 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		var name string
 		var port int
 		var mounts []string
+		var autoRemove bool
 		labels := map[string]string{}
 		for i := 0; i < len(args); i++ {
 			switch args[i] {
+			case "--rm":
+				autoRemove = true
 			case "--name":
 				name = args[i+1]
 			case "--label":
@@ -108,14 +113,19 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 				mounts = append(mounts, args[i+1])
 			}
 		}
-		w.containers[name] = &fakeContainer{Running: true, Port: port, Mounts: mounts, Image: w.image, Labels: labels}
+		w.containers[name] = &fakeContainer{Running: true, Port: port, Mounts: mounts, Image: w.image, Labels: labels, AutoRemove: autoRemove}
 		return []byte("id\n"), nil
 	case args[0] == "rm":
 		delete(w.containers, args[len(args)-1])
 	case args[0] == "start":
 		w.containers[args[1]].Running = true
 	case args[0] == "stop":
-		w.containers[args[len(args)-1]].Running = false
+		name := args[len(args)-1]
+		if w.containers[name].AutoRemove {
+			delete(w.containers, name)
+		} else {
+			w.containers[name].Running = false
+		}
 	case args[0] == "exec":
 		cmd := strings.Join(args, " ")
 		if strings.Contains(cmd, "command -v safeclaw") && !w.native {
@@ -326,7 +336,7 @@ func TestList(t *testing.T) {
 		"safeclaw-zeta":  {Running: true, Port: 7682, Mounts: []string{"/s:/home/sclaw/.claude/projects", "/p:/home/sclaw/p"}},
 		"safeclaw-alpha": {Port: 7681, Mounts: []string{"/s:/home/sclaw/.claude/projects"}},
 		"safeclaw-beta":  {Running: true, Port: 7683},
-		"safeclaw-box":   {Running: true, Mounts: []string{"/sandbox", "/in:/in:ro"}, Labels: sandboxLabels},
+		"safeclaw-box":   {Running: true, Mounts: []string{"/sandbox", "/in:/in:ro"}, Labels: sandboxLabels, AutoRemove: true},
 	}}
 	m, _ := newTestManager(t, w)
 	list, err := m.List(context.Background())
@@ -352,6 +362,13 @@ func TestList(t *testing.T) {
 	}
 	if list[0].Type != "session" || list[0].IsSandbox() {
 		t.Errorf("unlabelled container type = %q, want session", list[0].Type)
+	}
+	if !box.AutoRemove || !box.IsOneOff() || list[0].AutoRemove || list[0].IsOneOff() {
+		t.Errorf("auto remove = %v, %v", box.AutoRemove, list[0].AutoRemove)
+	}
+	// IsOneOff only applies to sandboxes.
+	if (Session{Type: "session", AutoRemove: true}).IsOneOff() {
+		t.Error("an interactive session is never one-off")
 	}
 }
 
