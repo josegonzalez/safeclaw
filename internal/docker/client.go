@@ -29,6 +29,26 @@ type Mount struct {
 	RW          bool   `json:"RW"`
 }
 
+// HostMount is a mount as it was requested with `docker run --mount`,
+// from the container's HostConfig. Mounts given with -v are not listed.
+type HostMount struct {
+	Type     string `json:"Type"`
+	Source   string `json:"Source"`
+	Target   string `json:"Target"`
+	ReadOnly bool   `json:"ReadOnly"`
+	// BindOptions is set for bind mounts given bind options.
+	BindOptions *BindOptions `json:"BindOptions"`
+}
+
+// BindOptions are a --mount bind's options.
+type BindOptions struct {
+	Propagation string `json:"Propagation"`
+	// ReadOnlyForceRecursive is set by bind-recursive=readonly: docker
+	// fails to create the container rather than leave a submount
+	// writable.
+	ReadOnlyForceRecursive bool `json:"ReadOnlyForceRecursive"`
+}
+
 // PortBinding is a host binding for a container port.
 type PortBinding struct {
 	HostIP   string `json:"HostIp"`
@@ -97,6 +117,8 @@ type Container struct {
 		Privileged bool `json:"Privileged"`
 		// ReadonlyRootfs is set for containers run with --read-only.
 		ReadonlyRootfs bool `json:"ReadonlyRootfs"`
+		// Mounts are the mounts given with --mount.
+		Mounts []HostMount `json:"Mounts"`
 		// PidMode is the PID namespace, "" for the container's own or
 		// "host".
 		PidMode string `json:"PidMode"`

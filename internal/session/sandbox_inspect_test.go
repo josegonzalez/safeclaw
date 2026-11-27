@@ -14,7 +14,7 @@ import (
 // goodSandbox returns `docker inspect` data for a sandbox created by
 // sandboxArgs with a read-only /in mount.
 func goodSandbox() map[string]any {
-	return map[string]any{
+	c := map[string]any{
 		"Id":    "abc",
 		"Name":  "/safeclaw-box",
 		"Image": "sha256:img",
@@ -42,8 +42,24 @@ func goodSandbox() map[string]any {
 			},
 		},
 		"NetworkSettings": map[string]any{"Networks": map[string]any{"none": map[string]any{}}},
-		"Mounts":          []map[string]any{{"Type": "bind", "Source": "/host/in", "Destination": "/in", "RW": false}},
 	}
+	setBinds(c, "/host/in:/in")
+	return c
+}
+
+// setBinds gives c the binds sandboxArgs makes for each source:destination,
+// read-only with bind-recursive=readonly. They are listed in both
+// .Mounts and .HostConfig.Mounts, like docker does for --mount.
+func setBinds(c map[string]any, specs ...string) {
+	var mounts, hostMounts []map[string]any
+	for _, s := range specs {
+		src, dst, _ := strings.Cut(s, ":")
+		mounts = append(mounts, map[string]any{"Type": "bind", "Source": src, "Destination": dst, "RW": false, "Propagation": "rprivate"})
+		hostMounts = append(hostMounts, map[string]any{"Type": "bind", "Source": src, "Target": dst, "ReadOnly": true,
+			"BindOptions": map[string]any{"Propagation": "rprivate", "ReadOnlyForceRecursive": true}})
+	}
+	c["Mounts"] = mounts
+	c["HostConfig"].(map[string]any)["Mounts"] = hostMounts
 }
 
 const goodProbe = `uid=2000
@@ -105,7 +121,7 @@ func TestInspectSandbox(t *testing.T) {
 		`"ipc_mode":"private","pid_mode":"","log_driver":"none","limits":{"memory_bytes":2147483648,"cpus":1,"pids":256,"disk_bytes":1073741824},` +
 		`"tmpfs":[{"path":"/sandbox","options":"rw,nosuid,nodev,exec,size=1073741824,uid=2000,gid=2000,mode=0700","size_bytes":1073741824},` +
 		`{"path":"/tmp","options":"rw,nosuid,nodev,size=256m","size_bytes":268435456}],` +
-		`"mounts":[{"type":"bind","source":"/host/in","destination":"/in","read_only":true}],` +
+		`"mounts":[{"type":"bind","source":"/host/in","destination":"/in","read_only":true,"recursive_read_only":true}],` +
 		`"labels":{"safeclaw.type":"sandbox","safeclaw.variant":"sandbox"}}`
 	if string(b) != want {
 		t.Errorf("info =\n%s\nwant\n%s", b, want)
@@ -217,6 +233,12 @@ func TestVerifySandboxStaticFailures(t *testing.T) {
 		{"writable mount", func(c, _, _ map[string]any) {
 			c["Mounts"] = []map[string]any{{"Type": "bind", "Source": "/host/in", "Destination": "/in", "RW": true}}
 		}, []string{"mounts-read-only"}},
+		// A -v :ro bind is read-only, but docker leaves its submounts
+		// writable where it can't make them read-only.
+		{"short syntax bind", func(_, _, hc map[string]any) { delete(hc, "Mounts") }, []string{"mounts-read-only"}},
+		{"recursive not forced", func(_, _, hc map[string]any) {
+			hc["Mounts"].([]map[string]any)[0]["BindOptions"] = map[string]any{"Propagation": "rprivate"}
+		}, []string{"mounts-read-only"}},
 		{"token env", func(_, cfg, _ map[string]any) { cfg["Env"] = []string{"GH_TOKEN=x", "PATH=/bin"} }, []string{"no-secrets"}},
 		{"stored secret env", func(_, cfg, _ map[string]any) { cfg["Env"] = []string{"MY_API_KEY=x"} }, []string{"no-secrets"}},
 		{"host ipc", func(_, _, hc map[string]any) { hc["IpcMode"] = "host" }, []string{"namespaces"}},
@@ -268,6 +290,9 @@ func TestVerifySandboxLiveFailures(t *testing.T) {
 		{"rw root", "overlay / overlay ro,", "overlay / overlay rw,", []string{"live-read-only-root"}},
 		{"rw mount", "/in ext4 ro,", "/in ext4 rw,", []string{"live-mounts"}},
 		{"missing mount", "/dev/vda1 /in ext4 ro,relatime 0 0\n", "", []string{"live-mounts"}},
+		{"rw submount", "/dev/vda1 /in ext4 ro,relatime 0 0\n", "/dev/vda1 /in ext4 ro,relatime 0 0\ntmpfs /in/sub tmpfs rw,relatime 0 0\n", []string{"live-mounts"}},
+		{"rw nested submount", "/dev/vda1 /in ext4 ro,relatime 0 0\n",
+			"/dev/vda1 /in ext4 ro,relatime 0 0\ntmpfs /in/a tmpfs ro 0 0\ncgroup2 /in/a/b\\040c cgroup2 rw,nosuid 0 0\n", []string{"live-mounts"}},
 		{"disk not tmpfs", "tmpfs /sandbox tmpfs", "/dev/vda1 /sandbox ext4", []string{"live-disk"}},
 		{"disk too big", "size=1048576k,mode=700", "size=2097152k,mode=700", []string{"live-disk"}},
 		{"disk unbounded", "size=1048576k,mode=700", "mode=700", []string{"live-disk"}},
@@ -292,14 +317,45 @@ func TestVerifySandboxLaterMountWins(t *testing.T) {
 	}
 }
 
+// Every submount below a bind must be read-only too, and only mounts below
+// it count.
+func TestVerifySandboxSubmounts(t *testing.T) {
+	probe := goodProbe + "sysfs /in/fs/cgroup cgroup2 ro,nosuid 0 0\ntmpfs /in/sub tmpfs ro 0 0\ntmpfs /inbox tmpfs rw 0 0\n"
+	m, _ := newInspectManager(t, &inspectWorld{c: goodSandbox(), probe: probe})
+	rep, err := m.VerifySandbox(context.Background(), "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rep.OK {
+		t.Errorf("read-only submounts: failed = %q", rep.Failed())
+	}
+	for _, c := range rep.Checks {
+		if c.Name == "live-mounts" && c.Detail != `1 mounts, 2 submounts, missing or writable: []` {
+			t.Errorf("detail = %q", c.Detail)
+		}
+	}
+
+	rw := strings.Replace(probe, "/in/sub tmpfs ro", "/in/sub tmpfs rw", 1)
+	m, _ = newInspectManager(t, &inspectWorld{c: goodSandbox(), probe: rw})
+	rep, err = m.VerifySandbox(context.Background(), "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range rep.Checks {
+		if c.Name == "live-mounts" && (c.OK || c.Detail != `1 mounts, 2 submounts, missing or writable: ["/in/sub"]`) {
+			t.Errorf("writable submount: %+v", c)
+		}
+	}
+}
+
 // Every mount of a sandbox made with several -v is checked, not just the
 // first.
 func TestVerifySandboxSeveralMounts(t *testing.T) {
 	two := func(rw bool) map[string]any {
 		c := goodSandbox()
-		c["Mounts"] = []map[string]any{
-			{"Type": "bind", "Source": "/host/in", "Destination": "/in", "RW": false},
-			{"Type": "bind", "Source": "/host/tools", "Destination": "/opt/tools", "RW": rw},
+		setBinds(c, "/host/in:/in", "/host/tools:/opt/tools")
+		if rw {
+			c["Mounts"].([]map[string]any)[1]["RW"] = true
 		}
 		return c
 	}
@@ -330,7 +386,7 @@ func TestVerifySandboxSeveralMounts(t *testing.T) {
 
 func TestVerifySandboxEscapedMount(t *testing.T) {
 	c := goodSandbox()
-	c["Mounts"] = []map[string]any{{"Type": "bind", "Source": "/host/my in", "Destination": "/my in", "RW": false}}
+	setBinds(c, "/host/my in:/my in")
 	probe := strings.Replace(goodProbe, " /in ext4", ` /my\040in ext4`, 1)
 	if got := failedChecks(t, &inspectWorld{c: c, probe: probe}); len(got) != 0 {
 		t.Errorf("failed = %q", got)

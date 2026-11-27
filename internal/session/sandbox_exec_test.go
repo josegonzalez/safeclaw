@@ -69,7 +69,7 @@ func TestSandboxVolumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, _ := r.Find("run ")
-	if !strings.Contains(run.String(), " -v /in:/in:ro -v /tools:/opt/tools:ro safeclaw:sandbox ") {
+	if !strings.Contains(run.String(), " --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --mount type=bind,src=/tools,dst=/opt/tools,readonly,bind-propagation=rprivate,bind-recursive=readonly safeclaw:sandbox ") {
 		t.Errorf("run = %q", run.String())
 	}
 
@@ -97,8 +97,8 @@ func TestEnsureSandboxRecreateVolumes(t *testing.T) {
 		opts      SandboxOptions
 		want, not string
 	}{
-		{"kept", SandboxOptions{Name: "box", Memory: "4g", Recreate: true}, " -v /in:/in:ro -v /tools:/tools:ro safeclaw:sandbox ", ""},
-		{"replaced", SandboxOptions{Name: "box", Volumes: []string{"/new:/new", "/in:/in"}}, " -v /new:/new:ro -v /in:/in:ro safeclaw:sandbox ", "/tools"},
+		{"kept", SandboxOptions{Name: "box", Memory: "4g", Recreate: true}, " --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --mount type=bind,src=/tools,dst=/tools,readonly,bind-propagation=rprivate,bind-recursive=readonly safeclaw:sandbox ", ""},
+		{"replaced", SandboxOptions{Name: "box", Volumes: []string{"/new:/new", "/in:/in"}}, " --mount type=bind,src=/new,dst=/new,readonly,bind-propagation=rprivate,bind-recursive=readonly --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly safeclaw:sandbox ", "/tools"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

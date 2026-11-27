@@ -171,7 +171,8 @@ func TestIntegrationSandbox(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	in := filepath.Join(dir, "in")
+	// The comma has to be quoted in the --mount value.
+	in := filepath.Join(dir, "in, box")
 	if err := os.MkdirAll(in, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +281,7 @@ func TestIntegrationSandbox(t *testing.T) {
 	// A real sandbox passes every verify check, and inspect reports its
 	// --disk.
 	info, err := m.InspectSandbox(ctx, name)
-	if err != nil || info.Limits.DiskBytes != 8<<20 || !info.Running || len(info.Mounts) != 1 || !info.Mounts[0].ReadOnly {
+	if err != nil || info.Limits.DiskBytes != 8<<20 || !info.Running || len(info.Mounts) != 1 || !info.Mounts[0].RecursiveReadOnly {
 		t.Errorf("inspect = %+v, %v", info, err)
 	}
 	report, err := m.VerifySandbox(ctx, name)

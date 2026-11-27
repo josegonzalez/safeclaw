@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -115,8 +116,21 @@ func (w *world) inspectJSON(names []string) []byte {
 		if !ok {
 			continue
 		}
-		var mounts []map[string]any
+		var mounts, hostMounts []map[string]any
 		for _, m := range c.Mounts {
+			if strings.HasPrefix(m, "type=bind,") {
+				fields, _ := csv.NewReader(strings.NewReader(m)).Read()
+				opts := map[string]string{}
+				for _, f := range fields {
+					k, v, _ := strings.Cut(f, "=")
+					opts[k] = v
+				}
+				_, ro := opts["readonly"]
+				mounts = append(mounts, map[string]any{"Type": "bind", "Source": opts["src"], "Destination": opts["dst"], "RW": !ro})
+				hostMounts = append(hostMounts, map[string]any{"Type": "bind", "Source": opts["src"], "Target": opts["dst"], "ReadOnly": ro,
+					"BindOptions": map[string]any{"Propagation": opts["bind-propagation"], "ReadOnlyForceRecursive": opts["bind-recursive"] == "readonly"}})
+				continue
+			}
 			src, dst, ok := strings.Cut(m, ":")
 			if !ok {
 				mounts = append(mounts, map[string]any{"Type": "volume", "Source": "/var/lib/docker/volumes/anon", "Destination": m, "RW": true})
@@ -171,7 +185,7 @@ func (w *world) inspectJSON(names []string) []byte {
 			"Image":           c.Image,
 			"Config":          map[string]any{"Labels": labels},
 			"State":           map[string]any{"Status": status, "Running": c.Running},
-			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode, "IpcMode": ipc, "Tmpfs": c.Tmpfs, "CapDrop": capDrop, "SecurityOpt": secOpt},
+			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode, "IpcMode": ipc, "Tmpfs": c.Tmpfs, "CapDrop": capDrop, "SecurityOpt": secOpt, "Mounts": hostMounts},
 			"NetworkSettings": map[string]any{"Networks": nets},
 			"Mounts":          mounts,
 		})
@@ -251,7 +265,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 				if _, err := fmt.Sscanf(args[i+1], "[::1]:%d:7681", &port); err == nil {
 					hostIP = "::1"
 				}
-			case "-v":
+			case "-v", "--mount":
 				mounts = append(mounts, args[i+1])
 			case "--memory":
 				memory, _ = strconv.ParseInt(strings.TrimSuffix(args[i+1], "g"), 10, 64)

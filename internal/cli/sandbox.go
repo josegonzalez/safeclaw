@@ -60,7 +60,7 @@ var createFlags = append([]string{"session", "volume", "variant"}, limitFlags...
 // appended to the help of the flags that recreate an existing sandbox.
 func (f *sandboxFlags) register(cmd *cobra.Command, nameHelp, recreates string) {
 	cmd.Flags().StringVarP(&f.session, "session", "s", "", nameHelp)
-	cmd.Flags().StringArrayVarP(&f.volumes, "volume", "v", nil, "mount a host directory read-only, /host/path:/container/path (repeatable)"+recreates)
+	cmd.Flags().StringArrayVarP(&f.volumes, "volume", "v", nil, "mount a host directory and everything mounted below it read-only, /host/path:/container/path (repeatable, needs Docker Engine 25+ and Linux 5.12+)"+recreates)
 	cmd.Flags().StringVar(&f.variant, "variant", "", "image variant, or base for the base image (default from the config file, else sandbox)"+recreates)
 	_ = cmd.RegisterFlagCompletionFunc("variant", completeVariants)
 	cmd.Flags().StringVar(&f.memory, "memory", session.DefaultSandboxMemory, "memory limit"+recreates)
