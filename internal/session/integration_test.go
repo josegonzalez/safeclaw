@@ -305,6 +305,12 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 	if out, err := run(SandboxOptions{}, "", "id", "-un"); err != nil || out != config.SandboxUser {
 		t.Errorf("user = %q, %v", out, err)
 	}
+	if out, err := run(SandboxOptions{}, "", "sh", "-c", "umask"); err != nil || out != "0022" {
+		t.Errorf("umask = %q, %v", out, err)
+	}
+	if out, err := run(SandboxOptions{}, "", "printf", "[%s]", "", "-n", "--", "a b", "$HOME"); err != nil || out != "[][-n][--][a b][$HOME]" {
+		t.Errorf("args = %q, %v", out, err)
+	}
 	name := fmt.Sprintf("itest-ephemeral-%d", rand.IntN(1_000_000))
 	if out, err := run(SandboxOptions{Name: name, Volume: in + ":/in"}, "", "cat", "/in/doc.txt"); err != nil || out != "untrusted" {
 		t.Errorf("mounted file = %q, %v", out, err)

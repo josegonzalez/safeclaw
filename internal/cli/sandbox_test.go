@@ -139,9 +139,9 @@ func TestSandboxExecArgv(t *testing.T) {
 		i, t bool
 		want []string
 	}{
-		{false, false, []string{"docker", "exec", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box", "pdftotext", "-", "-"}},
-		{true, false, []string{"docker", "exec", "-i", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box", "pdftotext", "-", "-"}},
-		{true, true, []string{"docker", "exec", "-i", "-t", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box", "pdftotext", "-", "-"}},
+		{false, false, []string{"docker", "exec", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box", "/bin/sh", "-c", `umask 022; exec "$@"`, "sh", "pdftotext", "-", "-"}},
+		{true, false, []string{"docker", "exec", "-i", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box", "/bin/sh", "-c", `umask 022; exec "$@"`, "sh", "pdftotext", "-", "-"}},
+		{true, true, []string{"docker", "exec", "-i", "-t", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box", "/bin/sh", "-c", `umask 022; exec "$@"`, "sh", "pdftotext", "-", "-"}},
 	}
 	for _, tc := range cases {
 		if got := sandboxExecArgv("box", tc.i, tc.t, []string{"pdftotext", "-", "-"}); !slices.Equal(got, tc.want) {

@@ -41,6 +41,8 @@ A sandbox is created with none of what an interactive session gets: no secrets a
 - `--memory 1g`, `--pids-limit 256`, and `--cpus 1` by default, changeable with flags of the same name
 - `HOME=/sandbox`, an empty `BASH_ENV`, and a `PATH` without sclaw's `~/.local/bin`
 
+`safeclaw sandbox exec`, with or without `--ephemeral`, runs its command as `/bin/sh -c 'umask 022; exec "$@"' sh CMD...`, so files it creates are not world-writable whatever umask docker gives the command. Some Docker versions start `docker exec` processes with a umask of `0000` instead of the container's. The command and its arguments are passed to the shell as positional parameters, so they reach the command exactly as given.
+
 With `-v`, a host directory is mounted read-only, whatever options the spec carries. Rerunning `sandbox run` starts a stopped sandbox or leaves a running one alone, and `-v`, any limit flag, or a `--variant` other than the sandbox's recreates it. The new sandbox keeps whichever of the old one's mount, variant, and limits were not given again.
 
 Sandboxes run the `sandbox` [image variant](#image-variants) unless the config file or `--variant` says otherwise, so the document extraction tools are already installed and never need the network or root.
