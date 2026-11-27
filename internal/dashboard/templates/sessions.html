@@ -62,7 +62,7 @@
             </div>
         </div>
         {{- if .IsOffline}}
-        <div class="frame-offline" id="offline-{{.Container}}"><p>offline</p><p>run <code>safeclaw net on {{.Name}}</code> or click online to reconnect</p></div>
+        <div class="frame-offline-placeholder" id="offline-{{.Container}}"><p>offline</p><p>run <code>safeclaw net on {{.Name}}</code> or click online to reconnect</p></div>
         {{- else}}
         <iframe id="iframe-{{.Container}}" src="{{terminal .Name}}"></iframe>
         {{- end}}
