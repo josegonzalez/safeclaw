@@ -82,8 +82,8 @@ This runs [air](https://github.com/air-verse/air), which rebuilds on Go changes 
 
 Run the Release workflow from the Actions tab (or `gh workflow run release.yml -f bump_type=patch`) and pick `patch`, `minor`, or `major`. It:
 
-- bumps the latest `v*` tag, then creates and pushes the new tag
-- runs the tests against the tagged commit
+- runs `go vet` and the tests against the commit the workflow was started on
+- bumps the latest `v*` tag and pushes the new tag on that commit, only once the tests pass, so a failed run leaves no tag behind. Runs are queued, so concurrent dispatches don't pick the same version
 - runs goreleaser to publish darwin/linux amd64/arm64 archives with completions. The `safeclaw` formula in `josegonzalez/homebrew-repo` is bumped by that repo's daily `update-formulas.yml` workflow, which opens a PR when a new release appears
 - builds the image natively on amd64 and arm64 runners and pushes a multi-arch manifest to `ghcr.io/josegonzalez/safeclaw` tagged with the version and `latest`
 - builds each built-in variant on top of that image from `safeclaw variant dockerfile NAME`, with an empty config directory so only the built-in definition applies, and pushes it tagged `<version>-NAME` and `NAME`
