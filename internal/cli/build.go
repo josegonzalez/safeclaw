@@ -90,7 +90,7 @@ func newBuildCommand() *cobra.Command {
 	cmd.Flags().StringSliceVar(&variants, "variant", nil, "also build this image variant (repeatable)")
 	_ = cmd.RegisterFlagCompletionFunc("variant", completeVariants)
 	cmd.Flags().BoolVar(&noCache, "no-cache", false, "do not use the docker build cache")
-	cmd.Flags().BoolVar(&recreate, "recreate", false, "remove session containers built from an older image (history is kept on the host)")
+	cmd.Flags().BoolVar(&recreate, "recreate", false, "remove session containers built from an older image (history and their secrets and auto memory choices are kept on the host)")
 	return cmd
 }
 
@@ -246,7 +246,7 @@ func reportStale(ctx context.Context, d *docker.Client, out io.Writer, recreate 
 		}
 		fmt.Fprintf(out, "  %s\n", name)
 	}
-	fmt.Fprintln(out, "\nRemove them with `safeclaw rm -f <name>` (or rebuild with --recreate) so the next run uses the new image. Conversation history is kept on the host.")
+	fmt.Fprintln(out, "\nRemove them with `safeclaw rm -f <name>` (or rebuild with --recreate) so the next run uses the new image. Conversation history is kept on the host, and the next run keeps their secrets and auto memory choices.")
 	if sandboxes {
 		fmt.Fprintln(out, "Remove sandboxes with `safeclaw sandbox rm -f <name>`.")
 	}

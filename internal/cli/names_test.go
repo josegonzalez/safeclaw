@@ -22,7 +22,9 @@ func fakeNames(t *testing.T, names ...string) *dockertest.Runner {
 	}}
 	orig := newManager
 	t.Cleanup(func() { newManager = orig })
-	newManager = func() *session.Manager { return &session.Manager{Docker: r.Client(), NetworkDir: t.TempDir()} }
+	newManager = func() *session.Manager {
+		return &session.Manager{Docker: r.Client(), NetworkDir: t.TempDir(), ChoicesDir: t.TempDir()}
+	}
 	return r
 }
 

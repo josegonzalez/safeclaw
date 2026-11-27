@@ -208,7 +208,7 @@ safeclaw run -s triage --no-memory          # auto memory off
 safeclaw run -s triage --no-memory=false    # back on
 ```
 
-The choice is remembered for the session like its secrets, and changing it recreates the container. It is set in a root-owned managed settings file, so the agent can't turn it back on. Memory already in the history directory is kept but not loaded while auto memory is off. See [architecture](docs/architecture.md#auto-memory) for details.
+The choice is remembered for the session like its secrets, including after `safeclaw rm` or `safeclaw build --recreate`, and changing it recreates the container. It is set in a root-owned managed settings file, so the agent can't turn it back on. Memory already in the history directory is kept but not loaded while auto memory is off. See [architecture](docs/architecture.md#auto-memory) for details.
 
 Image variants and their defaults are configured in `~/.config/safeclaw/config.yaml`, see [image variants](#image-variants).
 
@@ -242,7 +242,7 @@ safeclaw run -s offline --no-secrets                      # none
 safeclaw run -s chat --all-secrets                        # back to every secret
 ```
 
-The choice is remembered for the session, so rerunning `safeclaw run -s chat` or starting it from the dashboard keeps it. It is kept with the container, so give it again after `safeclaw rm`. Giving a different set recreates the container, keeping its port, mounts, and variant. Listed secrets must exist. A session that does not receive `CLAUDE_CODE_OAUTH_TOKEN` starts Claude Code logged out, and one that does not receive `GH_TOKEN` gets no git configuration. Sandboxes never receive secrets.
+The choice is remembered for the session, so rerunning `safeclaw run -s chat` or starting it from the dashboard keeps it. It is kept on the host outside the history directory, so it still applies after `safeclaw rm` or `safeclaw build --recreate`; give a different choice, such as `--all-secrets`, to change it. Sessions removed before choices were kept get every secret again, with a warning. Giving a different set recreates the container, keeping its port, mounts, and variant. Listed secrets must exist. A session that does not receive `CLAUDE_CODE_OAUTH_TOKEN` starts Claude Code logged out, and one that does not receive `GH_TOKEN` gets no git configuration. Sandboxes never receive secrets.
 
 ### Sharing the host's IPC namespace
 
@@ -253,7 +253,7 @@ safeclaw run -s work --host-ipc          # share the host's IPC namespace
 safeclaw run -s work --host-ipc=false    # back to a private one
 ```
 
-The choice is remembered for the session like its secrets, and changing it recreates the container. See [architecture](docs/architecture.md#ipc-namespace) for details.
+The choice is remembered with the container, and changing it recreates the container. Unlike secrets and auto memory, it is not kept after `safeclaw rm` or `safeclaw build --recreate`, so the session goes back to a private namespace. See [architecture](docs/architecture.md#ipc-namespace) for details.
 
 ## Commands
 
@@ -275,7 +275,7 @@ The choice is remembered for the session like its secrets, and changing it recre
 | `safeclaw ls` | List sessions and sandboxes |
 | `safeclaw url NAME` | Print a running session's terminal URL with its credential. `--open` also opens it, through the dashboard when one is running |
 | `safeclaw stop NAME` | Stop a session |
-| `safeclaw rm NAME` | Delete a session container (history is kept) |
+| `safeclaw rm NAME` | Delete a session container (history and its secrets and auto memory choices are kept) |
 | `safeclaw attach NAME` | Attach to a session's tmux session in this terminal. Clipboard writes, passthrough, hyperlinks to anything but http and https sites off localhost, and other sequences that act on the host terminal are filtered out ([details](docs/architecture.md#attaching-from-the-host)) |
 | `safeclaw net off NAME` | Save a session's networks and disconnect it from them. `--owner` names the hold and `--reason` says why. |
 | `safeclaw net on NAME` | Release the hold for `--owner` (or the unnamed hold) and reconnect the session once none remain. `--force` releases every hold. |
