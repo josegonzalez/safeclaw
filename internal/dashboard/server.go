@@ -34,6 +34,9 @@ var assets embed.FS
 // Sessions is the session API the dashboard needs.
 type Sessions interface {
 	List(ctx context.Context) ([]session.Session, error)
+	// ResolveName refuses a name while a container left from a mixed-case
+	// name before names were lowercased shares its state.
+	ResolveName(ctx context.Context, name string) (string, error)
 	Ensure(ctx context.Context, opts session.Options) (*session.Result, error)
 	Stop(ctx context.Context, name string) error
 	Delete(ctx context.Context, name string, force bool) error
@@ -522,14 +525,39 @@ func (s *Server) taken(ctx context.Context, name string) (*session.Session, erro
 	return nil, nil
 }
 
+// checkLegacy refuses a valid session name, as the CLI does, while a
+// container left from a mixed-case name before names were lowercased
+// matches it case-insensitively, such as safeclaw-Work for `work`, since on
+// a case-insensitive filesystem the two share the history directory, ttyd
+// credential, and network state. The error wraps session.ErrLegacyName and
+// names `docker rm -f` for each old container, with 409 as its status, or
+// 500 if the containers can't be listed. An invalid name is left to the
+// caller's own checks.
+func (s *Server) checkLegacy(ctx context.Context, name string) (status int, err error) {
+	if session.ValidateName(name) != nil {
+		return http.StatusOK, nil
+	}
+	if _, err := s.sessions.ResolveName(ctx, name); err != nil {
+		if errors.Is(err, session.ErrLegacyName) {
+			return http.StatusConflict, err
+		}
+		return http.StatusInternalServerError, err
+	}
+	return http.StatusOK, nil
+}
+
 // target returns the session or sandbox a stop or delete acts on, with
-// the checks the CLI makes: the name must be valid, and the container must
-// exist and be a session or a sandbox. Both types are allowed, since the
-// table offers stop and delete for both. On error, status is the HTTP
-// status to answer with.
+// the checks the CLI makes: the name must be valid, no container left from
+// a mixed-case name may share its state (see checkLegacy), and the
+// container must exist and be a session or a sandbox. Both types are
+// allowed, since the table offers stop and delete for both. On error,
+// status is the HTTP status to answer with.
 func (s *Server) target(ctx context.Context, name string) (x *session.Session, status int, err error) {
 	if err := session.ValidateName(name); err != nil {
 		return nil, http.StatusBadRequest, err
+	}
+	if status, err := s.checkLegacy(ctx, name); err != nil {
+		return nil, status, err
 	}
 	list, err := s.sessions.List(ctx)
 	if err != nil {
@@ -814,8 +842,15 @@ func (s *Server) handleConfirmed(kind string) http.HandlerFunc {
 func (s *Server) handleOffline(w http.ResponseWriter, r *http.Request) {
 	name := config.SessionName(r.PathValue("name"))
 	_ = r.ParseForm()
+	d := actionData{Name: name, Kind: "offline", Variant: buttonVariant(r.Form.Get("variant"))}
+	if status, err := s.checkLegacy(r.Context(), name); err != nil {
+		d.Failed = err.Error()
+		s.render(w, status, "action", d)
+		return
+	}
 	if _, err := s.sessions.NetOff(r.Context(), name, session.NetOffOptions{}); err != nil {
-		s.render(w, errStatus(err, http.StatusOK), "action", actionData{Name: name, Kind: "offline", Variant: buttonVariant(r.Form.Get("variant")), Failed: err.Error()})
+		d.Failed = err.Error()
+		s.render(w, errStatus(err, http.StatusOK), "action", d)
 		return
 	}
 	refresh(w)
@@ -847,6 +882,15 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	d := actionData{Name: name, Kind: "online", Variant: buttonVariant(r.Form.Get("variant"))}
+	if status, err := s.checkLegacy(r.Context(), name); err != nil {
+		if force {
+			s.render(w, status, "dialog-error", err.Error())
+			return
+		}
+		d.Failed = err.Error()
+		s.render(w, status, "action", d)
+		return
+	}
 	res, err := s.sessions.NetOn(r.Context(), name, session.NetOnOptions{Force: force})
 	if err != nil && !errors.Is(err, session.ErrHeld) {
 		if force {
