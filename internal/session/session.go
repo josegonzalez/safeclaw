@@ -222,10 +222,12 @@ func (m *Manager) ResolveName(ctx context.Context, name string) (string, error) 
 }
 
 // NormalizeName applies the dashboard's name rules: spaces become dashes,
-// letters are lowercased, and an empty name means the default session.
+// letters are lowercased, one container prefix is removed as Ensure and
+// the CLI do, and an empty name means the default session. The result
+// still needs ValidateName, which refuses a name left with the prefix.
 func NormalizeName(name string) string {
 	name = strings.TrimSpace(strings.ToLower(strings.ReplaceAll(name, " ", "-")))
-	name = strings.Trim(name, "-")
+	name = config.SessionName(strings.Trim(name, "-"))
 	if name == "" {
 		return config.DefaultSession
 	}

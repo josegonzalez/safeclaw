@@ -233,3 +233,55 @@ func TestCreateRefusesWhenListFails(t *testing.T) {
 		t.Errorf("create went ahead: %+v", f.ensured)
 	}
 }
+
+// A name given as its container, with the safeclaw- prefix, is the session
+// Ensure acts on, so create checks that session and refuses it in use.
+func TestCreateChecksCanonicalName(t *testing.T) {
+	f := &fakeSessions{list: withSandboxes()}
+	h := newTestServer(t, f)
+
+	for _, name := range []string{"safeclaw-work", "SafeClaw-Work", " safeclaw-work "} {
+		rec := do(h, "POST", "/sessions", url.Values{"name": {name}, "volume": {"/x:/y"}}, nil)
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), `session &#34;work&#34; already seems to exist`) {
+			t.Errorf("form %q = %d %s", name, rec.Code, rec.Body)
+		}
+		code, r := postJSON(h, "/api/create", `{"name":"`+name+`","volume":"/x:/y"}`)
+		if code != http.StatusConflict || r.Success || !strings.Contains(r.Error, `session "work" already exists`) {
+			t.Errorf("api %q = %d %+v", name, code, r)
+		}
+	}
+	code, r := postJSON(h, "/api/create", `{"name":"safeclaw-box","recreate":true}`)
+	if code != http.StatusConflict || !strings.Contains(r.Error, "is a sandbox") {
+		t.Errorf("api sandbox = %d %+v", code, r)
+	}
+
+	// One prefix is removed, as Ensure does, and a name still carrying
+	// one is refused rather than stripped again by Ensure.
+	rec := do(h, "POST", "/sessions", url.Values{"name": {"safeclaw-safeclaw-work"}}, nil)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "may not start with") {
+		t.Errorf("form doubled prefix = %d %s", rec.Code, rec.Body)
+	}
+	code, r = postJSON(h, "/api/create", `{"name":"safeclaw-safeclaw-work","recreate":true}`)
+	if code != http.StatusBadRequest || r.Success || !strings.Contains(r.Error, "may not start with") {
+		t.Errorf("api doubled prefix = %d %+v", code, r)
+	}
+	if len(f.ensured) != 0 {
+		t.Fatalf("a taken or invalid name reached Ensure: %+v", f.ensured)
+	}
+
+	body := do(h, "GET", "/sessions/validate?name=safeclaw-work", nil, nil).Body.String()
+	if !strings.Contains(body, `session "work" already seems to exist`) {
+		t.Errorf("hint: %s", body)
+	}
+
+	// With recreate, the prefixed name recreates the session it names, as
+	// `safeclaw run safeclaw-work` does.
+	code, r = postJSON(h, "/api/create", `{"name":"safeclaw-work","volume":"/x:/y","recreate":true}`)
+	if code != http.StatusOK || !r.Success || len(f.ensured) != 1 || f.ensured[0].Name != "work" {
+		t.Errorf("recreate = %d %+v %+v", code, r, f.ensured)
+	}
+	rec = do(h, "POST", "/sessions", url.Values{"name": {"safeclaw-fresh"}}, nil)
+	if rec.Code != http.StatusNoContent || len(f.ensured) != 2 || f.ensured[1].Name != "fresh" {
+		t.Errorf("form new = %d %s %+v", rec.Code, rec.Body, f.ensured)
+	}
+}

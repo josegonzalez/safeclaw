@@ -66,7 +66,7 @@ curl -H "Authorization: Bearer $(cat ~/.config/safeclaw/dashboard/7680.token)" h
 | `POST /api/delete` | `{"name"}` | As for stop |
 | `POST /api/net/off` | `{"name", "owner", "reason"}` | `{success, offline, holds}`, or 409 for a sandbox or a network that can't be disconnected |
 | `POST /api/net/on` | `{"name", "owner", "force"}` | `{success, offline, holds}`. `offline` stays true while other holds remain. 409 with the holders when `owner` holds nothing but others do |
-| `POST /api/create` | `{"name", "volume", "variant", "secrets", "query", "recreate"}` | `{success, url}` (with the credential, as for start) or `{success: false, error}`, with 409 for a sandbox name, for an existing session's name unless `recreate` is true, or when it would recreate an offline session. With `recreate`, an existing session is started, and recreated when a volume is given or the variant or secrets differ, as `safeclaw run` does. `secrets` is `"all"`, `"none"`, or a list of names; leaving it out keeps an existing session's set, or gives a new one every secret |
+| `POST /api/create` | `{"name", "volume", "variant", "secrets", "query", "recreate"}` | `{success, url}` (with the credential, as for start) or `{success: false, error}`, with 400 for an invalid name, 409 for a sandbox name, for an existing session's name unless `recreate` is true, or when it would recreate an offline session. With `recreate`, an existing session is started, and recreated when a volume is given or the variant or secrets differ, as `safeclaw run` does. `secrets` is `"all"`, `"none"`, or a list of names; leaving it out keeps an existing session's set, or gives a new one every secret |
 | `GET /api/events` | | SSE, `data: <docker action>` |
 
 ## Security
