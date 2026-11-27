@@ -62,6 +62,10 @@ func writeFile(t *testing.T, p, content string) string {
 	return p
 }
 
+// umaskSh is how the SandboxCommand wrapper every copy command runs under
+// appears in a recorded command.
+var umaskSh = strings.Join(SandboxCommand(nil), " ")
+
 func hasExec(r *dockertest.Runner) bool {
 	return hasCall(r, "exec ")
 }
@@ -114,14 +118,14 @@ func TestCopyIn(t *testing.T) {
 		t.Errorf("paths = %v, want %v", paths, want)
 	}
 	for _, prefix := range []string{
-		"exec --user sandbox --workdir /sandbox safeclaw-box /usr/bin/mkdir -p -- /sandbox/in",
-		"exec --user sandbox --workdir /sandbox safeclaw-box /usr/bin/ls -1A -- /sandbox/in",
+		"exec --user sandbox --workdir /sandbox safeclaw-box " + umaskSh + " /usr/bin/mkdir -p -- /sandbox/in",
+		"exec --user sandbox --workdir /sandbox safeclaw-box " + umaskSh + " /usr/bin/ls -1A -- /sandbox/in",
 	} {
 		if !hasCall(r, prefix) {
 			t.Errorf("missing %q in %v", prefix, r.Commands())
 		}
 	}
-	call, ok := r.Find("exec -i --user sandbox --workdir /sandbox safeclaw-box /usr/bin/tar -x -f - -k -C /sandbox/in")
+	call, ok := r.Find("exec -i --user sandbox --workdir /sandbox safeclaw-box " + umaskSh + " /usr/bin/tar -x -f - -k -C /sandbox/in")
 	if !ok {
 		t.Fatalf("no tar -x in %v", r.Commands())
 	}
@@ -333,7 +337,7 @@ func TestCopyOut(t *testing.T) {
 	if fi.Mode()&^0o644 != 0 {
 		t.Errorf("a.txt mode = %v, want no more than 0644", fi.Mode())
 	}
-	want0 := "exec --user sandbox --workdir /sandbox safeclaw-box /usr/bin/tar -c -f - --exclude=./*/* -C /sandbox/out ."
+	want0 := "exec --user sandbox --workdir /sandbox safeclaw-box " + umaskSh + " /usr/bin/tar -c -f - --exclude=./*/* -C /sandbox/out ."
 	if !hasCall(r, want0) {
 		t.Errorf("missing %q in %v", want0, r.Commands())
 	}
