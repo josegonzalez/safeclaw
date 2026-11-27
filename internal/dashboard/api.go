@@ -2,6 +2,8 @@ package dashboard
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -23,6 +25,9 @@ type apiSession struct {
 	// AutoRemove is set for one-off sandboxes, which are removed when
 	// they stop.
 	AutoRemove bool `json:"autoRemove"`
+	// Secrets are the secrets the session receives: null for every secret,
+	// otherwise the names, empty for none.
+	Secrets *[]string `json:"secrets"`
 }
 
 type apiResult struct {
@@ -32,10 +37,48 @@ type apiResult struct {
 }
 
 type apiRequest struct {
-	Name    string `json:"name"`
-	Volume  string `json:"volume"`
-	Variant string `json:"variant"`
-	Query   string `json:"query"`
+	Name    string     `json:"name"`
+	Volume  string     `json:"volume"`
+	Variant string     `json:"variant"`
+	Secrets apiSecrets `json:"secrets"`
+	Query   string     `json:"query"`
+}
+
+// apiSecrets is the secrets field of a create request: absent or null keeps
+// the default, "all" or "none", or a list of names, empty for none.
+type apiSecrets struct {
+	set *session.SecretSet
+}
+
+func (a *apiSecrets) UnmarshalJSON(b []byte) error {
+	if string(b) == "null" {
+		a.set = nil
+		return nil
+	}
+	var set session.SecretSet
+	var word string
+	if err := json.Unmarshal(b, &word); err == nil {
+		switch word {
+		case "all":
+			set = session.AllSecrets()
+		case "none":
+			set = session.NoSecrets()
+		default:
+			return fmt.Errorf(`secrets must be "all", "none", or a list of names, not %q`, word)
+		}
+		a.set = &set
+		return nil
+	}
+	var names []string
+	if err := json.Unmarshal(b, &names); err != nil {
+		return errors.New(`secrets must be "all", "none", or a list of names`)
+	}
+	set, err := session.OnlySecrets(names...)
+	if err != nil {
+		return err
+	}
+	a.set = &set
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -64,6 +107,10 @@ func (s *Server) apiSessions(w http.ResponseWriter, r *http.Request) {
 	out := make([]apiSession, 0, len(list))
 	for _, x := range list {
 		a := apiSession{Name: x.Container, Volume: x.Volume, Active: x.Active, Type: x.Type, Variant: x.Variant, AutoRemove: x.IsOneOff()}
+		if !x.Secrets.All() {
+			names := append([]string{}, x.Secrets.Names...)
+			a.Secrets = &names
+		}
 		if x.Port > 0 {
 			p := strconv.Itoa(x.Port)
 			u := x.URL
@@ -118,6 +165,7 @@ func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {
 		Name:    session.NormalizeName(req.Name),
 		Volume:  req.Volume,
 		Variant: req.Variant,
+		Secrets: req.Secrets.set,
 		Query:   req.Query,
 		NoOpen:  true,
 	})

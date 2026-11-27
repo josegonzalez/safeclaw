@@ -21,11 +21,11 @@ Containers created from the upstream image don't contain the `safeclaw` binary, 
 
 `safeclaw run` (and the dashboard's create and start) all go through the same code path:
 
-1. Pick the [image variant](#image-variants) and check its image exists, then check the Claude token is present (prompting for it only in `run`)
+1. Pick the [image variant](#image-variants) and check its image exists, pick the [secrets](#choosing-secrets) the session receives, then check that the Claude token is present if the session receives it (prompting for it only in `run`) and that every listed secret exists
 2. Reuse the container's existing port, or pick the lowest port no `safeclaw-*` container reserves and nothing on the host is listening on
-3. Create, start, or refresh the container. With `-v`, or a `--variant` other than the container's, an existing container is recreated, keeping its port and whichever of its mount and variant were not given again. A running container has ttyd and tmux restarted so new env vars take effect
-4. Write `/home/sclaw/.env` from the secrets directory
-5. Configure git from the GitHub account if `GH_TOKEN` is set
+3. Create, start, or refresh the container. With `-v`, a `--variant` other than the container's, or a different set of secrets, an existing container is recreated, keeping its port and whichever of its mount, variant, and secrets were not given again. A running container has ttyd and tmux restarted so new env vars take effect
+4. Write `/home/sclaw/.env` from the secrets the session receives
+5. Configure git from the GitHub account if the session receives `GH_TOKEN`
 6. Start ttyd, and with `-q`, wait for Claude Code's input prompt before sending the query
 
 ## Sandboxes
@@ -75,11 +75,21 @@ All secrets are stored on the host in `~/.config/safeclaw/.secrets/`. Each file 
 
 ### How env vars are passed
 
-1. `safeclaw run` renders every secret as `export NAME='value'` (shell-quoted) and pipes it into the container over stdin, writing `/home/sclaw/.env` with mode 600. Secret values never appear in process arguments.
+1. `safeclaw run` renders each secret the session receives as `export NAME='value'` (shell-quoted) and pipes it into the container over stdin, writing `/home/sclaw/.env` with mode 600. Secret values never appear in process arguments.
 2. `BASH_ENV=/home/sclaw/.env` (set in the Dockerfile) ensures every bash invocation sources it
 3. `.bashrc` also sources `.env` for interactive shells
 
 This means env vars are available everywhere - interactive shells, Claude's bash commands, and `docker exec bash -c` commands.
+
+### Choosing secrets
+
+Because every bash process in a session can read `.env`, each session can be limited to the secrets it needs. `--secrets A,B` writes only the listed secrets, `--no-secrets` writes none, and `--all-secrets` writes every secret, including ones added later. New sessions get every secret unless told otherwise.
+
+The choice is recorded in the `safeclaw.secrets` container label as comma-separated names, so the container itself can't change it. Containers without the label, including ones created before it existed, get every secret, and an empty label means none. Without a flag, `run` and the dashboard's start keep the container's set; a different one recreates the container, since labels can't change.
+
+`.env` is replaced on every run, so secrets left out of the set are removed from it. Names given on a run must exist in the secrets directory (after prompting for the Claude and GitHub tokens, if the session receives them). A remembered name that has since been deleted is skipped with a warning, so the session still starts. Tokens the session doesn't receive are neither required nor prompted for. Without `CLAUDE_CODE_OAUTH_TOKEN`, a warning says Claude Code won't be logged in.
+
+Sandboxes never receive secrets, whatever their labels say.
 
 ### Claude Code
 

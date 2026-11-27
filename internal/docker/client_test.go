@@ -12,7 +12,7 @@ import (
 const inspectJSON = `[{
   "Name": "/safeclaw-work",
   "Image": "sha256:abc",
-  "Config": {"Labels": {"safeclaw.type": "sandbox"}},
+  "Config": {"Labels": {"safeclaw.type": "sandbox", "safeclaw.secrets": ""}},
   "State": {"Status": "exited", "Running": false},
   "HostConfig": {"PortBindings": {"7681/tcp": [{"HostIp": "127.0.0.1", "HostPort": "7683"}]}, "AutoRemove": true},
   "Mounts": [
@@ -42,6 +42,12 @@ func TestParseInspect(t *testing.T) {
 	}
 	if got := c.Label("missing"); got != "" {
 		t.Errorf("Label(missing) = %q", got)
+	}
+	if v, ok := c.LookupLabel("safeclaw.secrets"); !ok || v != "" {
+		t.Errorf("LookupLabel(empty) = %q, %v", v, ok)
+	}
+	if _, ok := c.LookupLabel("missing"); ok {
+		t.Error("LookupLabel(missing) found a label")
 	}
 	if !c.HostConfig.AutoRemove {
 		t.Error("AutoRemove = false, want true")

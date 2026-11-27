@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -71,6 +72,8 @@ func newPullCommand() *cobra.Command {
 type runFlags struct {
 	session, volume, variant, query string
 	noOpen                          bool
+	secrets                         []string
+	noSecrets, allSecrets           bool
 }
 
 func (f *runFlags) register(cmd *cobra.Command) {
@@ -80,17 +83,50 @@ func (f *runFlags) register(cmd *cobra.Command) {
 	_ = cmd.RegisterFlagCompletionFunc("variant", completeVariants)
 	cmd.Flags().BoolVarP(&f.noOpen, "no-open", "n", false, "do not open the browser")
 	cmd.Flags().StringVarP(&f.query, "query", "q", "", "send this query to Claude Code once it starts")
+	cmd.Flags().StringSliceVar(&f.secrets, "secrets", nil, "give the session only these secrets, comma-separated (a different set recreates an existing container)")
+	_ = cmd.RegisterFlagCompletionFunc("secrets", completeSecrets)
+	cmd.Flags().BoolVar(&f.noSecrets, "no-secrets", false, "give the session no secrets")
+	cmd.Flags().BoolVar(&f.allSecrets, "all-secrets", false, "give the session every secret, including ones added later (default for new sessions)")
+	cmd.MarkFlagsMutuallyExclusive("secrets", "no-secrets", "all-secrets")
 }
 
-func (f *runFlags) options(interactive bool) session.Options {
+// secretSet returns the secret set the flags ask for, nil to keep the
+// session's current one.
+func (f *runFlags) secretSet(cmd *cobra.Command) (*session.SecretSet, error) {
+	var set session.SecretSet
+	switch {
+	case f.noSecrets:
+		set = session.NoSecrets()
+	case f.allSecrets:
+		set = session.AllSecrets()
+	case cmd.Flags().Changed("secrets"):
+		if len(f.secrets) == 0 {
+			return nil, errors.New("--secrets needs at least one name; use --no-secrets for none")
+		}
+		var err error
+		if set, err = session.OnlySecrets(f.secrets...); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, nil
+	}
+	return &set, nil
+}
+
+func (f *runFlags) options(cmd *cobra.Command, interactive bool) (session.Options, error) {
+	set, err := f.secretSet(cmd)
+	if err != nil {
+		return session.Options{}, err
+	}
 	return session.Options{
 		Name:        f.session,
 		Volume:      f.volume,
 		Variant:     f.variant,
+		Secrets:     set,
 		Query:       f.query,
 		NoOpen:      f.noOpen,
 		Interactive: interactive,
-	}
+	}, nil
 }
 
 func newRunCommand() *cobra.Command {
@@ -98,16 +134,22 @@ func newRunCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Start or reuse a session container and its web terminal",
-		Long:  "Start or reuse a session container, inject secrets, configure git, and start the ttyd web terminal. Prompts for tokens on first run.",
+		Long: "Start or reuse a session container, inject secrets, configure git, and start the ttyd web terminal. Prompts for tokens on first run. " +
+			"New sessions get every secret unless --secrets or --no-secrets says otherwise, and the choice is remembered for the session.",
 		Example: `  safeclaw run
   safeclaw run -s work
   safeclaw run -s myproject -v ~/myproject:/home/sclaw/myproject
-  safeclaw run -s research -n -q "Research topic X"`,
+  safeclaw run -s research -n -q "Research topic X"
+  safeclaw run -s chat --secrets CLAUDE_CODE_OAUTH_TOKEN`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			opts, err := f.options(cmd, true)
+			if err != nil {
+				return err
+			}
 			m := session.NewManager(cmd.OutOrStdout())
 			m.Prompter = prompt.Terminal{Out: cmd.OutOrStdout()}
-			_, err := m.Ensure(cmd.Context(), f.options(true))
+			_, err = m.Ensure(cmd.Context(), opts)
 			return err
 		},
 	}
@@ -122,7 +164,11 @@ func newNewCommand() *cobra.Command {
 		Short: "Like run, but never prompts (fails if the Claude token is missing)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := session.NewManager(cmd.OutOrStdout()).Ensure(cmd.Context(), f.options(false))
+			opts, err := f.options(cmd, false)
+			if err != nil {
+				return err
+			}
+			_, err = session.NewManager(cmd.OutOrStdout()).Ensure(cmd.Context(), opts)
 			return err
 		},
 	}

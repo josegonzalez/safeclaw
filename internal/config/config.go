@@ -49,6 +49,11 @@ const (
 	LabelVariant = "safeclaw.variant"
 	// BaseVariant names the base image wherever a variant is expected.
 	BaseVariant = "base"
+
+	// LabelSecrets is the container label that records which secrets an
+	// interactive session receives, as comma-separated names. Containers
+	// without it get every secret, and an empty value means none.
+	LabelSecrets = "safeclaw.secrets"
 )
 
 // Dir returns the safeclaw config directory, honoring XDG_CONFIG_HOME.

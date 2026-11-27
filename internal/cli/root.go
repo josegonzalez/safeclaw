@@ -99,3 +99,12 @@ func completeVariants(*cobra.Command, []string, string) ([]string, cobra.ShellCo
 	}
 	return append([]string{config.BaseVariant}, set.Names()...), cobra.ShellCompDirectiveNoFileComp
 }
+
+// completeSecrets completes the stored secret names for --secrets.
+func completeSecrets(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+	names, err := session.NewManager(nil).SecretNames()
+	if err != nil {
+		return nil, cobra.ShellCompDirectiveError
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
+}
