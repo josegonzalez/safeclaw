@@ -17,6 +17,31 @@ RUN CGO_ENABLED=0 go build -trimpath \
         -X github.com/josegonzalez/safeclaw/internal/version.Date=${DATE}" \
       -o /out/safeclaw ./cmd/safeclaw
 
+# === BUILD ttyd, patched to accept a bracketed IPv6 Host ===
+
+FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db AS ttyd
+
+ARG DEBIAN_FRONTEND=noninteractive
+# ttyd is pinned by commit (tag 1.7.7), not by tag, so a moved tag can't
+# change what the build fetches
+ARG TTYD_COMMIT=40e79c706be14029b391f369bee6613c31667abb
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates git build-essential cmake \
+      libjson-c-dev libwebsockets-dev libuv1-dev zlib1g-dev libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+COPY setup/ttyd/bracketed-ipv6-origin.patch /tmp/bracketed-ipv6-origin.patch
+# Session URLs name [::1]:PORT, and ttyd's -O origin check otherwise never
+# matches a bracketed Host
+RUN git init -q /src && cd /src && \
+    git fetch -q --depth 1 https://github.com/tsl0922/ttyd.git "${TTYD_COMMIT}" && \
+    git checkout -q FETCH_HEAD && \
+    test "$(git rev-parse HEAD)" = "${TTYD_COMMIT}" && \
+    git apply /tmp/bracketed-ipv6-origin.patch && \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build -j "$(nproc)" && \
+    install -D -m 755 build/ttyd /out/ttyd
+
 # === RUNTIME image ===
 
 FROM ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db
@@ -52,7 +77,9 @@ RUN apt-get update && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
     apt-get update && \
     apt-get install -y gh && \
-    apt-get install -y --no-install-recommends git openssh-client jq tmux ttyd vim python3-pip unzip && \
+    apt-get install -y --no-install-recommends git openssh-client jq tmux vim python3-pip unzip && \
+    # ttyd's libraries; ttyd itself is built above
+    apt-get install -y --no-install-recommends libjson-c5 libwebsockets-evlib-uv libuv1t64 zlib1g libssl3t64 && \
     npm install -g yarn && \
     # clean apt cache
     rm -rf /var/lib/apt/lists/* && \
@@ -115,6 +142,13 @@ RUN curl -fsSLo /usr/local/bin/yt-dlp \
 # === INSTALL safeclaw (ttyd wrapper) ===
 
 COPY --from=build /out/safeclaw /usr/local/bin/safeclaw
+
+# === INSTALL ttyd ===
+
+COPY --from=ttyd /out/ttyd /usr/local/bin/ttyd
+RUN ttyd --version
+# safeclaw names [::1] in the URLs of sessions made from images with this
+LABEL io.github.josegonzalez.safeclaw.ttyd-bracketed-host="1"
 
 # === INSTALL Claude Code (native binary) ===
 

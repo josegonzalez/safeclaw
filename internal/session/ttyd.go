@@ -23,7 +23,10 @@ import (
 // must differ from the dashboard's cookie host, 127.0.0.1: cookies are not
 // scoped by port, so a session that replaced its own ttyd and got the
 // browser to load http://127.0.0.1:PORT would otherwise receive the
-// dashboard's cookie. URLs keep using localhost, which resolves to it.
+// dashboard's cookie. Session URLs name it too, as [::1], rather than
+// localhost: a browser sends a page on localhost the cookies every other
+// local app set for localhost, and may connect to 127.0.0.1 for it, where
+// nothing holds the port.
 const PublishHost = "::1"
 
 // legacyPublishHost is where sessions created before PublishHost were
@@ -60,10 +63,20 @@ func (c Credential) Token() string {
 	return base64.StdEncoding.EncodeToString([]byte(c.String()))
 }
 
-// URLWithCredential returns the session URL for a host port with the
-// credential in it, which logs a browser in to ttyd directly.
+// URLWithCredential returns the URL of a session published on PublishHost
+// at a host port, with the credential in it, which logs a browser in to
+// ttyd directly.
 func URLWithCredential(port int, c Credential) string {
-	u := url.URL{Scheme: "http", User: url.UserPassword(c.User, c.Password), Host: "localhost:" + strconv.Itoa(port)}
+	return urlOn(PublishHost, port, &c)
+}
+
+// urlOn returns the URL of a terminal published on host at port, with the
+// credential in it unless c is nil.
+func urlOn(host string, port int, c *Credential) string {
+	u := url.URL{Scheme: "http", Host: net.JoinHostPort(host, strconv.Itoa(port))}
+	if c != nil {
+		u.User = url.UserPassword(c.User, c.Password)
+	}
 	return u.String()
 }
 
@@ -76,8 +89,39 @@ func publishArgs(port int) []string {
 // publishedOnCookieHost reports whether a container's terminal is published
 // on 127.0.0.1, as sessions created before PublishHost were.
 func publishedOnCookieHost(c docker.Container) bool {
-	ip := c.HostIP(config.TTYDPort)
-	return ip == legacyPublishHost || ip == "" || ip == "0.0.0.0"
+	return publishedHost(c) == legacyPublishHost
+}
+
+// publishedHost returns the loopback address a container's terminal is
+// published on, which its URLs name: PublishHost, or legacyPublishHost for
+// a session created before it, including one published on every address.
+func publishedHost(c docker.Container) string {
+	switch ip := c.HostIP(config.TTYDPort); ip {
+	case "", "0.0.0.0":
+		return legacyPublishHost
+	case "::":
+		return PublishHost
+	default:
+		return ip
+	}
+}
+
+// urlHost returns the host the URLs of a terminal published on host name,
+// given its container's or image's labels: host itself, or localhost for
+// PublishHost from an image whose ttyd refuses a bracketed IPv6 Host.
+// That ttyd's origin check never passes for [::1]:PORT, and localhost
+// resolves to [::1].
+func urlHost(host string, labels map[string]string) string {
+	if host == PublishHost && labels[config.LabelBracketedHostTTYD] == "" {
+		return "localhost"
+	}
+	return host
+}
+
+// containerURLHost returns the host a container's terminal URLs name; see
+// urlHost.
+func containerURLHost(c docker.Container) string {
+	return urlHost(publishedHost(c), c.Config.Labels)
 }
 
 func (m *Manager) ttydDir() string {
@@ -215,20 +259,27 @@ func (m *Manager) startTTYD(ctx context.Context, name, container string, native 
 
 // Terminal is where a running session's ttyd can be reached from the host.
 type Terminal struct {
-	// Addr is the host:port to dial.
+	// Addr is the host:port the terminal is published on, which its URL
+	// names and the dashboard's relay dials.
 	Addr string
-	// Host is the Host and Origin ttyd's origin check expects,
-	// localhost:PORT.
+	// Host is the Host and Origin the relay sends, localhost:PORT. ttyd's
+	// origin check compares Origin's host, stripped of brackets, with the
+	// Host header as sent, so it never passes for a bracketed address such
+	// as [::1]:PORT. The relay's headers never reach a browser, so they
+	// carry no cookies.
 	Host string
 	// Port is the host port, which session URLs name.
 	Port       int
 	Credential Credential
+
+	// browserHost is the host its URL names; see urlHost.
+	browserHost string
 }
 
-// URL returns the terminal's URL with its credential in it; see
-// URLWithCredential.
+// URL returns the terminal's URL with its credential in it, on the address
+// it is published on; see urlHost.
 func (t *Terminal) URL() string {
-	return URLWithCredential(t.Port, t.Credential)
+	return urlOn(t.browserHost, t.Port, &t.Credential)
 }
 
 // Terminal returns where to reach a running, online interactive session's
@@ -261,17 +312,11 @@ func (m *Manager) Terminal(ctx context.Context, name string) (*Terminal, error) 
 	if err != nil {
 		return nil, fmt.Errorf("session %q: read ttyd credential: %w", name, err)
 	}
-	ip := c.HostIP(config.TTYDPort)
-	switch ip {
-	case "", "0.0.0.0":
-		ip = legacyPublishHost
-	case "::":
-		ip = PublishHost
-	}
 	return &Terminal{
-		Addr:       net.JoinHostPort(ip, strconv.Itoa(port)),
-		Host:       "localhost:" + strconv.Itoa(port),
-		Port:       port,
-		Credential: cred,
+		Addr:        net.JoinHostPort(publishedHost(*c), strconv.Itoa(port)),
+		Host:        "localhost:" + strconv.Itoa(port),
+		Port:        port,
+		Credential:  cred,
+		browserHost: containerURLHost(*c),
 	}, nil
 }

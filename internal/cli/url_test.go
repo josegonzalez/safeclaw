@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
 	"github.com/josegonzalez/safeclaw/internal/session"
 )
@@ -29,7 +30,7 @@ func urlContainers(args []string, _ string) ([]byte, error) {
 	var c map[string]any
 	switch args[2] {
 	case "safeclaw-work":
-		c = map[string]any{"State": state(true), "HostConfig": map[string]any{"PortBindings": bindings, "NetworkMode": "bridge"},
+		c = map[string]any{"State": state(true), "Config": map[string]any{"Labels": map[string]string{config.LabelBracketedHostTTYD: "1"}}, "HostConfig": map[string]any{"PortBindings": bindings, "NetworkMode": "bridge"},
 			"NetworkSettings": map[string]any{"Networks": map[string]any{"bridge": map[string]any{}}}}
 	case "safeclaw-stopped":
 		c = map[string]any{"State": state(false), "HostConfig": map[string]any{"PortBindings": bindings, "NetworkMode": "bridge"}}
@@ -66,7 +67,7 @@ func TestURLCommand(t *testing.T) {
 	}
 
 	out, err := run(t, NewRootCommand(), "url", "work")
-	if err != nil || out != "http://safeclaw:pw@localhost:7685\n" {
+	if err != nil || out != "http://safeclaw:pw@[::1]:7685\n" {
 		t.Errorf("url work = %q, %v", out, err)
 	}
 	if len(opened) != 0 {
@@ -79,7 +80,7 @@ func TestURLCommand(t *testing.T) {
 	}
 
 	out, err = run(t, NewRootCommand(), "url", "work", "--open")
-	if err != nil || out != "http://safeclaw:pw@localhost:7685\n" || !slices.Equal(opened, []string{"http://safeclaw:pw@localhost:7685"}) {
+	if err != nil || out != "http://safeclaw:pw@[::1]:7685\n" || !slices.Equal(opened, []string{"http://safeclaw:pw@[::1]:7685"}) {
 		t.Errorf("url work --open = %q, %v, opened %q", out, err, opened)
 	}
 

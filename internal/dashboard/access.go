@@ -21,10 +21,10 @@ import (
 const tokenParam = "token"
 
 // cookieHost is the only host the session cookie is set for. Cookies are
-// not scoped by port, so a cookie for localhost would also be sent to every
+// not scoped by port, so a cookie for localhost would also be sent to a
 // session's web terminal at localhost:<port>, which is served from inside
-// the container. Session URLs use localhost, so a cookie for 127.0.0.1
-// never reaches them.
+// the container. Session URLs use [::1], or localhost for images whose
+// ttyd refuses [::1], so a cookie for 127.0.0.1 never reaches them.
 const cookieHost = "127.0.0.1"
 
 // NewToken returns a random launch token.

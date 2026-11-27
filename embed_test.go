@@ -123,6 +123,43 @@ func TestDockerfilePinsClaudeCodeTipsByCommit(t *testing.T) {
 	}
 }
 
+// TestDockerfileBuildsPatchedTTYD checks that ttyd is built from a pinned
+// commit with the patch that lets its origin check accept a bracketed IPv6
+// Host, rather than installed from apt, and that the image carries the
+// label safeclaw reads to name [::1] in session URLs.
+func TestDockerfileBuildsPatchedTTYD(t *testing.T) {
+	b, err := fs.ReadFile(BuildContext, "Dockerfile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(b)
+	if !regexp.MustCompile(`(?m)^ARG TTYD_COMMIT=[0-9a-f]{40}$`).MatchString(dockerfile) {
+		t.Error("Dockerfile does not pin TTYD_COMMIT to a 40-hex commit SHA")
+	}
+	for _, want := range []string{
+		"COPY setup/ttyd/bracketed-ipv6-origin.patch /tmp/bracketed-ipv6-origin.patch\n",
+		`git fetch -q --depth 1 https://github.com/tsl0922/ttyd.git "${TTYD_COMMIT}"`,
+		`test "$(git rev-parse HEAD)" = "${TTYD_COMMIT}"`,
+		"git apply /tmp/bracketed-ipv6-origin.patch",
+		"COPY --from=ttyd /out/ttyd /usr/local/bin/ttyd\n",
+		"LABEL " + config.LabelBracketedHostTTYD + `="1"` + "\n",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("Dockerfile is missing %q", want)
+		}
+	}
+	if regexp.MustCompile(`apt-get install[^\n]*\sttyd(\s|$)`).MatchString(dockerfile) {
+		t.Error("Dockerfile installs ttyd from apt, which refuses a bracketed IPv6 Host")
+	}
+	patch, err := fs.ReadFile(BuildContext, "setup/ttyd/bracketed-ipv6-origin.patch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(patch), "+++ b/src/protocol.c") || !strings.Contains(string(patch), `"[%s]:%d"`) {
+		t.Errorf("patch does not bracket IPv6 origins in src/protocol.c:\n%s", patch)
+	}
+}
+
 // TestDockerfileRootOwnsWhatClaudeCodeLoads checks that the files and folders
 // Claude Code and the shell load are made root-owned, so the agent cannot
 // rewrite them, and that MCP servers come only from the managed config.
