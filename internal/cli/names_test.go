@@ -10,11 +10,14 @@ import (
 	"github.com/josegonzalez/safeclaw/internal/session"
 )
 
-// fakeNames makes newManager inspect containers from names, which hold the
-// only containers that exist.
+// fakeNames makes newManager list and inspect containers from names, which
+// hold the only containers that exist.
 func fakeNames(t *testing.T, names ...string) *dockertest.Runner {
 	t.Helper()
 	r := &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "ps" {
+			return []byte(strings.Join(names, "\n")), nil
+		}
 		if len(args) > 2 && args[0] == "container" && args[1] == "inspect" && slices.Contains(names, args[2]) {
 			return []byte(`[{"Id":"id","Name":"/` + args[2] + `","State":{"Status":"running","Running":true}}]`), nil
 		}
@@ -28,9 +31,9 @@ func fakeNames(t *testing.T, names ...string) *dockertest.Runner {
 	return r
 }
 
-// CLI names are lowercased like the dashboard's, and a container made with
-// a mixed-case name before that is refused instead of being mistaken for
-// the lowercase session.
+// CLI names are lowercased like the dashboard's, and a name matching a
+// container made with a mixed-case name before that, in any case, is
+// refused instead of being mistaken for the lowercase session.
 func TestRunSessionNames(t *testing.T) {
 	fakeNames(t, "safeclaw-Old")
 	for in, want := range map[string]string{"": "", "work": "work", "Work": "work", "safeclaw-Work": "work"} {
@@ -44,8 +47,10 @@ func TestRunSessionNames(t *testing.T) {
 			t.Errorf("-s %q accepted", bad)
 		}
 	}
-	if _, err := parseRunFlags(t, "-s", "Old"); !errors.Is(err, session.ErrLegacyName) {
-		t.Errorf("-s Old: err = %v, want ErrLegacyName", err)
+	for _, legacy := range []string{"Old", "old", "OLD", "safeclaw-old"} {
+		if _, err := parseRunFlags(t, "-s", legacy); !errors.Is(err, session.ErrLegacyName) || !strings.Contains(err.Error(), "docker rm -f safeclaw-Old") {
+			t.Errorf("-s %s: err = %v, want ErrLegacyName", legacy, err)
+		}
 	}
 }
 
@@ -62,11 +67,14 @@ func TestRunFreshHistoryFlag(t *testing.T) {
 	}
 }
 
-// Commands taking a session name refuse a legacy mixed-case one before
-// acting on anything.
+// Commands taking a session name refuse a legacy mixed-case one, and the
+// lowercase session that shares its state, before acting on anything.
 func TestCommandsRefuseLegacyNames(t *testing.T) {
-	r := fakeNames(t, "safeclaw-Old")
-	for _, args := range [][]string{{"stop", "Old"}, {"rm", "-f", "Old"}, {"attach", "Old"}, {"net", "off", "Old"}, {"net", "on", "Old"}, {"url", "Old"}} {
+	r := fakeNames(t, "safeclaw-Old", "safeclaw-old")
+	for _, args := range [][]string{
+		{"stop", "Old"}, {"rm", "-f", "Old"}, {"attach", "Old"}, {"net", "off", "Old"}, {"net", "on", "Old"}, {"url", "Old"},
+		{"stop", "old"}, {"rm", "-f", "old"}, {"attach", "old"}, {"net", "off", "old", "--owner", "x"}, {"net", "on", "old", "--owner", "x"}, {"url", "old"},
+	} {
 		r.Calls = nil
 		root := NewRootCommand()
 		_, err := run(t, root, args...)
@@ -74,7 +82,7 @@ func TestCommandsRefuseLegacyNames(t *testing.T) {
 			t.Errorf("%v: err = %v, want ErrLegacyName", args, err)
 		}
 		for _, c := range r.Commands() {
-			if !strings.HasPrefix(c, "container inspect") {
+			if !strings.HasPrefix(c, "container inspect") && !strings.HasPrefix(c, "ps ") {
 				t.Errorf("%v: ran %q", args, c)
 			}
 		}
