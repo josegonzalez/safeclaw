@@ -33,6 +33,9 @@ type fakeImages struct {
 	images     map[string]string
 	containers string
 	failPull   map[string]bool
+	// digests answers `buildx imagetools inspect` with each ref's
+	// manifest digest.
+	digests map[string]string
 	// dockerfiles records the Dockerfile of each variant build, by tag.
 	dockerfiles map[string]string
 }
@@ -44,6 +47,11 @@ func (f *fakeImages) handle(args []string, _ string) ([]byte, error) {
 			return []byte(id + "\n"), nil
 		}
 		return nil, dockertest.NotFound(args)
+	case args[0] == "buildx" && args[1] == "imagetools" && args[2] == "inspect":
+		if d, ok := f.digests[args[3]]; ok {
+			return []byte(`{"mediaType":"application/vnd.oci.image.index.v1+json","digest":"` + d + `"}` + "\n"), nil
+		}
+		return nil, errors.New("not found")
 	case args[0] == "pull" && f.failPull[args[1]]:
 		return nil, errors.New("manifest unknown")
 	case args[0] == "build" && args[1] == "-t" && strings.HasPrefix(args[2], "safeclaw:"):

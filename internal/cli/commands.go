@@ -19,13 +19,17 @@ import (
 func newPullCommand() *cobra.Command {
 	var tag string
 	var variants []string
+	var verify bool
 	cmd := &cobra.Command{
 		Use:   "pull",
 		Short: "Pull the published safeclaw image and its variants, and tag them locally",
 		Long: "Pull the published safeclaw image and tag it locally. Then fetch each variant named with --variant, and every variant already present locally: " +
-			"built-in variants are pulled, and variants from the config file are built on the pulled image.",
+			"built-in variants are pulled, and variants from the config file are built on the pulled image. " +
+			"With --verify, each published image's tag is resolved to a digest, the digest's build provenance attestation is checked with `gh attestation verify`, " +
+			"and that digest is pulled and tagged; this needs the GitHub CLI, logged in, and docker buildx, and fails for releases made before attestations were added.",
 		Example: `  safeclaw pull
-  safeclaw pull --variant sandbox`,
+  safeclaw pull --variant sandbox
+  safeclaw pull --verify`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
@@ -37,21 +41,23 @@ func newPullCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Checked before anything is pulled.
+			var ver *verifier
+			if verify {
+				if ver, err = newVerifier(ctx); err != nil {
+					return err
+				}
+			}
 			d := newDocker()
 			refresh, err := variantsToRefresh(ctx, d, set, variants)
 			if err != nil {
 				return err
 			}
-			ref := config.RemoteImage + ":" + tag
-			if err := d.R.Passthrough(ctx, "pull", ref); err != nil {
+			if err := pullImage(ctx, d, out, ver, config.RemoteImage+":"+tag, config.ImageName); err != nil {
 				return err
 			}
-			if err := d.Tag(ctx, ref, config.ImageName); err != nil {
-				return err
-			}
-			fmt.Fprintf(out, "Tagged %s as %s\n", ref, config.ImageName)
 			for _, v := range refresh {
-				if err := pullVariant(ctx, d, out, v, tag); err != nil {
+				if err := pullVariant(ctx, d, out, ver, v, tag); err != nil {
 					return err
 				}
 			}
@@ -61,6 +67,7 @@ func newPullCommand() *cobra.Command {
 	cmd.Flags().StringVar(&tag, "tag", "", "image tag to pull (default: this binary's version, or latest)")
 	cmd.Flags().StringSliceVar(&variants, "variant", nil, "also fetch this image variant (repeatable)")
 	_ = cmd.RegisterFlagCompletionFunc("variant", completeVariants)
+	cmd.Flags().BoolVar(&verify, "verify", false, "check each published image's build provenance attestation with gh attestation verify and pull it by the verified digest")
 	return cmd
 }
 
