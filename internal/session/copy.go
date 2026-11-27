@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
@@ -58,6 +60,10 @@ var ErrFileExists = errors.New("already exists (--force overwrites)")
 
 // ErrIsDirectory is returned when cp-out would replace a host directory.
 var ErrIsDirectory = errors.New("is a directory")
+
+// ErrUnsafeName is returned when cp-out would keep a file whose name is not
+// safe to create and print on the host.
+var ErrUnsafeName = errors.New("is not a safe file name: names must be printable UTF-8 and must not start with -")
 
 // copyExec runs copy commands as the sandbox user, so a copy can only read
 // and write what the sandbox user can.
@@ -353,9 +359,40 @@ func topLevel(name string) (string, bool) {
 	return n, true
 }
 
+// printable reports whether s is valid UTF-8 made only of printable runes
+// (unicode.IsPrint: no control, format, or non-ASCII space characters).
+func printable(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// safeName reports whether a sandbox file name is safe to create and print
+// on the host: printable, and not starting with - so it can't pass for an
+// option.
+func safeName(name string) bool {
+	return printable(name) && !strings.HasPrefix(name, "-")
+}
+
+// QuotePath returns p as is when it is printable, and quoted with Go
+// escapes otherwise, so it prints as one line with no terminal escapes.
+func QuotePath(p string) string {
+	if printable(p) {
+		return p
+	}
+	return strconv.Quote(p)
+}
+
 // extractTop writes the top-level regular files of a tar stream whose
 // names match one of globs into dir, returning their names. A limit above
-// zero caps their total size. Two entries with the same name are an error.
+// zero caps their total size. Two entries with the same name, or a kept
+// name that safeName refuses, are an error.
 func extractTop(r io.Reader, dir string, globs []string, limit int64) ([]string, error) {
 	tr := tar.NewReader(r)
 	var names []string
@@ -373,8 +410,11 @@ func extractTop(r io.Reader, dir string, globs []string, limit int64) ([]string,
 		if !ok || hdr.Typeflag != tar.TypeReg || !matchAny(globs, name) {
 			continue
 		}
+		if !safeName(name) {
+			return nil, fmt.Errorf("%q %w", name, ErrUnsafeName)
+		}
 		if seen[name] {
-			return nil, fmt.Errorf("%s appears more than once", name)
+			return nil, fmt.Errorf("%q appears more than once", name)
 		}
 		seen[name] = true
 		// Compare against what is left rather than adding first: total never
@@ -393,14 +433,20 @@ func extractTop(r io.Reader, dir string, globs []string, limit int64) ([]string,
 			err = closeErr
 		}
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
+			return nil, fmt.Errorf("%q: %w", name, err)
 		}
 		names = append(names, name)
 	}
 }
 
+// matchAny reports whether name matches one of globs. As in a shell, a
+// name starting with . only matches a glob that starts with . too, so a
+// glob like * can't bring hidden files onto the host.
 func matchAny(globs []string, name string) bool {
 	for _, g := range globs {
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(g, ".") {
+			continue
+		}
 		if ok, _ := path.Match(g, name); ok {
 			return true
 		}
@@ -423,9 +469,9 @@ func placeFiles(tmp, hostDir string, names []string, force bool) ([]string, erro
 		case err != nil:
 			return nil, err
 		case fi.IsDir():
-			return nil, fmt.Errorf("%s %w", filepath.Join(hostDir, n), ErrIsDirectory)
+			return nil, fmt.Errorf("%q %w", filepath.Join(hostDir, n), ErrIsDirectory)
 		case !force:
-			clashes = append(clashes, filepath.Join(hostDir, n))
+			clashes = append(clashes, strconv.Quote(filepath.Join(hostDir, n)))
 		}
 	}
 	if len(clashes) > 0 {
@@ -458,9 +504,9 @@ func placeFiles(tmp, hostDir string, names []string, force bool) ([]string, erro
 func placeError(to string, err error) error {
 	switch {
 	case errors.Is(err, fs.ErrExist):
-		return fmt.Errorf("%s %w", to, ErrFileExists)
+		return fmt.Errorf("%q %w", to, ErrFileExists)
 	case errors.Is(err, errors.ErrUnsupported), errors.Is(err, syscall.EINVAL):
-		return fmt.Errorf("%s: %w: the host filesystem may not support renaming without replacing; --force overwrites instead", to, err)
+		return fmt.Errorf("%q: %w: the host filesystem may not support renaming without replacing; --force overwrites instead", to, err)
 	}
 	return err
 }

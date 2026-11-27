@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -534,6 +535,135 @@ func TestParseSize(t *testing.T) {
 	for _, in := range []string{"", "g", "-1", "+1", "1.5g", "1gb", "9999999999t"} {
 		if _, err := ParseSize(in); err == nil {
 			t.Errorf("ParseSize(%q) should fail", in)
+		}
+	}
+}
+
+func TestCopyOutRefusesUnsafeNames(t *testing.T) {
+	for _, name := range []string{
+		"a\nb.txt",            // newline
+		"a\tb.txt",            // tab
+		"\x1b[31mred.txt",     // terminal escape
+		"bell\a.txt",          // other C0 control
+		"del\x7f.txt",         // DEL
+		"csi\u009b31m.txt",    // C1 control
+		"evil\u202etxt.exe",   // bidi override (format)
+		"zero\u200bwidth.txt", // zero-width space (format)
+		"nb\u00a0sp.txt",      // non-ASCII space
+		"bad\xff.txt",         // not UTF-8
+		"-rf.txt",             // looks like an option
+	} {
+		host := t.TempDir()
+		stream := makeTar(t, entry{"./ok.txt", tar.TypeReg, "ok", 0}, entry{"./" + name, tar.TypeReg, "x", 0})
+		m, _ := newCopyManager(t, &copyFake{tarOut: stream})
+		_, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*"}})
+		if !errors.Is(err, ErrUnsafeName) {
+			t.Errorf("%q: err = %v, want ErrUnsafeName", name, err)
+			continue
+		}
+		if want := strconv.Quote(name); !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: err = %v, want it to name %s", name, err, want)
+		}
+		if got := dirContents(t, host); len(got) != 0 {
+			t.Errorf("%q: left %v in the host dir", name, got)
+		}
+	}
+}
+
+func TestCopyOutIgnoresUnsafeNamesNotKept(t *testing.T) {
+	// Entries that would be dropped anyway don't stop the copy.
+	stream := makeTar(t,
+		entry{"./ok.txt", tar.TypeReg, "ok", 0},
+		entry{"./a\nb.log", tar.TypeReg, "x", 0},
+		entry{"./c\nd.txt", tar.TypeSymlink, "/etc/passwd", 0},
+		entry{"./e\nf.txt/", tar.TypeDir, "", 0o755},
+	)
+	host := t.TempDir()
+	m, _ := newCopyManager(t, &copyFake{tarOut: stream})
+	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*.txt"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := dirContents(t, host); !reflect.DeepEqual(got, map[string]string{"ok.txt": "ok"}) {
+		t.Errorf("host dir = %v", got)
+	}
+}
+
+func TestCopyOutHiddenFiles(t *testing.T) {
+	stream := makeTar(t,
+		entry{"./a.txt", tar.TypeReg, "a", 0},
+		entry{"./.envrc", tar.TypeReg, "evil", 0},
+		entry{"./.hidden.txt", tar.TypeReg, "h", 0},
+	)
+	for _, tc := range []struct {
+		only []string
+		want map[string]string
+	}{
+		{[]string{"*"}, map[string]string{"a.txt": "a"}},
+		{[]string{"*.txt"}, map[string]string{"a.txt": "a"}},
+		{[]string{"?*"}, map[string]string{"a.txt": "a"}},
+		{[]string{"[.a]*"}, map[string]string{"a.txt": "a"}},
+		{[]string{".*.txt"}, map[string]string{".hidden.txt": "h"}},
+		{[]string{"*", ".envrc"}, map[string]string{"a.txt": "a", ".envrc": "evil"}},
+	} {
+		host := t.TempDir()
+		m, _ := newCopyManager(t, &copyFake{tarOut: stream})
+		if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: tc.only}); err != nil {
+			t.Fatalf("%v: %v", tc.only, err)
+		}
+		if got := dirContents(t, host); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("%v: host dir = %v, want %v", tc.only, got, tc.want)
+		}
+	}
+}
+
+func TestCopyOutQuotesNames(t *testing.T) {
+	// Errors name files with %q, so a host directory with odd characters
+	// still prints on one line.
+	host := filepath.Join(t.TempDir(), "res\nults")
+	if err := os.Mkdir(host, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(host, "a.txt"), "old")
+	m, _ := newCopyManager(t, &copyFake{tarOut: makeTar(t, entry{"./a.txt", tar.TypeReg, "new", 0})})
+	_, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*"}})
+	if want := strconv.Quote(filepath.Join(host, "a.txt")) + " " + ErrFileExists.Error(); err == nil || err.Error() != want {
+		t.Errorf("err = %v, want %s", err, want)
+	}
+	if err := os.Mkdir(filepath.Join(host, "d.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m, _ = newCopyManager(t, &copyFake{tarOut: makeTar(t, entry{"./d.txt", tar.TypeReg, "new", 0})})
+	_, err = m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*"}, Force: true})
+	if want := strconv.Quote(filepath.Join(host, "d.txt")) + " " + ErrIsDirectory.Error(); err == nil || err.Error() != want {
+		t.Errorf("err = %v, want %s", err, want)
+	}
+
+	if err := placeError("/h/a\x1b.txt", fs.ErrExist); err.Error() != `"/h/a\x1b.txt" `+ErrFileExists.Error() {
+		t.Errorf("placeError = %v", err)
+	}
+	if err := placeError("/h/a\x1b.txt", syscall.EINVAL); !strings.HasPrefix(err.Error(), `"/h/a\x1b.txt": `) {
+		t.Errorf("placeError = %v", err)
+	}
+	dup := makeTar(t, entry{"./a.txt", tar.TypeReg, "1", 0}, entry{"a.txt", tar.TypeReg, "2", 0})
+	if _, err := extractTop(bytes.NewReader(dup), t.TempDir(), []string{"*"}, 0); err == nil || err.Error() != `"a.txt" appears more than once` {
+		t.Errorf("duplicate err = %v", err)
+	}
+	short := makeTar(t, entry{"./a.txt", tar.TypeReg, "12345", 0})[:514]
+	if _, err := extractTop(bytes.NewReader(short), t.TempDir(), []string{"*"}, 0); err == nil || !strings.HasPrefix(err.Error(), `"a.txt": `) {
+		t.Errorf("short read err = %v", err)
+	}
+}
+
+func TestQuotePath(t *testing.T) {
+	for in, want := range map[string]string{
+		"/sandbox/in/1-a b.txt": "/sandbox/in/1-a b.txt",
+		"/h/résumé.pdf":         "/h/résumé.pdf",
+		"/h/a\nb":               `"/h/a\nb"`,
+		"/h/\x1b]0;x\a":         `"/h/\x1b]0;x\a"`,
+		"/h/\xff":               `"/h/\xff"`,
+	} {
+		if got := QuotePath(in); got != want {
+			t.Errorf("QuotePath(%q) = %s, want %s", in, got, want)
 		}
 	}
 }

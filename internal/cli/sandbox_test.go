@@ -197,3 +197,18 @@ func TestSandboxCopyCommands(t *testing.T) {
 		t.Errorf("bad --max-size: err = %v", err)
 	}
 }
+
+func TestWritePaths(t *testing.T) {
+	var buf strings.Builder
+	paths := []string{"/sandbox/in/1-report.zip", "/sandbox/in/2-a\nb.txt", "/sandbox/in/3-\x1b[31mred", "/sandbox/in/4-\xff"}
+	if err := writePaths(&buf, paths); err != nil {
+		t.Fatal(err)
+	}
+	want := "/sandbox/in/1-report.zip\n" +
+		`"/sandbox/in/2-a\nb.txt"` + "\n" +
+		`"/sandbox/in/3-\x1b[31mred"` + "\n" +
+		`"/sandbox/in/4-\xff"` + "\n"
+	if got := buf.String(); got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+}

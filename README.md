@@ -233,7 +233,7 @@ The choice is remembered for the session, so rerunning `safeclaw run -s chat` or
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY) |
 | `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`. |
 | `safeclaw sandbox cp-in NAME FILE...` | Copy regular host files into a running sandbox as `N-name`, owned by the sandbox user, refusing links and other file types. `--to` picks a directory under `/sandbox` (default `/sandbox/in`). |
-| `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, and nested files. Existing files are refused unless `--force` is given, and `--max-size` (default `1g`) caps the total. |
+| `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given, and `--max-size` (default `1g`) caps the total. |
 | `safeclaw sandbox ls` | List sandboxes |
 | `safeclaw sandbox stop NAME` | Stop a sandbox |
 | `safeclaw sandbox rm NAME` | Delete a sandbox and its `/sandbox` volume |

@@ -203,10 +203,11 @@ func completeSandboxFirst(cmd *cobra.Command, args []string, toComplete string) 
 	return nil, cobra.ShellCompDirectiveDefault
 }
 
-// writeLines writes each line to out.
-func writeLines(out io.Writer, lines []string) error {
-	for _, l := range lines {
-		if _, err := fmt.Fprintln(out, l); err != nil {
+// writePaths writes each path to out on its own line, quoted when it is not
+// printable so it can't send escapes to the terminal or split a line.
+func writePaths(out io.Writer, paths []string) error {
+	for _, p := range paths {
+		if _, err := fmt.Fprintln(out, session.QuotePath(p)); err != nil {
 			return err
 		}
 	}
@@ -221,7 +222,8 @@ func newSandboxCopyInCommand() *cobra.Command {
 		Long: "Copy regular host files into a running sandbox, owned by the sandbox user.\n\n" +
 			"Symbolic links and anything that is not a regular file are refused before anything is copied. " +
 			"Each file is named N-NAME, with N continuing after the highest number already in the destination, " +
-			"so files with the same name never overwrite each other. The container path of each file is printed, in order.",
+			"so files with the same name never overwrite each other. The container path of each file is printed, in order, " +
+			"quoted when it is not printable text.",
 		Args:              cobra.MinimumNArgs(2),
 		ValidArgsFunction: completeSandboxFirst,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -229,7 +231,7 @@ func newSandboxCopyInCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return writeLines(cmd.OutOrStdout(), paths)
+			return writePaths(cmd.OutOrStdout(), paths)
 		},
 	}
 	cmd.Flags().StringVar(&to, "to", session.DefaultCopyDest, "destination directory, under "+config.SandboxDir)
@@ -245,8 +247,10 @@ func newSandboxCopyOutCommand() *cobra.Command {
 		Short: "Copy matching files out of a running sandbox",
 		Long: "Copy the regular files directly in CONTAINER_DIR whose names match an --only glob into the existing HOST_DIR.\n\n" +
 			"Symbolic links, hard links, directories, other file types, and anything in subdirectories are dropped. " +
+			"A kept file whose name is not printable UTF-8 or starts with - refuses the whole copy, and as in a shell, " +
+			"names starting with . only match a glob that starts with . too. " +
 			"Files are read as the sandbox user and written with mode 0644, less the umask. Nothing is written unless every file arrives, " +
-			"and existing files are refused unless --force is set. The host path of each file is printed.",
+			"and existing files are refused unless --force is set. The host path of each file is printed, quoted when it is not printable text.",
 		Args:              cobra.ExactArgs(3),
 		ValidArgsFunction: completeSandboxFirst,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -262,7 +266,7 @@ func newSandboxCopyOutCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return writeLines(cmd.OutOrStdout(), paths)
+			return writePaths(cmd.OutOrStdout(), paths)
 		},
 	}
 	cmd.Flags().StringArrayVar(&only, "only", nil, "keep files whose names match this glob (repeatable)")
