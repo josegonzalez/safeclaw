@@ -332,6 +332,16 @@ td.actions button + button {
     margin-bottom: 12px;
 }
 
+.auth-banner {
+    border: 1px solid #5a4a30;
+    color: #d4a55a;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    margin-bottom: 14px;
+}
+.auth-banner code { color: #c9c5c0; }
+
 /* Modal dialogs */
 dialog.modal {
     background: #1c1917;

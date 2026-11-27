@@ -38,6 +38,7 @@ type Sessions interface {
 	NetOn(ctx context.Context, name string, opts session.NetOnOptions) (*session.NetResult, error)
 	Variants() (*variant.Set, error)
 	SecretNames() ([]string, error)
+	ClaudeTokenStatus(now time.Time) (session.TokenStatus, error)
 }
 
 // Options configures the dashboard.
@@ -161,6 +162,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /fragments/sessions", s.handleFragment("sessions"))
 	mux.HandleFunc("GET /fragments/frames", s.handleFragment("frames"))
+	mux.HandleFunc("GET /fragments/auth", s.handleFragment("auth-banner"))
 	mux.HandleFunc("GET /events", s.handleEvents)
 
 	mux.HandleFunc("POST /sessions", s.handleCreate)
@@ -246,6 +248,10 @@ type view struct {
 	// SecretErr is set when they could not be read.
 	SecretNames []string
 	SecretErr   string
+	// Token is the state of the stored Claude Code token, nil when it
+	// could not be read, and TokenErr says why.
+	Token    *session.TokenStatus
+	TokenErr string
 }
 
 func (s *Server) load(ctx context.Context) view {
@@ -264,6 +270,11 @@ func (s *Server) load(ctx context.Context) view {
 		v.SecretErr = err.Error()
 	} else {
 		v.SecretNames = names
+	}
+	if st, err := s.sessions.ClaudeTokenStatus(time.Now()); err != nil {
+		v.TokenErr = err.Error()
+	} else {
+		v.Token = &st
 	}
 	for _, x := range list {
 		if x.Active && x.URL != "" {

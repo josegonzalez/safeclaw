@@ -54,6 +54,10 @@ const (
 	// interactive session receives, as comma-separated names. Containers
 	// without it get every secret, and an empty value means none.
 	LabelSecrets = "safeclaw.secrets"
+
+	// LabelAuth marks the short-lived container `safeclaw auth login` runs
+	// `claude setup-token` in.
+	LabelAuth = "safeclaw.auth"
 )
 
 // Dir returns the safeclaw config directory, honoring XDG_CONFIG_HOME.
@@ -71,9 +75,17 @@ func File() string {
 	return filepath.Join(Dir(), "config.yaml")
 }
 
-// SecretsDir returns the directory holding one file per env var.
+// SecretsDir returns the directory holding one file per env var. It is used
+// when no system keychain is available, and secrets found there are moved
+// into the keychain when one is.
 func SecretsDir() string {
 	return filepath.Join(Dir(), ".secrets")
+}
+
+// SecretsLockPath returns the file locked while the keychain index of
+// secrets changes.
+func SecretsLockPath() string {
+	return filepath.Join(Dir(), "secrets.lock")
 }
 
 // SessionsDir returns the directory holding per-session history.

@@ -17,6 +17,10 @@
         <button class="new-btn" type="button" data-open-dialog="new-session-modal">+ new</button>
     </header>
 
+    <div id="auth-banner" hx-get="/fragments/auth" hx-trigger="sessions from:body" hx-swap="innerMorph">
+        {{template "auth-banner" .}}
+    </div>
+
     <div id="sessions" hx-get="/fragments/sessions" hx-trigger="sessions from:body" hx-swap="innerMorph">
         {{template "sessions" .}}
     </div>

@@ -43,3 +43,16 @@
     <button class="modal-submit" type="button" data-copy="session-exec-cmd">copy</button>
 </div>
 {{end}}
+
+{{define "auth-banner"}}
+{{- with .Token}}
+{{- if eq .State "missing"}}
+<p class="auth-banner">No Claude Code token, so new sessions can't log in. Run <code>safeclaw auth login</code>, or pipe one to <code>safeclaw auth set</code>.</p>
+{{- else if eq .State "expired"}}
+<p class="auth-banner">The Claude Code token expired on {{.ExpiresAt.Format "2006-01-02"}}. Run <code>safeclaw auth login</code> to replace it.</p>
+{{- else if eq .State "expiring"}}
+<p class="auth-banner">The Claude Code token expires on {{.ExpiresAt.Format "2006-01-02"}} (in {{.DaysLeft}} days). Run <code>safeclaw auth login</code> to replace it.</p>
+{{- end}}
+{{- end}}
+{{- if .TokenErr}}<p class="auth-banner">could not read the Claude Code token: {{.TokenErr}}</p>{{end}}
+{{- end}}

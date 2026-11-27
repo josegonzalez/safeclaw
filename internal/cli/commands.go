@@ -13,9 +13,7 @@ import (
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/dashboard"
-	"github.com/josegonzalez/safeclaw/internal/envtui"
 	"github.com/josegonzalez/safeclaw/internal/prompt"
-	"github.com/josegonzalez/safeclaw/internal/secrets"
 	"github.com/josegonzalez/safeclaw/internal/session"
 	"github.com/josegonzalez/safeclaw/internal/version"
 	"github.com/josegonzalez/safeclaw/internal/wrapper"
@@ -134,7 +132,7 @@ func newRunCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Start or reuse a session container and its web terminal",
-		Long: "Start or reuse a session container, inject secrets, configure git, and start the ttyd web terminal. Prompts for tokens on first run. " +
+		Long: "Start or reuse a session container, inject secrets, configure git, and start the ttyd web terminal. Prompts for tokens on first run when attached to a terminal. " +
 			"New sessions get every secret unless --secrets or --no-secrets says otherwise, and the choice is remembered for the session.",
 		Example: `  safeclaw run
   safeclaw run -s work
@@ -143,12 +141,16 @@ func newRunCommand() *cobra.Command {
   safeclaw run -s chat --secrets CLAUDE_CODE_OAUTH_TOKEN`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			opts, err := f.options(cmd, true)
+			// Without a terminal there is no one to prompt, so behave like `new`.
+			opts, err := f.options(cmd, stdinIsTerminal(cmd))
 			if err != nil {
 				return err
 			}
 			m := session.NewManager(cmd.OutOrStdout())
-			m.Prompter = prompt.Terminal{Out: cmd.OutOrStdout()}
+			m.Prompter = prompt.Terminal{
+				Out:   cmd.OutOrStdout(),
+				Login: func() (string, error) { return m.SetupToken(cmd.Context()) },
+			}
 			_, err = m.Ensure(cmd.Context(), opts)
 			return err
 		},
@@ -198,17 +200,6 @@ func newDashboardCommand() *cobra.Command {
 	cmd.Flags().IntVar(&port, "port", config.DashboardPort, "port to listen on (bound to 127.0.0.1)")
 	cmd.Flags().BoolVar(&dev, "dev", false, "serve templates and static files from ./internal/dashboard for live editing")
 	return cmd
-}
-
-func newEnvCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:   "env",
-		Short: "Manage environment variables injected into sessions",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			return envtui.Run(secrets.Store{Dir: config.SecretsDir()}, cmd.OutOrStdout())
-		},
-	}
 }
 
 func newListCommand() *cobra.Command {

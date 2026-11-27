@@ -103,8 +103,8 @@ func TestEnsureLimitedSecrets(t *testing.T) {
 	ctx := context.Background()
 	w := &world{image: "img", containers: map[string]*fakeContainer{}, native: true}
 	m, r := newTestManager(t, w)
-	_, _ = m.Secrets.Set(secrets.GitHubToken, "gh")
-	_, _ = m.Secrets.Set("OTHER", "x")
+	_ = m.Secrets.Set(secrets.GitHubToken, "gh")
+	_ = m.Secrets.Set("OTHER", "x")
 
 	if _, err := m.Ensure(ctx, Options{Name: "chat", Secrets: only(t, secrets.ClaudeToken), NoOpen: true}); err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestEnsureNoSecrets(t *testing.T) {
 	var out bytes.Buffer
 	m.Out = &out
 	_ = m.Secrets.Delete(secrets.ClaudeToken)
-	_, _ = m.Secrets.Set(secrets.GitHubToken, "gh")
+	_ = m.Secrets.Set(secrets.GitHubToken, "gh")
 	// Neither token is asked for, since the session gets neither.
 	m.Prompter = failPrompter{t}
 
@@ -239,7 +239,7 @@ func TestEnsureSecretsReuseAndRecreate(t *testing.T) {
 	for _, set := range []*SecretSet{nil, only(t, "CLAUDE_CODE_OAUTH_TOKEN", "GONE")} {
 		w := existing(limited())
 		m, r := newTestManager(t, w)
-		_, _ = m.Secrets.Set(secrets.GitHubToken, "gh")
+		_ = m.Secrets.Set(secrets.GitHubToken, "gh")
 		var out bytes.Buffer
 		m.Out = &out
 		_, err := m.Ensure(ctx, Options{Name: "p", Secrets: set, NoOpen: true})
@@ -339,7 +339,7 @@ func TestListSecrets(t *testing.T) {
 
 func TestSecretNames(t *testing.T) {
 	m, _ := newTestManager(t, &world{})
-	_, _ = m.Secrets.Set("A", "1")
+	_ = m.Secrets.Set("A", "1")
 	names, err := m.SecretNames()
 	if err != nil || !slices.Equal(names, []string{"A", secrets.ClaudeToken}) {
 		t.Errorf("SecretNames = %v, %v", names, err)

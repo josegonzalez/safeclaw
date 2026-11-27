@@ -18,6 +18,8 @@ The dialog also has a secrets picker: `all secrets` (the default), `no secrets`,
 
 Interactive sessions have an `offline` or `online` button next to stop or delete, and in the frame bar. `offline` takes the session offline with the unnamed hold. `online` releases the unnamed hold; if other owners still hold the session, it turns into a `force online?` button listing them in its tooltip, which releases every hold when clicked, and reverts after 3 seconds otherwise. Offline sessions show an `offline` badge with their holders and reasons in its tooltip, `offline` in place of their URL, and a placeholder in place of the iframe, which comes back when they reconnect. See [offline sessions](architecture.md#offline-sessions).
 
+A banner above the table says when no Claude Code token is stored, or when it has expired or expires within 30 days, and names `safeclaw auth login`. It re-fetches with the table on every `sessions` event. Storing a token fires no docker event, so the banner clears on the next session change or page load. See [Claude Code](architecture.md#claude-code).
+
 Dashboard actions respond with `HX-Trigger: sessions`, so the page also refreshes right away without waiting for the docker event.
 
 ## Two-click confirm
@@ -30,6 +32,7 @@ Stop and delete need two clicks. The first POST returns a "stop?"/"delete?" butt
 |-------|---------|
 | `GET /` | Full page |
 | `GET /fragments/sessions`, `GET /fragments/frames` | Table (or empty state) and frames grid |
+| `GET /fragments/auth` | Claude Code token banner, empty while the token is valid |
 | `GET /events` | SSE stream of `sessions` events |
 | `POST /sessions` | Create a session (`name`, `volume`, `variant`, `secrets` as `all`, `none`, or `only` with a `secret` field per name, `query`, `open_tab`). Errors return 422 and render in the dialog |
 | `GET /sessions/validate?name=` | Name hint shown while typing |
