@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
@@ -45,6 +47,76 @@ const (
 // reach cmd exactly as given.
 func SandboxCommand(cmd []string) []string {
 	return append([]string{"/bin/sh", "-c", sandboxUmaskScript, "sh"}, cmd...)
+}
+
+// TimeoutKillAfter is how long a timed-out sandbox command has to exit
+// after SIGTERM before it gets SIGKILL.
+const TimeoutKillAfter = 5 * time.Second
+
+// ExecOptions configures how a sandbox command runs, with or without
+// --ephemeral.
+type ExecOptions struct {
+	// Interactive keeps stdin open (-i), and TTY allocates one (-t).
+	Interactive, TTY bool
+	// EnvFile is a path docker reads the command's environment from
+	// (--env-file), so values never appear in its argv.
+	EnvFile string
+	// Timeout, when set, runs the command under coreutils timeout inside
+	// the container: SIGTERM after Timeout, then SIGKILL TimeoutKillAfter
+	// later.
+	Timeout time.Duration
+}
+
+// flags returns the docker exec or run flags for o.
+func (o ExecOptions) flags() []string {
+	var args []string
+	if o.Interactive {
+		args = append(args, "-i")
+	}
+	if o.TTY {
+		args = append(args, "-t")
+	}
+	if o.EnvFile != "" {
+		args = append(args, "--env-file", o.EnvFile)
+	}
+	return args
+}
+
+// command wraps cmd with the timeout, if any, and SandboxCommand. Without
+// a TTY, timeout runs the command in its own process group and signals the
+// whole group. With one it must leave the command in the terminal's
+// foreground group (--foreground), so only the command itself is timed
+// out, not its children.
+func (o ExecOptions) command(cmd []string) []string {
+	if o.Timeout > 0 {
+		t := []string{"timeout", "--kill-after=" + seconds(TimeoutKillAfter)}
+		if o.TTY {
+			t = append(t, "--foreground")
+		}
+		cmd = append(append(t, "--", seconds(o.Timeout)), cmd...)
+	}
+	return SandboxCommand(cmd)
+}
+
+// seconds formats d as coreutils timeout reads it, such as 1.5s.
+func seconds(d time.Duration) string {
+	return strconv.FormatFloat(d.Seconds(), 'f', -1, 64) + "s"
+}
+
+// Validate refuses a negative timeout.
+func (o ExecOptions) Validate() error {
+	if o.Timeout < 0 {
+		return fmt.Errorf("invalid timeout %s: must be more than 0", o.Timeout)
+	}
+	return nil
+}
+
+// SandboxExecArgv returns the docker argv that runs cmd in the named
+// sandbox as the sandbox user, wrapped by ExecOptions.
+func SandboxExecArgv(name string, o ExecOptions, cmd []string) []string {
+	argv := append([]string{"docker", "exec"}, o.flags()...)
+	argv = append(argv, "--user", config.SandboxUser, "--workdir", config.SandboxDir, config.ContainerName(name))
+	return append(argv, o.command(cmd)...)
 }
 
 // ErrIsSandbox is returned when an interactive-session operation targets a
@@ -86,9 +158,10 @@ type SandboxOptions struct {
 	// Name is the sandbox name. It is required unless Remove is set, and
 	// optional for PrepareEphemeral.
 	Name string
-	// Volume is an optional host:container bind mount, always mounted
-	// read-only. Setting it recreates an existing sandbox.
-	Volume string
+	// Volumes are host:container bind mounts, each always mounted
+	// read-only. Setting any recreates an existing sandbox with exactly
+	// these mounts.
+	Volumes []string
 	// Variant is the image variant, config.BaseVariant for the base image.
 	// Empty keeps an existing sandbox's variant, or uses the configured
 	// default for a new one. A different variant recreates an existing
@@ -123,7 +196,7 @@ type SandboxOptions struct {
 
 // keep fills in what opts leaves unset from the sandbox it recreates.
 func (o SandboxOptions) keep(c docker.Container) SandboxOptions {
-	if o.Volume == "" {
+	if len(o.Volumes) == 0 {
 		o.kept = c.BindSpecs()
 	}
 	if o.Memory == "" && c.HostConfig.Memory > 0 {
@@ -179,8 +252,8 @@ func diskBytes(s string) (int64, error) {
 
 // volumes returns the bind mounts to give the sandbox.
 func (o SandboxOptions) volumes() []string {
-	if o.Volume != "" {
-		return []string{o.Volume}
+	if len(o.Volumes) > 0 {
+		return o.Volumes
 	}
 	return o.kept
 }
@@ -267,7 +340,7 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	}
 	opts.Variant = want
 
-	if existing != nil && (opts.Volume != "" || opts.Recreate || changed) {
+	if existing != nil && (len(opts.Volumes) > 0 || opts.Recreate || changed) {
 		m.printf("Recreating sandbox: %s\n", container)
 		opts = opts.keep(*existing)
 		if err := m.Docker.Remove(ctx, container, true); err != nil {
@@ -334,7 +407,7 @@ func (m *Manager) pickName(ctx context.Context, name string) (string, error) {
 // when cmd exits even if the caller is killed. It prints nothing: stdout
 // belongs to cmd. If the name is taken between this check and `docker run`,
 // docker refuses the name itself.
-func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, interactive, tty bool, cmd []string) ([]string, string, error) {
+func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, exec ExecOptions, cmd []string) ([]string, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -342,6 +415,9 @@ func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, int
 		return nil, "", ErrNoCommand
 	}
 	if err := opts.validate(); err != nil {
+		return nil, "", err
+	}
+	if err := exec.Validate(); err != nil {
 		return nil, "", err
 	}
 	want, _, err := m.pickVariant(opts.Variant, config.TypeSandbox, nil)
@@ -356,7 +432,7 @@ func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, int
 	if err != nil {
 		return nil, "", err
 	}
-	args, err := EphemeralRunArgs(config.ContainerName(name), opts, interactive, tty, cmd)
+	args, err := EphemeralRunArgs(config.ContainerName(name), opts, exec, cmd)
 	if err != nil {
 		return nil, "", err
 	}
@@ -381,22 +457,17 @@ func SandboxRunArgs(container string, opts SandboxOptions) ([]string, error) {
 // EphemeralRunArgs returns the `docker run` arguments that run cmd in a
 // one-off sandbox in the foreground. --init forwards signals to cmd, which
 // would otherwise run as PID 1 and ignore them. cmd is wrapped with
-// SandboxCommand so it gets the same umask as `sandbox exec NAME`.
-func EphemeralRunArgs(container string, opts SandboxOptions, interactive, tty bool, cmd []string) ([]string, error) {
-	args := []string{"--rm", "--init"}
-	if interactive {
-		args = append(args, "-i")
-	}
-	if tty {
-		args = append(args, "-t")
-	}
+// ExecOptions.command so it gets the same umask and timeout as
+// `sandbox exec NAME`.
+func EphemeralRunArgs(container string, opts SandboxOptions, exec ExecOptions, cmd []string) ([]string, error) {
+	args := append([]string{"--rm", "--init"}, exec.flags()...)
 	shared, err := sandboxArgs(container, opts)
 	if err != nil {
 		return nil, err
 	}
 	args = append(args, shared...)
 	args = append(args, variant.Image(opts.Variant))
-	return append(args, SandboxCommand(cmd)...), nil
+	return append(args, exec.command(cmd)...), nil
 }
 
 // sandboxArgs returns the `docker run` flags every sandbox gets: its name,
@@ -430,14 +501,30 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 		"--pids-limit", strconv.Itoa(opts.PidsLimit),
 		"--cpus", opts.CPUs,
 	)
+	// Docker refuses two mounts at one path itself, but with a less
+	// helpful error, after the image checks.
+	seen := map[string]string{"/tmp": "the /tmp tmpfs", config.SandboxDir: "the " + config.SandboxDir + " tmpfs"}
 	for _, volume := range opts.volumes() {
 		v, err := ReadOnlyVolume(volume)
 		if err != nil {
 			return nil, err
 		}
+		dst := path.Clean(volumeDestination(v))
+		if other, ok := seen[dst]; ok {
+			return nil, fmt.Errorf("volume %q: %s is already used by %s", volume, dst, other)
+		}
+		seen[dst] = fmt.Sprintf("volume %q", volume)
 		args = append(args, "-v", v)
 	}
 	return args, nil
+}
+
+// volumeDestination returns the container path of a host:container[:options]
+// spec.
+func volumeDestination(v string) string {
+	_, rest, _ := strings.Cut(v, ":")
+	dst, _, _ := strings.Cut(rest, ":")
+	return dst
 }
 
 func (m *Manager) createSandbox(ctx context.Context, container string, opts SandboxOptions) error {

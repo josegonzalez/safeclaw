@@ -159,7 +159,7 @@ func TestIntegrationSandbox(t *testing.T) {
 	container := config.ContainerName(name)
 	t.Cleanup(func() { _ = d.Remove(ctx, container, true) })
 
-	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name, Volume: in + ":/in", Variant: config.BaseVariant, Disk: "8m"}); err != nil {
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name, Volumes: []string{in + ":/in"}, Variant: config.BaseVariant, Disk: "8m"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -346,7 +346,7 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 		if opts.Variant == "" {
 			opts.Variant = config.BaseVariant
 		}
-		argv, name, err := m.PrepareEphemeral(ctx, opts, stdin != "", false, cmd)
+		argv, name, err := m.PrepareEphemeral(ctx, opts, ExecOptions{Interactive: stdin != ""}, cmd)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -374,10 +374,10 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 		t.Errorf("args = %q, %v", out, err)
 	}
 	name := fmt.Sprintf("itest-ephemeral-%d", rand.IntN(1_000_000))
-	if out, err := run(SandboxOptions{Name: name, Volume: in + ":/in"}, "", "cat", "/in/doc.txt"); err != nil || out != "untrusted" {
+	if out, err := run(SandboxOptions{Name: name, Volumes: []string{in + ":/in"}}, "", "cat", "/in/doc.txt"); err != nil || out != "untrusted" {
 		t.Errorf("mounted file = %q, %v", out, err)
 	}
-	if _, err := run(SandboxOptions{Volume: in + ":/in"}, "", "touch", "/in/x"); err == nil {
+	if _, err := run(SandboxOptions{Volumes: []string{in + ":/in"}}, "", "touch", "/in/x"); err == nil {
 		t.Error("the volume should be read-only")
 	}
 	_, err := run(SandboxOptions{}, "", "sh", "-c", "exit 3")
@@ -385,6 +385,39 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 	if !errors.As(err, &exit) || exit.ExitCode() != 3 {
 		t.Errorf("exit code: err = %v, want exit status 3", err)
 	}
+
+	// Several read-only mounts.
+	if out, err := run(SandboxOptions{Volumes: []string{in + ":/in", in + ":/opt/in"}}, "", "sh", "-c", "cat /in/doc.txt /opt/in/doc.txt; touch /opt/in/x || echo ro"); err != nil || out != "untrusted\nuntrusted\nro" {
+		t.Errorf("two mounts = %q, %v", out, err)
+	}
+
+	// The command's environment comes from an env file on an inherited
+	// fd, and a timeout ends it with coreutils timeout's 124.
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(wr, "PASSWORD=p a ss\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = wr.Close()
+	defer rd.Close()
+	argv, ename, err := m.PrepareEphemeral(ctx, SandboxOptions{Variant: config.BaseVariant}, ExecOptions{EnvFile: "/dev/fd/3", Timeout: time.Second}, []string{"sh", "-c", `echo "$PASSWORD"; sleep 30`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Remove(ctx, config.ContainerName(ename), true) })
+	c := exec.Command(argv[0], argv[1:]...)
+	c.ExtraFiles = []*os.File{rd}
+	start := time.Now()
+	out, err := c.Output()
+	if !errors.As(err, &exit) || exit.ExitCode() != 124 || strings.TrimSpace(string(out)) != "p a ss" {
+		t.Errorf("timed out command: out = %q, err = %v, want the password and exit 124", out, err)
+	}
+	if took := time.Since(start); took > 20*time.Second {
+		t.Errorf("timeout took %s", took)
+	}
+	waitGone(t, d, config.ContainerName(ename))
 }
 
 // TestIntegrationSandboxVariant checks that the built-in sandbox variant has
@@ -399,7 +432,7 @@ func TestIntegrationSandboxVariant(t *testing.T) {
 	m := &Manager{Docker: d}
 	run := func(cmd ...string) (string, error) {
 		t.Helper()
-		argv, name, err := m.PrepareEphemeral(ctx, SandboxOptions{}, false, false, cmd)
+		argv, name, err := m.PrepareEphemeral(ctx, SandboxOptions{}, ExecOptions{}, cmd)
 		if err != nil {
 			t.Fatal(err)
 		}

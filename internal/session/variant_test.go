@@ -139,7 +139,7 @@ func TestEnsureSandboxRecreateKeeps(t *testing.T) {
 	}{
 		{"variant", SandboxOptions{Name: "box", Variant: "base"},
 			[]string{" --memory 2147483648 --pids-limit 64 --cpus 0.5 -v /in:/in:ro safeclaw sleep infinity"}},
-		{"volume", SandboxOptions{Name: "box", Volume: "/new:/new"},
+		{"volume", SandboxOptions{Name: "box", Volumes: []string{"/new:/new"}},
 			[]string{"--label safeclaw.variant=sandbox ", " --memory 2147483648 --pids-limit 64 --cpus 0.5 -v /new:/new:ro safeclaw:sandbox sleep infinity"}},
 		{"limit", SandboxOptions{Name: "box", Memory: "4g", Recreate: true},
 			[]string{"--label safeclaw.variant=sandbox ", "size=536870912,", " --memory 4g --pids-limit 64 --cpus 0.5 -v /in:/in:ro safeclaw:sandbox sleep infinity"}},
@@ -187,7 +187,7 @@ func TestVariantErrors(t *testing.T) {
 		!strings.Contains(err.Error(), "`safeclaw pull --variant sandbox`") || !strings.Contains(err.Error(), "`safeclaw build --variant sandbox`") {
 		t.Errorf("err = %v", err)
 	}
-	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{}, false, false, []string{"ls"}); !errors.Is(err, ErrNoImage) {
+	if _, _, err := m.PrepareEphemeral(ctx, SandboxOptions{}, ExecOptions{}, []string{"ls"}); !errors.Is(err, ErrNoImage) {
 		t.Errorf("ephemeral err = %v", err)
 	}
 	if _, err := m.Ensure(ctx, Options{Name: "s", Variant: "sandbox", NoOpen: true}); !errors.Is(err, ErrNoImage) {

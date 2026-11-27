@@ -287,6 +287,42 @@ func TestVerifySandboxLaterMountWins(t *testing.T) {
 	}
 }
 
+// Every mount of a sandbox made with several -v is checked, not just the
+// first.
+func TestVerifySandboxSeveralMounts(t *testing.T) {
+	two := func(rw bool) map[string]any {
+		c := goodSandbox()
+		c["Mounts"] = []map[string]any{
+			{"Type": "bind", "Source": "/host/in", "Destination": "/in", "RW": false},
+			{"Type": "bind", "Source": "/host/tools", "Destination": "/opt/tools", "RW": rw},
+		}
+		return c
+	}
+	probe := goodProbe + "/dev/vda1 /opt/tools ext4 ro,relatime 0 0\n"
+	if got := failedChecks(t, &inspectWorld{c: two(false), probe: probe}); len(got) != 0 {
+		t.Errorf("failed = %q", got)
+	}
+	if got := failedChecks(t, &inspectWorld{c: two(true), probe: probe}); !slices.Equal(got, []string{"mounts-read-only"}) {
+		t.Errorf("writable second mount: failed = %q", got)
+	}
+	if got := failedChecks(t, &inspectWorld{c: two(false), probe: goodProbe}); !slices.Equal(got, []string{"live-mounts"}) {
+		t.Errorf("missing second mount: failed = %q", got)
+	}
+	rw := strings.Replace(probe, "/opt/tools ext4 ro,", "/opt/tools ext4 rw,", 1)
+	if got := failedChecks(t, &inspectWorld{c: two(false), probe: rw}); !slices.Equal(got, []string{"live-mounts"}) {
+		t.Errorf("second mount rw live: failed = %q", got)
+	}
+
+	m, _ := newInspectManager(t, &inspectWorld{c: two(false)})
+	info, err := m.InspectSandbox(context.Background(), "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Mounts) != 2 || info.Mounts[1].Destination != "/opt/tools" || !info.Mounts[1].ReadOnly {
+		t.Errorf("mounts = %+v", info.Mounts)
+	}
+}
+
 func TestVerifySandboxEscapedMount(t *testing.T) {
 	c := goodSandbox()
 	c["Mounts"] = []map[string]any{{"Type": "bind", "Source": "/host/my in", "Destination": "/my in", "RW": false}}

@@ -1,15 +1,19 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
@@ -39,9 +43,10 @@ func newSandboxCommand() *cobra.Command {
 }
 
 type sandboxFlags struct {
-	session, volume, variant, memory, cpus, disk string
-	pidsLimit                                    int
-	remove                                       bool
+	session, variant, memory, cpus, disk string
+	volumes                              []string
+	pidsLimit                            int
+	remove                               bool
 }
 
 // limitFlags are the sandbox run flags that recreate an existing sandbox
@@ -55,7 +60,7 @@ var createFlags = append([]string{"session", "volume", "variant"}, limitFlags...
 // appended to the help of the flags that recreate an existing sandbox.
 func (f *sandboxFlags) register(cmd *cobra.Command, nameHelp, recreates string) {
 	cmd.Flags().StringVarP(&f.session, "session", "s", "", nameHelp)
-	cmd.Flags().StringVarP(&f.volume, "volume", "v", "", "mount a host directory read-only, /host/path:/container/path"+recreates)
+	cmd.Flags().StringArrayVarP(&f.volumes, "volume", "v", nil, "mount a host directory read-only, /host/path:/container/path (repeatable)"+recreates)
 	cmd.Flags().StringVar(&f.variant, "variant", "", "image variant, or base for the base image (default from the config file, else sandbox)"+recreates)
 	_ = cmd.RegisterFlagCompletionFunc("variant", completeVariants)
 	cmd.Flags().StringVar(&f.memory, "memory", session.DefaultSandboxMemory, "memory limit"+recreates)
@@ -70,7 +75,7 @@ func (f *sandboxFlags) register(cmd *cobra.Command, nameHelp, recreates string) 
 func (f sandboxFlags) options(changed func(name string) bool) session.SandboxOptions {
 	opts := session.SandboxOptions{
 		Name:    f.session,
-		Volume:  f.volume,
+		Volumes: f.volumes,
 		Variant: f.variant,
 		Remove:  f.remove,
 	}
@@ -127,26 +132,15 @@ func newSandboxRunCommand() *cobra.Command {
 	return cmd
 }
 
-// sandboxExecArgv returns the docker argv for running a command in a
-// sandbox, wrapped with session.SandboxCommand for a fixed umask.
-func sandboxExecArgv(name string, interactive, tty bool, command []string) []string {
-	argv := []string{"docker", "exec"}
-	if interactive {
-		argv = append(argv, "-i")
-	}
-	if tty {
-		argv = append(argv, "-t")
-	}
-	argv = append(argv, "--user", config.SandboxUser, "--workdir", config.SandboxDir, config.ContainerName(name))
-	return append(argv, session.SandboxCommand(command)...)
-}
-
 // sandboxExecArgs validates exec's arguments: COMMAND with --ephemeral,
 // otherwise NAME COMMAND, with the sandbox creation flags refused.
 func sandboxExecArgs(cmd *cobra.Command, args []string) error {
 	escape, _ := cmd.Flags().GetBool("escape-controls")
 	if tty, _ := cmd.Flags().GetBool("tty"); escape && tty {
 		return errors.New("--escape-controls can't be used with -t: a TTY needs its control characters, and docker merges stdout and stderr into it")
+	}
+	if timeout, _ := cmd.Flags().GetDuration("timeout"); cmd.Flags().Changed("timeout") && timeout <= 0 {
+		return fmt.Errorf("invalid --timeout %s: must be more than 0", timeout)
 	}
 	if ephemeral, _ := cmd.Flags().GetBool("ephemeral"); ephemeral {
 		if len(args) == 0 {
@@ -167,9 +161,11 @@ func sandboxExecArgs(cmd *cobra.Command, args []string) error {
 
 func newSandboxExecCommand() *cobra.Command {
 	var interactive, tty, ephemeral, escape bool
+	var timeout time.Duration
+	var envSpecs []string
 	var f sandboxFlags
 	cmd := &cobra.Command{
-		Use:   "exec {NAME | --ephemeral [-s NAME]} [-i] [-t | --escape-controls] -- COMMAND [ARG...]",
+		Use:   "exec {NAME | --ephemeral [-s NAME]} [-i] [-t | --escape-controls] [--timeout DUR] [-e NAME[=VALUE]]... -- COMMAND [ARG...]",
 		Short: "Run a command in a sandbox as the sandbox user",
 		Long: "Run a command in a sandbox as the sandbox user.\n\n" +
 			"With --ephemeral, no NAME is given: the command runs in a new one-off sandbox that is removed when it exits, " +
@@ -178,7 +174,12 @@ func newSandboxExecCommand() *cobra.Command {
 			"other than newline and tab, invalid UTF-8, and other unprintable characters as visible escapes such as \\x1b, " +
 			"so escape sequences from untrusted files never reach the terminal. The exit code is returned as is " +
 			"(128 plus the signal number when a signal killed docker), and SIGINT, SIGTERM, SIGHUP and SIGQUIT are forwarded. " +
-			"It can't be used with -t.",
+			"It can't be used with -t.\n\n" +
+			"With --timeout, the command gets SIGTERM once it has run for DUR (such as 30s or 5m) and SIGKILL 5 seconds later, " +
+			"and safeclaw exits 124 with an error saying it timed out.\n\n" +
+			"-e sets an environment variable for the command only, NAME=VALUE or NAME to take the value from safeclaw's environment. " +
+			"Values reach docker through a pipe rather than its arguments, so they don't show in ps. " +
+			"The names of stored secrets, CLAUDE_CODE_OAUTH_TOKEN, and GH_TOKEN are refused.",
 		Args: sandboxExecArgs,
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			if ephemeral {
@@ -187,14 +188,36 @@ func newSandboxExecCommand() *cobra.Command {
 			return completeType(config.TypeSandbox)(cmd, args, toComplete)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			m := session.NewManager(nil)
+			env, err := m.ExecEnv(envSpecs, os.LookupEnv)
+			if err != nil {
+				return err
+			}
+			run := execRun{escape: escape, interactive: interactive, timeout: timeout, ephemeral: ephemeral}
+			// Without --timeout or --escape-controls safeclaw replaces
+			// itself with docker, which then inherits the env pipe as is.
+			replace := !escape && timeout == 0
+			x := session.ExecOptions{Interactive: interactive, TTY: tty, Timeout: timeout}
+			if env != "" {
+				if run.envFile, err = envPipe(env); err != nil {
+					return err
+				}
+				defer run.envFile.Close()
+				x.EnvFile = "/dev/fd/3"
+				if replace {
+					if _, err := unix.FcntlInt(run.envFile.Fd(), unix.F_SETFD, 0); err != nil {
+						return err
+					}
+					x.EnvFile = fmt.Sprintf("/dev/fd/%d", run.envFile.Fd())
+				}
+			}
 			var argv []string
 			if ephemeral {
 				opts := f.options(func(name string) bool { return cmd.Flags().Changed(name) })
-				var err error
 				if opts.Name, err = resolveName(cmd, opts.Name); err != nil {
 					return err
 				}
-				argv, _, err = session.NewManager(nil).PrepareEphemeral(cmd.Context(), opts, interactive, tty, args)
+				argv, run.name, err = m.PrepareEphemeral(cmd.Context(), opts, x, args)
 				if err != nil {
 					return err
 				}
@@ -202,13 +225,14 @@ func newSandboxExecCommand() *cobra.Command {
 				if err := resolveArg(cmd, args); err != nil {
 					return err
 				}
-				if err := session.NewManager(nil).RequireType(cmd.Context(), args[0], config.TypeSandbox); err != nil {
+				if err := m.RequireType(cmd.Context(), args[0], config.TypeSandbox); err != nil {
 					return err
 				}
-				argv = sandboxExecArgv(args[0], interactive, tty, args[1:])
+				run.name = config.SessionName(args[0])
+				argv = session.SandboxExecArgv(args[0], x, args[1:])
 			}
-			if escape {
-				return runEscapedExec(cmd, argv, interactive)
+			if !replace {
+				return runSandboxExec(cmd, m, argv, run)
 			}
 			bin, err := exec.LookPath("docker")
 			if err != nil {
@@ -220,31 +244,110 @@ func newSandboxExecCommand() *cobra.Command {
 	cmd.Flags().BoolVarP(&interactive, "interactive", "i", false, "keep stdin open")
 	cmd.Flags().BoolVarP(&tty, "tty", "t", false, "allocate a TTY")
 	cmd.Flags().BoolVar(&escape, "escape-controls", false, "escape control characters in the command's output before they reach the terminal")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "stop the command after this long, such as 30s or 5m, and exit 124")
+	cmd.Flags().StringArrayVarP(&envSpecs, "env", "e", nil, "set NAME=VALUE, or NAME from safeclaw's environment, for the command (repeatable)")
 	cmd.Flags().BoolVar(&ephemeral, "ephemeral", false, "run the command in a new one-off sandbox that is removed when it exits")
 	f.register(cmd, "name for the --ephemeral sandbox (random by default)", " (with --ephemeral)")
 	return cmd
 }
 
-// runEscapedExec runs a sandbox exec argv through runEscaped. The command
-// shares safeclaw's process group only when it reads stdin from a
-// terminal, which a background process group can't do.
-func runEscapedExec(cmd *cobra.Command, argv []string, interactive bool) error {
-	var stdin io.Reader
-	shareGroup := false
-	if interactive {
-		stdin = cmd.InOrStdin()
-		if f, ok := stdin.(*os.File); ok {
-			shareGroup = term.IsTerminal(int(f.Fd()))
+// envPipe returns the read end of a pipe holding env, for docker to read
+// with --env-file /dev/fd/N. The values never touch the disk or an argv.
+// env is at most session.MaxExecEnvBytes, which fits in the pipe's buffer,
+// so it is written before anything reads it.
+func envPipe(env string) (*os.File, error) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	_, err = io.WriteString(w, env)
+	if err = errors.Join(err, w.Close()); err != nil {
+		_ = r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+// timeoutExitCode is what a timed-out sandbox command exits with, as
+// coreutils timeout does.
+const timeoutExitCode = 124
+
+// timeoutGrace is how long after the in-container timeout's SIGKILL
+// safeclaw waits before stopping docker itself.
+var timeoutGrace = 5 * time.Second
+
+// execRun is how runSandboxExec runs a sandbox command.
+type execRun struct {
+	escape, interactive, ephemeral bool
+	timeout                        time.Duration
+	// envFile is inherited by docker as fd 3.
+	envFile *os.File
+	// name is the sandbox's session name.
+	name string
+}
+
+// runSandboxExec runs a sandbox exec argv as a child of safeclaw, for
+// --escape-controls and --timeout. The command shares safeclaw's process
+// group only when it reads stdin from a terminal, which a background
+// process group can't do.
+//
+// With a timeout, the in-container coreutils timeout stops the command.
+// If docker is still running timeoutGrace after that should have finished
+// it (the command left timeout's process group, or killed timeout), a
+// one-off sandbox is removed, which ends everything in it, and docker is
+// killed. A named sandbox can't be cleaned up without stopping its other
+// commands, so the error says the command may still be running there.
+func runSandboxExec(cmd *cobra.Command, m *session.Manager, argv []string, r execRun) error {
+	o := childOptions{stdout: cmd.OutOrStdout(), stderr: cmd.ErrOrStderr(), escape: r.escape}
+	if r.interactive {
+		o.stdin = cmd.InOrStdin()
+		if f, ok := o.stdin.(*os.File); ok {
+			o.shareGroup = term.IsTerminal(int(f.Fd()))
 		}
 	}
-	code, err := runEscaped(argv, stdin, cmd.OutOrStdout(), cmd.ErrOrStderr(), shareGroup)
+	if r.envFile != nil {
+		o.extraFiles = []*os.File{r.envFile}
+	}
+	var forced atomic.Bool
+	if r.timeout > 0 {
+		o.deadline = r.timeout + session.TimeoutKillAfter + timeoutGrace
+		o.onDeadline = func(p *os.Process) {
+			forced.Store(true)
+			if r.ephemeral {
+				_ = m.Docker.Remove(context.Background(), config.ContainerName(r.name), true)
+			}
+			_ = p.Kill()
+		}
+	}
+	start := time.Now()
+	code, err := runChild(argv, o)
 	if err != nil {
 		return err
+	}
+	if timedOut(r.timeout, time.Since(start), code, forced.Load()) {
+		msg := fmt.Sprintf("the command timed out after %s", r.timeout)
+		if forced.Load() && !r.ephemeral {
+			msg += fmt.Sprintf(", and may still be running in sandbox %q: stop it with `safeclaw sandbox stop %s`", r.name, r.name)
+		}
+		printError(cmd.ErrOrStderr(), errors.New(msg))
+		return exitCodeError{timeoutExitCode}
 	}
 	if code != 0 {
 		return exitCodeError{code}
 	}
 	return nil
+}
+
+// timedOut reports whether a command run with timeout was stopped by it:
+// safeclaw had to stop docker itself, or the in-container timeout exited
+// 124 (after SIGTERM) or 137 (after SIGKILL) once timeout had passed. A
+// command that exits 124 on its own sooner is not mistaken for one that
+// timed out.
+func timedOut(timeout, elapsed time.Duration, code int, forced bool) bool {
+	if timeout <= 0 {
+		return false
+	}
+	return forced || elapsed >= timeout && (code == timeoutExitCode || code == 128+int(syscall.SIGKILL))
 }
 
 // completeSandboxFirst completes NAME as a sandbox and leaves the other
