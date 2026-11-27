@@ -127,7 +127,7 @@ variants:
       - pip install --break-system-packages markitdown
 ```
 
-`run` commands run as root, one line each. A variant defined in the config file replaces a built-in one with the same name.
+`run` commands run as root with `/bin/sh -c`, one line each, and the image switches back to the `sclaw` user after them whatever they contain. A variant defined in the config file replaces a built-in one with the same name.
 
 ```bash
 safeclaw variant ls                          # variants, their images, and defaults
