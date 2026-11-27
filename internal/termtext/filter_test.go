@@ -62,10 +62,33 @@ func TestFilterDrops(t *testing.T) {
 		{"window move", "a\x1b[3;0;0tb", "ab"},
 		{"window iconify", "a\x1b[2tb", "ab"},
 		{"window report title", "a\x1b[21tb", "ab"},
+		{"title modes", "a\x1b[>2t\x1b[?22tb", "ab"},
+		{"window op with intermediate", "a\x1b[22 tb", "ab"},
 		{"raw c1", "a\x9b2J\x9d52;x\x9cb", "a2J52;xb"},
 		{"encoded c1", "a\u009b2J\u0090b", "a2Jb"},
 		{"esc esc", "a\x1b\x1b[1mb", "a\x1b[1mb"},
 		{"csi cut short", "a\x1b[31\x80b", "ab"},
+		{"overlong c1 3 bytes", "a\xe0\x82\x9b2Jb", "a2Jb"},
+		{"overlong c1 2 bytes", "a\xc0\x9b2J\xc1\x9db", "a2Jb"},
+		{"overlong c1 4 bytes", "a\xf0\x80\x82\x9b2Jb", "a2Jb"},
+		{"overlong esc", "a\xc0\x9b[31mb", "a[31mb"},
+		{"surrogate", "a\xed\xa0\x80b", "ab"},
+		{"past U+10FFFF", "a\xf4\x90\x80\x80\xf5\x80b", "ab"},
+		{"stray continuation", "a\xa0\xbfb", "ab"},
+		{"cut short by text", "a\xe2\x9cb\xf0\x9f\x98c", "abc"},
+		{"cut short by esc", "a\xe2\x9c\x1b[1mb", "a\x1b[1mb"},
+		{"invalid in csi", "a\x1b[3\xe0\x82\x9b1mb", "a1mb"},
+		{"screen title", "a\x1bkevil\x1b\\b", "ab"},
+		{"screen title cut short by osc", "a\x1bkx\x1b]52;c;QQ\x07y\x1b\\b", "ay\x1b\\b"},
+		{"screen title cancelled", "a\x1bkevil\x18b", "ab"},
+		{"media copy", "a\x1b[5iprinted\x1b[4ib", "aprintedb"},
+		{"media copy other forms", "a\x1b[i\x1b[0i\x1b[?5i\x1b[?4i\x1b[10ib", "ab"},
+		{"title pop with nothing pushed", "a\x1b[23t\x1b[23;0tb", "ab"},
+		{"title pop after own pushes", "a\x1b[22t\x1b[23t\x1b[23tb", "a\x1b[22t\x1b[23tb"},
+		{"title push past the cap", "a" + strings.Repeat("\x1b[22t", maxStack+2) + "b", "a" + strings.Repeat("\x1b[22t", maxStack) + "b"},
+		{"kitty pop with nothing pushed", "a\x1b[<u\x1b[<3ub", "ab"},
+		{"kitty pop past own pushes", "a\x1b[>1u\x1b[<5ub", "a\x1b[>1u\x1b[<1ub"},
+		{"kitty push past the cap", "a" + strings.Repeat("\x1b[>1u", maxStack+1) + "b", "a" + strings.Repeat("\x1b[>1u", maxStack) + "b"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -91,6 +114,9 @@ func TestFilterKeeps(t *testing.T) {
 		{"hyperlink", "\x1b]8;id=1;https://example.com/\x1b\\link\x1b]8;;\x1b\\"},
 		{"colours", "\x1b]10;?\x1b\\\x1b]11;?\x07\x1b]12;#ff0000\x07\x1b]112\x07\x1b]104\x1b\\"},
 		{"bell", "\x07"},
+		{"valid multibyte", "\u00a0\u00ff\u0800\ufffd\uffff\U00010000\U0010ffff"},
+		{"kitty keyboard", "\x1b[>1u\x1b[=3;1u\x1b[<u"},
+		{"modify other keys", "\x1b[>4;2m\x1b[>4m"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -208,6 +234,75 @@ func TestFilterHyperlinkReplacesOpenLink(t *testing.T) {
 	want := "\x1b]8;;https://example.com/\x1b\\ok \x1b]8;;\x1b\\spoofed\x1b]8;;\x1b\\"
 	if got := filterAll(t, in); got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// restoreAfter runs in through a Filter whole and byte by byte and
+// returns what Restore gives afterwards, checking both agree.
+func restoreAfter(t *testing.T, in string) string {
+	t.Helper()
+	var b strings.Builder
+	whole := NewFilter(&b)
+	_, _ = whole.Write([]byte(in))
+	want := string(whole.Restore())
+	split := NewFilter(&b)
+	for i := range len(in) {
+		_, _ = split.Write([]byte{in[i]})
+	}
+	if got := string(split.Restore()); got != want {
+		t.Fatalf("byte by byte: Restore = %q, whole gave %q", got, want)
+	}
+	return want
+}
+
+func TestFilterRestore(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"nothing set", "text\x1b[31m", ""},
+		{"set and reset", "\x1b[?1049h\x1b[?1000;1006h\x1b[?25l\x1b[?2004h\x1b=x\x1b[?2004l\x1b[?1000;1006l\x1b[?25h\x1b>\x1b[?1049l", ""},
+		{"mouse and paste", "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1004h", "\x1b[?1000l\x1b[?1002l\x1b[?1006l\x1b[?1004l\x1b[?2004l"},
+		{"combined params", "\x1b[?1003;1015;1h", "\x1b[?1003l\x1b[?1015l\x1b[?1l"},
+		{"synchronized output first", "\x1b[?1000h\x1b[?2026h", "\x1b[?2026l\x1b[?1000l"},
+		{"alternate screen", "\x1b[?1049h", "\x1b[?1049l"},
+		{"alternate screen 1047", "\x1b[?1047h", "\x1b[?1047l"},
+		{"hidden cursor", "\x1b[?25l", "\x1b[?25h"},
+		{"keypad", "\x1b=\x1b[?66h", "\x1b[?66l\x1b>"},
+		{"modify other keys", "\x1b[>4;1m", "\x1b[>4m"},
+		{"modify other keys reset", "\x1b[>4;2m\x1b[>4;0m", ""},
+		{"local echo", "\x1b[12l", "\x1b[12h"},
+		{"local echo reset", "\x1b[12l\x1b[12h", ""},
+		{"titles pushed", "\x1b[22;0t\x1b[22t\x1b[23t", TitlePop},
+		{"kitty pushed", "\x1b[>1u\x1b[>3u", "\x1b[<2u"},
+		{"kitty set", "\x1b[=5u", "\x1b[=0u"},
+		{"kitty set then cleared", "\x1b[=5u\x1b[=0;1u", ""},
+		{"kitty on both screens", "\x1b[>1u\x1b[?1049h\x1b[>1u\x1b[>1u\x1b[?2004h", "\x1b[<2u\x1b[?2004l\x1b[?1049l\x1b[<1u"},
+		{"reset terminal", "\x1b[?1000h\x1b[22t\x1bc", TitlePop},
+		{"cut short sequence", "\x1b[?1000h\x1b]0;ti", "\x1b[?1000l"},
+		{"mode in sequence with intermediates", "\x1b[?1000$p", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := restoreAfter(t, tc.in); got != tc.want {
+				t.Errorf("Restore after %q = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFilterRestoreForgets(t *testing.T) {
+	var b strings.Builder
+	f := NewFilter(&b)
+	_, _ = f.Write([]byte("\x1b[?1049h\x1b]0;ti"))
+	if got := string(f.Restore()); got != "\x1b[?1049l" {
+		t.Fatalf("Restore = %q", got)
+	}
+	if got := string(f.Restore()); got != "" {
+		t.Errorf("second Restore = %q, want nothing", got)
+	}
+	// The cut-short title was dropped, so text after it is shown.
+	b.Reset()
+	_, _ = f.Write([]byte("x"))
+	if b.String() != "x" {
+		t.Errorf("after Restore, got %q, want %q", b.String(), "x")
 	}
 }
 

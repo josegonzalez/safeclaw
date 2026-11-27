@@ -22,18 +22,28 @@ import (
 //   - Hyperlinks to anything but http and https URLs on hosts other than
 //     localhost and loopback addresses. Such a link is replaced by the
 //     sequence that ends a link, so its text is kept as plain text.
-//   - DCS, SOS, PM, and APC strings, whole, which covers tmux passthrough
-//     (ESC P tmux; ...) and terminal-specific commands carried in them.
+//   - DCS, SOS, PM, and APC strings, and screen and tmux title strings
+//     (ESC k), whole, which covers tmux passthrough (ESC P tmux; ...) and
+//     terminal-specific commands carried in them.
 //   - CSI t window operations other than the size reports and the title
 //     stack (14, 15, 16, 18, 19, 22, 23), so the stream can't move,
-//     resize, or iconify the host window or read its title.
-//   - C1 control bytes, raw or UTF-8 encoded, which some terminals act on
-//     as 8-bit introducers.
+//     resize, or iconify the host window or read its title. A title stack
+//     pop with nothing the stream pushed left to pop, and a push past
+//     maxStack, are dropped too, so the stream can't pop entries it
+//     didn't push. Kitty keyboard flag pushes and pops are kept balanced
+//     the same way.
+//   - CSI i media copy, which can send what follows to a printer.
+//   - C1 control bytes, raw or UTF-8 encoded, and text that isn't valid
+//     UTF-8, such as overlong encodings, which some terminals decode
+//     anyway.
 //
 // Everything else, including text, C0 controls, SGR colours, cursor
 // movement, modes such as the alternate screen and mouse reporting, and
 // queries whose answers go back to the stream's own input, is passed on
 // unchanged. A sequence split across writes is parsed as one.
+//
+// Filter also keeps track of the modes the stream leaves set, so Restore
+// can undo them once the stream ends.
 type Filter struct {
 	w     io.Writer
 	state filterState
@@ -42,12 +52,12 @@ type Filter struct {
 	seq []byte
 	// oscAllowed is set once an OSC's number is known to be allowed.
 	oscAllowed bool
-	// cont counts the UTF-8 continuation bytes still expected.
-	cont int
-	// heldC2 is set when a 0xC2 lead byte is held back to see whether it
-	// starts an encoded C1 control.
-	heldC2 bool
-	out    bytes.Buffer
+	// utf holds a UTF-8 sequence in text that has started but not ended,
+	// and nutf is its length so far.
+	utf  [utf8.UTFMax]byte
+	nutf int
+	left leftSet
+	out  bytes.Buffer
 }
 
 type filterState int
@@ -164,47 +174,41 @@ func (f *Filter) step(b byte) {
 	}
 }
 
-// ground handles a byte outside any escape sequence.
+// ground handles a byte outside any escape sequence. A multi-byte UTF-8
+// sequence is held back until it ends, then passed on only if it is valid
+// and isn't a C1 control. Invalid bytes, such as an overlong encoding, a
+// surrogate, a sequence cut short, or a stray continuation byte, are
+// dropped.
 func (f *Filter) ground(b byte) {
-	if f.heldC2 {
-		f.heldC2 = false
-		f.cont = 0
-		if b >= 0x80 && b <= 0x9f {
-			// U+0080 to U+009F: an encoded C1 control.
-			return
-		}
-		f.out.WriteByte(0xc2)
+	if f.nutf > 0 {
 		if b >= 0x80 && b <= 0xbf {
-			f.out.WriteByte(b)
+			f.utf[f.nutf] = b
+			f.nutf++
+			if !utf8.FullRune(f.utf[:f.nutf]) {
+				return
+			}
+			// Only continuation bytes follow the lead byte, so an invalid
+			// sequence is dropped whole, as the rest can't start a rune.
+			if r, size := utf8.DecodeRune(f.utf[:f.nutf]); size == f.nutf && (r < 0x80 || r > 0x9f) {
+				f.out.Write(f.utf[:f.nutf])
+			}
+			f.nutf = 0
 			return
 		}
-	}
-	if f.cont > 0 {
-		if b >= 0x80 && b <= 0xbf {
-			f.cont--
-			f.out.WriteByte(b)
-			return
-		}
-		f.cont = 0
+		// Cut short: drop it and handle b on its own.
+		f.nutf = 0
 	}
 	switch {
 	case b == 0x1b:
 		f.state = stEsc
-	case b >= 0x80 && b <= 0x9f:
-		// A raw C1 control.
-	case b == 0xc2:
-		f.heldC2 = true
-	case b >= 0xc0 && b <= 0xdf:
-		f.cont = 1
+	case b < 0x80:
 		f.out.WriteByte(b)
-	case b >= 0xe0 && b <= 0xef:
-		f.cont = 2
-		f.out.WriteByte(b)
-	case b >= 0xf0 && b <= 0xf7:
-		f.cont = 3
-		f.out.WriteByte(b)
+	case b >= 0xc2 && b <= 0xf4:
+		f.utf[0] = b
+		f.nutf = 1
 	default:
-		f.out.WriteByte(b)
+		// A raw C1 control, a stray continuation byte, or a byte that
+		// never starts a valid sequence.
 	}
 }
 
@@ -217,7 +221,7 @@ func (f *Filter) esc(b byte) {
 	case b == ']':
 		f.seq = append(f.seq[:0], 0x1b, ']')
 		f.state = stOSC
-	case b == 'P' || b == 'X' || b == '^' || b == '_':
+	case b == 'P' || b == 'X' || b == '^' || b == '_' || b == 'k':
 		f.state = stString
 	case b == 0x1b:
 		// The first ESC is cancelled by the second.
@@ -229,6 +233,7 @@ func (f *Filter) esc(b byte) {
 	case b >= 0x30 && b <= 0x7e:
 		f.out.WriteByte(0x1b)
 		f.out.WriteByte(b)
+		f.left.escFinal(b)
 		f.state = stGround
 	default:
 		f.abort(b)
@@ -248,9 +253,7 @@ func (f *Filter) csi(b byte) {
 		f.seq = append(f.seq, b)
 	case b >= 0x40 && b <= 0x7e:
 		f.seq = append(f.seq, b)
-		if b != 't' || allowedWindowOps[windowOp(f.seq)] {
-			f.out.Write(f.seq)
-		}
+		f.out.Write(f.left.csi(f.seq))
 		f.reset()
 	case b == 0x1b:
 		f.reset()
@@ -480,4 +483,18 @@ func (f *Filter) reset() {
 func (f *Filter) abort(b byte) {
 	f.reset()
 	f.ground(b)
+}
+
+// Restore returns the sequences that undo the modes the stream has left
+// set: synchronized output, mouse reporting, focus events, bracketed
+// paste, application cursor keys and keypad, xterm modifyOtherKeys, kitty
+// keyboard flags, the alternate screen, a hidden cursor, and local echo.
+// It also pops the title stack entries the stream pushed. Only what the
+// stream set is undone, so a stream that cleaned up after itself gets an
+// empty restore. Restore drops any sequence still being parsed, and
+// starts tracking afresh.
+func (f *Filter) Restore() []byte {
+	f.reset()
+	f.nutf = 0
+	return f.left.restore()
 }

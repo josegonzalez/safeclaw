@@ -276,7 +276,7 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw url NAME` | Print a running session's terminal URL with its credential. `--open` also opens it, through the dashboard when one is running |
 | `safeclaw stop NAME` | Stop a session |
 | `safeclaw rm NAME` | Delete a session container (history and its secrets and auto memory choices are kept). `-f` removes a running one, and `--release-holds` one held offline. |
-| `safeclaw attach NAME` | Attach to a session's tmux session in this terminal. Clipboard writes, passthrough, hyperlinks to anything but http and https sites off localhost, and other sequences that act on the host terminal are filtered out ([details](docs/architecture.md#attaching-from-the-host)) |
+| `safeclaw attach NAME` | Attach to a session's tmux session in this terminal. Clipboard writes, passthrough, hyperlinks to anything but http and https sites off localhost, and other sequences that act on the host terminal are filtered out, and the titles and modes the session leaves set are reset after it detaches ([details](docs/architecture.md#attaching-from-the-host)) |
 | `safeclaw net off NAME` | Save a session's networks and disconnect it from them. `--owner` names the hold and `--reason` says why. |
 | `safeclaw net on NAME` | Release the hold for `--owner` (or the unnamed hold) and reconnect the session once none remain. `--force` releases every hold. |
 | `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory recursively read-only and can be repeated, `--variant` picks the image variant, `--memory`, `--pids-limit`, `--cpus`, and `--disk` (the size of `/sandbox`) set limits. |

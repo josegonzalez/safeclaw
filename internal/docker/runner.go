@@ -10,8 +10,14 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 
+	"github.com/creack/pty"
+	"golang.org/x/term"
+
+	"github.com/josegonzalez/safeclaw/internal/hostterm"
 	"github.com/josegonzalez/safeclaw/internal/termtext"
 )
 
@@ -33,7 +39,8 @@ type Runner interface {
 	// Output runs docker with args, feeding stdin if non-nil, and returns stdout.
 	// A non-zero exit returns an *Error carrying stderr.
 	Output(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error)
-	// Passthrough runs docker with args attached to the current stdio.
+	// Passthrough runs docker with args attached to the current stdio,
+	// with its output passed through termtext.Filter.
 	Passthrough(ctx context.Context, args ...string) error
 	// Stream starts docker with args and returns its stdout. Calling the
 	// returned function waits for the process to exit, returning an *Error
@@ -103,12 +110,43 @@ func (r ExecRunner) Output(ctx context.Context, stdin io.Reader, args ...string)
 	return stdout.buf.Bytes(), nil
 }
 
-// Passthrough implements Runner.
+// Passthrough implements Runner. The output of a build or pull, or of a
+// sign-in running in a container, comes from the image, so it is passed
+// through termtext.Filter rather than straight to the terminal. When
+// stdout and stderr are both terminals, docker runs with them on a
+// pseudo-terminal of its own, which keeps its progress display and the
+// terminal size for `exec -it`, and with stdin left on the caller's, so
+// docker reads and sets up the terminal itself as before. Otherwise its
+// stdout and stderr are each filtered on the way to the caller's.
 func (r ExecRunner) Passthrough(ctx context.Context, args ...string) error {
+	return r.passthrough(ctx, os.Stdin, os.Stdout, os.Stderr, args)
+}
+
+func (r ExecRunner) passthrough(ctx context.Context, stdin, stdout, stderr *os.File, args []string) error {
+	if term.IsTerminal(int(stdout.Fd())) && term.IsTerminal(int(stderr.Fd())) {
+		winch := make(chan os.Signal, 1)
+		signal.Notify(winch, syscall.SIGWINCH)
+		defer signal.Stop(winch)
+		code, err := hostterm.Relay(ctx, append([]string{r.bin()}, args...), hostterm.Options{
+			HostStdin: stdin,
+			Stdout:    stdout,
+			Size:      func() (*pty.Winsize, error) { return pty.GetsizeFull(stdout) },
+			Winch:     winch,
+		})
+		if err == nil && code != 0 {
+			err = fmt.Errorf("exit status %d", code)
+		}
+		if err != nil {
+			return &Error{Args: args, Err: err}
+		}
+		return nil
+	}
 	cmd := exec.CommandContext(ctx, r.bin(), args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	if stdin != nil {
+		cmd.Stdin = stdin
+	}
+	cmd.Stdout = termtext.NewFilter(stdout)
+	cmd.Stderr = termtext.NewFilter(stderr)
 	if err := cmd.Run(); err != nil {
 		return &Error{Args: args, Err: err}
 	}
