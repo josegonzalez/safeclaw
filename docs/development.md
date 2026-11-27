@@ -80,6 +80,8 @@ make dev
 
 This runs [air](https://github.com/air-verse/air), which rebuilds on Go changes and runs `safeclaw dashboard --dev`. In dev mode, templates and static files are read from `internal/dashboard` on every request, so HTML, CSS, and JS edits only need a browser refresh. Go changes restart the dashboard with a new token, so open the newly printed URL after each rebuild.
 
+Dev mode trusts the working directory: `internal/dashboard` is read relative to wherever `safeclaw dashboard --dev` runs, and its templates and scripts are served with the dashboard's token. Only run it from a checkout you control, never from a directory a session container can write to, such as a project mounted into a session with `-v`.
+
 ## Releasing
 
 Run the Release workflow from the Actions tab (or `gh workflow run release.yml -f bump_type=patch`) and pick `patch`, `minor`, or `major`. It:

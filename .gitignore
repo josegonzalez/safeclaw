@@ -3,3 +3,5 @@
 /safeclaw
 .playwright-mcp/
 /completions/
+.env
+*.pem
