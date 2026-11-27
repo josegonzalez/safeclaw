@@ -36,6 +36,9 @@ func TestOfflineRendering(t *testing.T) {
 	if !strings.Contains(body, `id="offline-safeclaw-triage"`) || !strings.Contains(body, "safeclaw net on triage") {
 		t.Error("offline placeholder missing")
 	}
+	if !strings.Contains(body, `class="frame-offline-placeholder" id="offline-safeclaw-triage"`) {
+		t.Error("offline placeholder lost its own class")
+	}
 	if !strings.Contains(body, `<iframe id="iframe-safeclaw-work" src="/sessions/work/terminal">`) {
 		t.Error("online frame missing")
 	}
