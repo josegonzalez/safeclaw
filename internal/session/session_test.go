@@ -34,6 +34,8 @@ type fakeContainer struct {
 	ID string
 	// NetworkMode defaults to "bridge".
 	NetworkMode string
+	// IpcMode defaults to "private".
+	IpcMode string
 	// Nets are the attached networks. Nil means only "bridge", unless
 	// Offline is set.
 	Nets map[string]docker.Endpoint
@@ -110,6 +112,10 @@ func (w *world) inspectJSON(names []string) []byte {
 		if mode == "" {
 			mode = "bridge"
 		}
+		ipc := c.IpcMode
+		if ipc == "" {
+			ipc = "private"
+		}
 		nets := c.networks()
 		out = append(out, map[string]any{
 			"Id":              id,
@@ -117,7 +123,7 @@ func (w *world) inspectJSON(names []string) []byte {
 			"Image":           c.Image,
 			"Config":          map[string]any{"Labels": c.Labels},
 			"State":           map[string]any{"Status": status, "Running": c.Running},
-			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode},
+			"HostConfig":      map[string]any{"PortBindings": bindings, "AutoRemove": c.AutoRemove, "Memory": c.Memory, "NanoCpus": c.NanoCPUs, "PidsLimit": c.PidsLimit, "NetworkMode": mode, "IpcMode": ipc},
 			"NetworkSettings": map[string]any{"Networks": nets},
 			"Mounts":          mounts,
 		})
@@ -156,6 +162,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		var mounts []string
 		var autoRemove bool
 		var memory, cpus, pids int64
+		ipc := ""
 		mode := ""
 		labels := map[string]string{}
 		image := ""
@@ -187,6 +194,8 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 				pids, _ = strconv.ParseInt(args[i+1], 10, 64)
 			case "--network":
 				mode = args[i+1]
+			case "--ipc=host":
+				ipc = "host"
 			}
 		}
 		id := w.image
@@ -202,7 +211,7 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		}
 		w.runs++
 		w.containers[name] = &fakeContainer{Running: fail.err == nil, Port: port, Mounts: mounts, Image: id, RunImage: image, Labels: labels, AutoRemove: autoRemove,
-			Memory: memory, NanoCPUs: cpus, PidsLimit: pids, ID: fmt.Sprintf("id-%s-%d", name, w.runs), NetworkMode: mode, Offline: mode == "none"}
+			Memory: memory, NanoCPUs: cpus, PidsLimit: pids, ID: fmt.Sprintf("id-%s-%d", name, w.runs), NetworkMode: mode, IpcMode: ipc, Offline: mode == "none"}
 		return []byte("id\n"), fail.err
 	case args[0] == "rm":
 		delete(w.containers, args[len(args)-1])
@@ -305,7 +314,7 @@ func TestEnsureCreatesContainer(t *testing.T) {
 	if !ok {
 		t.Fatal("no docker run")
 	}
-	want := "run -d --ipc=host --name safeclaw-work -p 127.0.0.1:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects safeclaw sleep infinity"
+	want := "run -d --name safeclaw-work -p 127.0.0.1:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects safeclaw sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}

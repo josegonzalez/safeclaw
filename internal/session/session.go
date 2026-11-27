@@ -213,6 +213,28 @@ func variantArgs(name string) []string {
 	return []string{"--label", config.LabelVariant + "=" + name}
 }
 
+// hostIPCOf reports whether the user opted a container into the host's IPC
+// namespace. Containers without the label, including ones created before
+// private namespaces became the default, have not.
+func hostIPCOf(c docker.Container) bool {
+	return c.Label(config.LabelIPC) == config.IPCHost
+}
+
+// sharesHostIPC reports whether a container is in the host's IPC namespace.
+func sharesHostIPC(c docker.Container) bool {
+	return c.HostConfig.IpcMode == config.IPCHost
+}
+
+// ipcArgs returns the `docker run` flags for a session's IPC namespace:
+// docker's default private one, or the host's with a label recording the
+// choice.
+func ipcArgs(host bool) []string {
+	if !host {
+		return nil
+	}
+	return []string{"--ipc=" + config.IPCHost, "--label", config.LabelIPC + "=" + config.IPCHost}
+}
+
 func (m *Manager) out() io.Writer {
 	if m.Out == nil {
 		return io.Discard
@@ -280,6 +302,11 @@ type Options struct {
 	// container's set, or gives a new one every secret. A different set
 	// recreates an existing container. Names it lists must exist.
 	Secrets *SecretSet
+	// HostIPC shares the docker host's IPC namespace and /dev/shm with the
+	// session when true, and gives it a private one when false. Nil keeps an
+	// existing container's choice, or gives a new one a private namespace.
+	// A different choice recreates an existing container.
+	HostIPC *bool
 	// Query is sent to Claude Code once it is ready.
 	Query string
 	// NoOpen skips opening the browser.
@@ -354,6 +381,17 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		set = *opts.Secrets
 	}
 
+	hostIPC := existing != nil && hostIPCOf(*existing)
+	ipcChanged := false
+	if opts.HostIPC != nil {
+		// Recreate when either the recorded choice or the container itself
+		// differs, so a container created with host IPC before the label
+		// existed can be moved to a private namespace, or have its choice
+		// recorded.
+		ipcChanged = existing != nil && (*opts.HostIPC != hostIPC || *opts.HostIPC != sharesHostIPC(*existing))
+		hostIPC = *opts.HostIPC
+	}
+
 	if err := m.ensureTokens(opts.Interactive, set); err != nil {
 		return nil, err
 	}
@@ -382,9 +420,9 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	// created, so a failed recreate never leaves the session without its
 	// container and the secret set recorded in its label.
 	var restore func() error
-	if existing != nil && (opts.Volume != "" || changed || secretsChanged) {
+	if existing != nil && (opts.Volume != "" || changed || secretsChanged || ipcChanged) {
 		if offline {
-			return nil, fmt.Errorf("session %q %w: run `safeclaw net on %s` before changing its volume, variant, or secrets", name, ErrOffline, name)
+			return nil, fmt.Errorf("session %q %w: run `safeclaw net on %s` before changing its volume, variant, secrets, or IPC namespace", name, ErrOffline, name)
 		}
 		oldVolumes := existing.BindSpecs(config.ProjectsMount)
 		if opts.Volume == "" {
@@ -401,10 +439,16 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			m.printf("Volume mount requested. Removing existing container...\n")
 		case changed:
 			m.printf("Variant %s requested. Removing existing container...\n", variant.Label(want))
-		default:
+		case secretsChanged:
 			m.printf("Secrets changed to %s. Removing existing container...\n", set)
+		case hostIPC:
+			m.printf("Host IPC namespace requested. Removing existing container...\n")
+		default:
+			m.printf("Private IPC namespace requested. Removing existing container...\n")
 		}
-		oldVariant, oldSet := variantOf(*existing), secretsOf(*existing)
+		// The restored container keeps the recorded IPC choice, so one that
+		// shared the host's without opting in comes back private.
+		oldVariant, oldSet, oldHostIPC := variantOf(*existing), secretsOf(*existing), hostIPCOf(*existing)
 		if err := m.Docker.Remove(ctx, container, true); err != nil {
 			return nil, err
 		}
@@ -422,8 +466,14 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 					return err
 				}
 			}
-			return m.create(ctx, name, container, port, oldVariant, oldSet, oldVolumes)
+			return m.create(ctx, name, container, port, oldVariant, oldSet, oldHostIPC, oldVolumes)
 		}
+	}
+
+	// A kept container that shares the host's IPC namespace without opting
+	// in predates private namespaces becoming the default.
+	if existing != nil && !hostIPC && sharesHostIPC(*existing) {
+		m.printf("Warning: session %s shares the host's IPC namespace because it was created before private namespaces became the default. Run with --host-ipc=false to recreate it with a private one, or --host-ipc to keep sharing it\n", name)
 	}
 
 	if port == 0 {
@@ -456,7 +506,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			m.printf("Warning: session %s has history from an earlier container, but no secret selection is remembered, so it receives every secret. Use --secrets or --no-secrets to limit it\n", name)
 		}
 		m.printf("Creating container: %s\n", container)
-		if err := m.create(ctx, name, container, port, want, set, volumes); err != nil {
+		if err := m.create(ctx, name, container, port, want, set, hostIPC, volumes); err != nil {
 			if restore != nil {
 				if rerr := restore(); rerr != nil {
 					return nil, fmt.Errorf("%w (restoring the previous container also failed: %w)", err, rerr)
@@ -571,17 +621,21 @@ func (m *Manager) hasHistory(name string) bool {
 	return err == nil
 }
 
-func (m *Manager) create(ctx context.Context, name, container string, port int, variantName string, set SecretSet, volumes []string) error {
+// create runs a session container. It gets docker's default private IPC
+// namespace and /dev/shm unless hostIPC is set: Playwright launches Chromium
+// with --disable-dev-shm-usage, so the default 64 MiB /dev/shm is enough.
+func (m *Manager) create(ctx context.Context, name, container string, port int, variantName string, set SecretSet, hostIPC bool, volumes []string) error {
 	dataDir := filepath.Join(m.SessionsDir, name)
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return err
 	}
-	args := []string{
-		"-d", "--ipc=host",
+	args := []string{"-d"}
+	args = append(args, ipcArgs(hostIPC)...)
+	args = append(args,
 		"--name", container,
 		"-p", fmt.Sprintf("127.0.0.1:%d:%d", port, config.TTYDPort),
-		"-v", dataDir + ":" + config.ProjectsMount,
-	}
+		"-v", dataDir+":"+config.ProjectsMount,
+	)
 	args = append(args, variantArgs(variantName)...)
 	args = append(args, secretArgs(set)...)
 	for _, volume := range volumes {
