@@ -157,8 +157,8 @@ func NetworkDir() string {
 	return filepath.Join(Dir(), "network")
 }
 
-// CopyDir returns the directory holding the lock that serializes copies
-// into sandboxes across safeclaw processes.
+// CopyDir returns the directory holding the per-sandbox locks that
+// serialize copies into each sandbox across safeclaw processes.
 func CopyDir() string {
 	return filepath.Join(Dir(), "copy")
 }

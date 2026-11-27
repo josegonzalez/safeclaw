@@ -248,8 +248,8 @@ type Manager struct {
 	// NetworkDir holds the saved state of offline sessions. Defaults to
 	// config.NetworkDir().
 	NetworkDir string
-	// CopyDir holds the lock that serializes copies into sandboxes.
-	// Defaults to config.CopyDir().
+	// CopyDir holds the per-sandbox locks that serialize copies into each
+	// sandbox. Defaults to config.CopyDir().
 	CopyDir string
 	// TTYDDir holds each session's ttyd credential. Defaults to
 	// config.TTYDDir().

@@ -247,14 +247,17 @@ func (m *Manager) CopyIn(ctx context.Context, name string, files []string, dest 
 		srcs = append(srcs, s)
 	}
 
-	// The lock keeps concurrent copies from picking the same numbers; tar's
-	// -k refuses to overwrite anything regardless.
-	unlock, err := lockFile(m.copyDir())
+	// The lock keeps concurrent copies into this sandbox from picking the
+	// same numbers; tar's -k refuses to overwrite anything regardless. Code
+	// in the sandbox can stall these execs, so the lock is the sandbox's
+	// own, keeping copies into other sandboxes from waiting on it, and the
+	// wait ends with ctx.
+	container := config.ContainerName(name)
+	unlock, err := lockFileCtx(ctx, m.copyDir(), container+".lock")
 	if err != nil {
 		return nil, err
 	}
 	defer unlock()
-	container := config.ContainerName(name)
 	if _, err := m.Docker.Exec(ctx, container, copyExec, copyCommand(mkdirBin, "-p", "--", dest)...); err != nil {
 		return nil, err
 	}
