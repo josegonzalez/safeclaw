@@ -195,8 +195,9 @@ func (s *Server) apiDelete(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, status, apiResult{Error: err.Error()})
 		return
 	}
+	// A session held offline is refused, naming its holders.
 	err = s.sessions.Delete(r.Context(), name, false)
-	writeJSON(w, apiResult{Success: err == nil, Error: errString(err)})
+	writeJSONStatus(w, errStatus(err, http.StatusOK), apiResult{Success: err == nil, Error: errString(err)})
 }
 
 func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {

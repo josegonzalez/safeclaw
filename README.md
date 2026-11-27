@@ -132,7 +132,7 @@ safeclaw ls                      # NETWORK shows: offline (triage)
 safeclaw net on work --owner triage
 ```
 
-Each `net off` records a hold for its `--owner` (or one shared unnamed hold without it), and the session is reconnected only once every hold is released, so one job can't bring a session back online while another still relies on it being offline. `--force` releases every hold. The saved state is tied to the container, so a session recreated under the same name starts online. See [architecture](docs/architecture.md#offline-sessions) for details.
+Each `net off` records a hold for its `--owner` (or one shared unnamed hold without it), and the session is reconnected only once every hold is released, so one job can't bring a session back online while another still relies on it being offline. `--force` releases every hold. A held session can't be removed either: `safeclaw rm` and the dashboard's delete refuse it, naming its holders, until they release their holds, and `safeclaw rm --release-holds` removes it anyway. The saved state is tied to the container, so a session recreated under the same name starts online. See [architecture](docs/architecture.md#offline-sessions) for details.
 
 ## Image variants
 
@@ -275,7 +275,7 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw ls` | List sessions and sandboxes |
 | `safeclaw url NAME` | Print a running session's terminal URL with its credential. `--open` also opens it, through the dashboard when one is running |
 | `safeclaw stop NAME` | Stop a session |
-| `safeclaw rm NAME` | Delete a session container (history and its secrets and auto memory choices are kept) |
+| `safeclaw rm NAME` | Delete a session container (history and its secrets and auto memory choices are kept). `-f` removes a running one, and `--release-holds` one held offline. |
 | `safeclaw attach NAME` | Attach to a session's tmux session in this terminal. Clipboard writes, passthrough, hyperlinks to anything but http and https sites off localhost, and other sequences that act on the host terminal are filtered out ([details](docs/architecture.md#attaching-from-the-host)) |
 | `safeclaw net off NAME` | Save a session's networks and disconnect it from them. `--owner` names the hold and `--reason` says why. |
 | `safeclaw net on NAME` | Release the hold for `--owner` (or the unnamed hold) and reconnect the session once none remain. `--force` releases every hold. |

@@ -265,7 +265,11 @@ While a session is offline, or held offline but still attached:
 - `run` and the dashboard's start still start or refresh it, warning that the web terminal is unreachable, and a started or running held session is disconnected again from any network attached to it
 - `run` refuses to recreate it for a new `-v`, `--variant`, set of secrets, `--host-ipc` or `--no-memory` choice, or `--fresh-history`, so it can't come back online as a new container. `run` and the dashboard's start also refuse a session still published on `127.0.0.1` that they would move to `[::1]`, until `net on`
 - `safeclaw build --recreate` skips it, checking under the network lock just before each removal, and the stale report marks it `(offline)`
-- `safeclaw rm` removes its saved state along with the container
+- `safeclaw url` and the dashboard's terminal relay refuse it, so a held session that is still attached is not reachable through them either
+
+A session held offline can't be removed: `safeclaw rm`, the dashboard's delete, and `/api/delete` refuse it, naming its holders, so removing it can't take it from a job that relies on it being offline. `safeclaw rm --release-holds` removes it anyway, releasing every hold. A session that is offline without holds, for example after a raw `docker network disconnect`, is removed as before. `rm` checks the holds and removes the container, its saved state, and its ttyd credential under the network lock, which `run` and `net off` take too, so a container created and taken offline under the same name meanwhile keeps its hold. State that belongs to a container that has the session's name once the old one is removed, such as one created outside safeclaw, is kept.
+
+The saved state fails closed: if it can't be read, for example because it is corrupt, the session may be held, so `run`, the dashboard's start, `net off`, `net on`, `url`, the terminal relay, and `rm` refuse it with an error naming the file, `safeclaw build --recreate` skips it, and `safeclaw ls` shows it held by `unknown`. Fixing or removing the file brings it back, and `safeclaw rm --release-holds` removes the session along with the file.
 
 Sessions using host networking, or sharing another container's network, can't be disconnected, so `net off` refuses them. Sandboxes always run with `--network none`, so the `net` commands refuse them too.
 

@@ -592,6 +592,7 @@ var conflicts = []error{
 	session.ErrSharedNetwork,
 	session.ErrNoNetwork,
 	session.ErrHeld,
+	session.ErrUnreadableState,
 	session.ErrOffline,
 }
 
@@ -784,8 +785,9 @@ func (s *Server) handleConfirmed(kind string) http.HandlerFunc {
 			err = s.sessions.Delete(r.Context(), name, false)
 		}
 		if err != nil {
+			// A session held offline is refused, naming its holders.
 			d.Failed = err.Error()
-			s.render(w, http.StatusOK, "action", d)
+			s.render(w, errStatus(err, http.StatusOK), "action", d)
 			return
 		}
 		refresh(w)

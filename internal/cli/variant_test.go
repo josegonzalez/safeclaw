@@ -343,6 +343,43 @@ func TestReportStaleSkipsHeld(t *testing.T) {
 	}
 }
 
+// A session whose saved state can't be read may be held, so build
+// --recreate skips it and goes on with the others.
+func TestReportStaleSkipsUnreadableState(t *testing.T) {
+	containers := `[
+		{"Id": "a1", "Name": "/safeclaw-a", "Image": "old", "Config": {"Labels": {}}, "HostConfig": {"NetworkMode": "bridge"}, "NetworkSettings": {"Networks": {"bridge": {}}}},
+		{"Id": "b1", "Name": "/safeclaw-b", "Image": "old", "Config": {"Labels": {}}, "HostConfig": {"NetworkMode": "bridge"}, "NetworkSettings": {"Networks": {"bridge": {}}}}
+	]`
+	f := &fakeImages{images: map[string]string{"safeclaw": "new"}, containers: containers}
+	r := withFakes(t, f, "")
+	dir := newManager().NetworkDir
+	state := filepath.Join(dir, "b.json")
+	if err := os.WriteFile(state, []byte(`{not json`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if err := reportStale(t.Context(), r.Client(), &out, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "  b (offline)\n") {
+		t.Errorf("out = %q", out.String())
+	}
+
+	out.Reset()
+	if err := reportStale(t.Context(), r.Client(), &out, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), `Skipping session: session "b" may be held offline`) || !strings.Contains(out.String(), "Removed old container: safeclaw-a") {
+		t.Errorf("out = %q", out.String())
+	}
+	if _, ok := r.Find("rm -v -f safeclaw-b"); ok {
+		t.Error("session with unreadable state removed")
+	}
+	if _, err := os.Stat(state); err != nil {
+		t.Errorf("state removed: %v", err)
+	}
+}
+
 // build --recreate keeps the secrets and auto memory choices of the
 // sessions it removes, so running them again keeps them.
 func TestReportStaleKeepsChoices(t *testing.T) {

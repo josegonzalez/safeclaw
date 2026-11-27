@@ -759,6 +759,16 @@ func TestIntegrationNetwork(t *testing.T) {
 	}
 	offline("after restart")
 
+	if _, err := m.Terminal(ctx, name); !errors.Is(err, ErrNoTerminal) {
+		t.Errorf("terminal while offline: err = %v, want ErrNoTerminal", err)
+	}
+	if err := m.Delete(ctx, name, true); !errors.Is(err, ErrHeld) || !strings.Contains(err.Error(), "by itest") {
+		t.Errorf("rm while held: err = %v, want ErrHeld naming itest", err)
+	}
+	if c, err := d.InspectOne(ctx, container); err != nil || c == nil {
+		t.Fatalf("held session removed: %v", err)
+	}
+
 	if _, err := m.NetOn(ctx, name, NetOnOptions{}); !errors.Is(err, ErrHeld) {
 		t.Errorf("unnamed net on err = %v, want ErrHeld", err)
 	}

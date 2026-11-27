@@ -356,7 +356,8 @@ func oldTTYDError(name, variant string, kept bool) error {
 }
 
 // Terminal returns where to reach a running, online interactive session's
-// ttyd, and its credential. A session without one gets an error wrapping
+// ttyd, and its credential. A session held offline has none, even while
+// still attached. A session without one gets an error wrapping
 // ErrNoTerminal that says why.
 func (m *Manager) Terminal(ctx context.Context, name string) (*Terminal, error) {
 	name = config.SessionName(name)
@@ -376,6 +377,16 @@ func (m *Manager) Terminal(ctx context.Context, name string) (*Terminal, error) 
 		return nil, noTerminal("it is stopped; start it with `safeclaw run -s " + name + "`")
 	case Offline(*c):
 		return nil, noTerminal("it is offline; bring it back with `safeclaw net on " + name + "`")
+	}
+	// A held session that is still attached, for example after a failed
+	// disconnect, is relayed to no more than an offline one, and neither is
+	// one whose saved state can't be read.
+	holds, err := m.holdsFor(name, *c)
+	if err != nil {
+		return nil, fmt.Errorf("session %q %w: %w", name, ErrNoTerminal, err)
+	}
+	if len(holds) > 0 {
+		return nil, noTerminal("it is held offline by " + strings.Join(HoldLabels(holds), ", ") + "; bring it back with `safeclaw net on " + name + "`")
 	}
 	port := c.HostPort(config.TTYDPort)
 	if port == 0 {

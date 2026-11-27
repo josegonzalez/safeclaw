@@ -48,6 +48,11 @@ var ErrNoNetwork = errors.New("has no network to disconnect")
 // other owners still hold the session offline.
 var ErrHeld = errors.New("is held offline")
 
+// ErrUnreadableState is wrapped by the error returned when a session's
+// saved offline state can't be read. The session may be held offline, so
+// whatever could bring it online or remove it is refused.
+var ErrUnreadableState = errors.New("may be held offline")
+
 // ErrOffline is wrapped by the error returned when an offline session would
 // have to be recreated.
 var ErrOffline = errors.New("is offline")
@@ -63,15 +68,27 @@ type Hold struct {
 	Owner  string    `json:"owner"`
 	Reason string    `json:"reason,omitempty"`
 	Since  time.Time `json:"since"`
+
+	// unknown marks the hold listings show for a session whose saved
+	// state can't be read, which counts as held.
+	unknown bool
 }
 
-// Label returns the owner, or "unnamed" for the unnamed hold.
+// Label returns the owner, "unnamed" for the unnamed hold, or "unknown"
+// for a session whose saved state can't be read.
 func (h Hold) Label() string {
-	if h.Owner == "" {
+	switch {
+	case h.unknown:
+		return "unknown"
+	case h.Owner == "":
 		return "unnamed"
 	}
 	return h.Owner
 }
+
+// unknownHold is the hold listed for a session whose saved state can't be
+// read.
+var unknownHold = Hold{Reason: "its offline state can't be read", unknown: true}
 
 // HoldLabels returns each hold's label.
 func HoldLabels(holds []Hold) []string {
@@ -294,7 +311,7 @@ func (m *Manager) removeState(name string) error {
 func (m *Manager) currentState(name string, c docker.Container) (*netState, error) {
 	st, err := m.readState(name)
 	if err != nil {
-		return nil, err
+		return nil, m.unreadableState(name, err)
 	}
 	if st != nil && st.ContainerID != c.ID {
 		m.printf("Ignoring saved network state for %s: it belongs to an earlier container\n", name)
@@ -310,25 +327,50 @@ func (m *Manager) currentState(name string, c docker.Container) (*netState, erro
 }
 
 // holdsFor returns the holds on a container, ignoring state that belongs to
-// another container or cannot be read. Writes are atomic renames, so it
-// needs no lock.
-func (m *Manager) holdsFor(name string, c docker.Container) []Hold {
+// another container. State that can't be read fails closed: it returns an
+// error wrapping ErrUnreadableState, since the session may be held. Writes
+// are atomic renames, so it needs no lock.
+func (m *Manager) holdsFor(name string, c docker.Container) ([]Hold, error) {
 	if TypeOf(c) == config.TypeSandbox {
-		return nil
+		return nil, nil
 	}
 	st, err := m.readState(name)
-	if err != nil || st == nil || st.ContainerID != c.ID {
-		return nil
+	if err != nil {
+		return nil, m.unreadableState(name, err)
 	}
-	return st.Holds
+	if st == nil || st.ContainerID != c.ID {
+		return nil, nil
+	}
+	return st.Holds, nil
+}
+
+// unreadableState returns the error for a session whose saved state can't
+// be read, wrapping ErrUnreadableState.
+func (m *Manager) unreadableState(name string, err error) error {
+	return fmt.Errorf("session %q %w: its offline state in %s can't be read (%w). Fix or remove that file, or remove the session with `safeclaw rm --release-holds %s`", name, ErrUnreadableState, m.statePath(name), err, name)
+}
+
+// listedHolds returns the holds a listing shows for a container, with the
+// unknown hold for one whose saved state can't be read.
+func (m *Manager) listedHolds(name string, c docker.Container) []Hold {
+	holds, err := m.holdsFor(name, c)
+	if err != nil {
+		return []Hold{unknownHold}
+	}
+	return holds
 }
 
 // OfflineOrHeld reports whether a session is offline or held offline. A
 // held session counts as offline even while something keeps it attached,
 // such as a failed disconnect or a network docker restored. Sandboxes never
-// are.
-func (m *Manager) OfflineOrHeld(c docker.Container) bool {
-	return Offline(c) || len(m.holdsFor(config.SessionName(c.ShortName()), c)) > 0
+// are. A session whose saved state can't be read counts as held, and the
+// error says why.
+func (m *Manager) OfflineOrHeld(c docker.Container) (bool, error) {
+	holds, err := m.holdsFor(config.SessionName(c.ShortName()), c)
+	if err != nil {
+		return true, err
+	}
+	return Offline(c) || len(holds) > 0, nil
 }
 
 // netTarget returns the interactive session a network change applies to,
@@ -615,9 +657,13 @@ func (m *Manager) RemoveStale(ctx context.Context, c docker.Container) (removed 
 	if err != nil || cur == nil || cur.ID != c.ID {
 		return false, err
 	}
-	if m.OfflineOrHeld(*cur) {
+	holds, err := m.holdsFor(name, *cur)
+	if err != nil {
+		return false, err
+	}
+	if Offline(*cur) || len(holds) > 0 {
 		by := ""
-		if holds := m.holdsFor(name, *cur); len(holds) > 0 {
+		if len(holds) > 0 {
 			by = " by " + strings.Join(HoldLabels(holds), ", ")
 		}
 		return false, fmt.Errorf("session %q %w%s", name, ErrOffline, by)
@@ -629,9 +675,34 @@ func (m *Manager) RemoveStale(ctx context.Context, c docker.Container) (removed 
 	if err := m.Docker.Remove(ctx, container, true); err != nil {
 		return false, err
 	}
-	// Any saved state belonged to the removed container.
-	if err := m.removeState(name); err != nil {
+	if err := m.removeRemovedState(ctx, name, false); err != nil {
 		return true, err
 	}
 	return true, nil
+}
+
+// removeRemovedState deletes a session's saved state once its container
+// has been removed, unless the state belongs to a container that now has
+// the session's name, such as one created outside safeclaw. State that
+// can't be read is an error, unless anyway is set, which removes it. The
+// caller holds the network lock, so no safeclaw process creates a container
+// or takes one offline meanwhile.
+func (m *Manager) removeRemovedState(ctx context.Context, name string, anyway bool) error {
+	st, err := m.readState(name)
+	switch {
+	case err != nil && anyway:
+		return m.removeState(name)
+	case err != nil:
+		return m.unreadableState(name, err)
+	case st == nil:
+		return nil
+	}
+	cur, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
+	if err != nil {
+		return err
+	}
+	if cur != nil && cur.ID == st.ContainerID {
+		return nil
+	}
+	return m.removeState(name)
 }
