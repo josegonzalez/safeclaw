@@ -1,10 +1,11 @@
 diff --git a/src/http.c b/src/http.c
+index eea62af..4ec091a 100644
 --- a/src/http.c
 +++ b/src/http.c
-@@ -11,12 +11,23 @@
+@@ -11,12 +11,23 @@ enum { AUTH_OK, AUTH_FAIL, AUTH_ERROR };
  static char *html_cache = NULL;
  static size_t html_cache_len = 0;
-
+ 
 +// Tell the browser not to render the response inside a frame, so another
 +// page can't overlay the terminal and pass the user's keystrokes through.
 +static int add_frame_headers(struct lws *wsi, unsigned char **p, unsigned char *end) {
@@ -20,13 +21,32 @@ diff --git a/src/http.c b/src/http.c
    unsigned char buffer[1024 + LWS_PRE], *p, *end;
    p = buffer + LWS_PRE;
    end = p + sizeof(buffer) - LWS_PRE;
-
+ 
 -  if (lws_add_http_header_status(wsi, code, &p, end) ||
 +  if (lws_add_http_header_status(wsi, code, &p, end) || add_frame_headers(wsi, &p, end) ||
        lws_add_http_header_by_token(wsi, header, (unsigned char *)"Basic realm=\"ttyd\"", 18, &p, end) ||
        lws_add_http_header_content_length(wsi, 0, &p, end) || lws_finalize_http_header(wsi, &p, end) ||
        lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0)
-@@ -116,7 +127,7 @@
+@@ -25,6 +36,18 @@ static int send_unauthorized(struct lws *wsi, unsigned int code, enum lws_token_
+   return lws_http_transaction_completed(wsi) ? AUTH_FAIL : AUTH_ERROR;
+ }
+ 
++// send_not_found answers 404 with no body. It is used instead of
++// lws_return_http_status, which can't add the framing headers.
++static int send_not_found(struct lws *wsi) {
++  unsigned char buffer[1024 + LWS_PRE], *p, *end;
++  p = buffer + LWS_PRE;
++  end = p + sizeof(buffer) - LWS_PRE;
++
++  return lws_add_http_header_status(wsi, HTTP_STATUS_NOT_FOUND, &p, end) || add_frame_headers(wsi, &p, end) ||
++         lws_add_http_header_content_length(wsi, 0, &p, end) || lws_finalize_http_header(wsi, &p, end) ||
++         lws_write(wsi, buffer + LWS_PRE, p - (buffer + LWS_PRE), LWS_WRITE_HTTP_HEADERS) < 0;
++}
++
+ static int check_auth(struct lws *wsi, struct pss_http *pss) {
+   if (server->auth_header != NULL) {
+     if (lws_hdr_custom_length(wsi, server->auth_header, strlen(server->auth_header)) > 0) return AUTH_OK;
+@@ -116,7 +139,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
        if (strcmp(pss->path, endpoints.token) == 0) {
          const char *credential = server->credential != NULL ? server->credential : "";
          size_t n = sprintf(buf, "{\"token\": \"%s\"}", credential);
@@ -35,8 +55,8 @@ diff --git a/src/http.c b/src/http.c
              lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_CONTENT_TYPE,
                                           (unsigned char *)"application/json;charset=utf-8", 30, &p, end) ||
              lws_add_http_header_content_length(wsi, (unsigned long)n, &p, end) ||
-@@ -132,7 +143,7 @@
-
+@@ -132,7 +155,7 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
+ 
        // redirects `/base-path` to `/base-path/`
        if (strcmp(pss->path, endpoints.parent) == 0) {
 -        if (lws_add_http_header_status(wsi, HTTP_STATUS_FOUND, &p, end) ||
@@ -44,8 +64,15 @@ diff --git a/src/http.c b/src/http.c
              lws_add_http_header_by_token(wsi, WSI_TOKEN_HTTP_LOCATION, (unsigned char *)endpoints.index,
                                           (int)strlen(endpoints.index), &p, end) ||
              lws_add_http_header_content_length(wsi, 0, &p, end) || lws_finalize_http_header(wsi, &p, end) ||
-@@ -148,12 +159,14 @@
-
+@@ -142,18 +165,20 @@ int callback_http(struct lws *wsi, enum lws_callback_reasons reason, void *user,
+       }
+ 
+       if (strcmp(pss->path, endpoints.index) != 0) {
+-        lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, NULL);
++        if (send_not_found(wsi)) return 1;
+         goto try_to_reuse;
+       }
+ 
        const char *content_type = "text/html";
        if (server->index != NULL) {
 -        int n = lws_serve_http_file(wsi, server->index, content_type, NULL, 0);
