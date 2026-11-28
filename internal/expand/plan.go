@@ -23,8 +23,8 @@ type PlanItem struct {
 	// when the skip list has its path.
 	Container
 	// Listed is set for a container a later run could open: one that
-	// needed a password, was too large, failed, or was skipped, or a new
-	// input. Its entries or parts follow, or ListError says why they
+	// needed a password, was too large, failed, was skipped, or is held,
+	// or a new input. Its entries or parts follow, or ListError says why they
 	// couldn't be listed.
 	Listed bool
 	// Entries are an archive's entries, as `safeclaw-unpack list` lists
@@ -44,11 +44,14 @@ type PlanItem struct {
 // manifest dest must be missing or an empty directory and inputs given,
 // though input directories with no files in them are fine. Inputs are
 // resolved as Run resolves them.
-// Options.Depth and Options.NoMail must be the destination's; skips and
-// the size limit aren't used.
+// Options.Depth, Options.NoMail, and Options.Hold must be the
+// destination's; skips, releases, and the size limit aren't used.
 func Plan(ctx context.Context, inputs []string, dest string, o Options) ([]PlanItem, error) {
 	if len(o.Skip) > 0 || len(o.Unskip) > 0 {
 		return nil, errors.New("a plan doesn't change the skip list")
+	}
+	if len(o.Release) > 0 || o.ReleaseAll {
+		return nil, errors.New("a plan doesn't release anything")
 	}
 	sources, err := checkOptions(inputs, dest, o)
 	if err != nil {

@@ -275,3 +275,90 @@ func TestIntegrationSandboxExpandDir(t *testing.T) {
 		}
 	}
 }
+
+// TestIntegrationSandboxExpandHold runs safeclaw-expand --hold
+// mail-archives in a sandbox of the sandbox variant over two exec calls:
+// the first holds a zip attached to an email and one attached to a
+// forwarded message, and plans, and the second releases the first zip,
+// whose own zip is opened as usual, while the other stays held.
+func TestIntegrationSandboxExpandHold(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, variant.Image(variant.Sandbox)); err != nil || id == "" {
+		t.Skip("sandbox variant not built; run `safeclaw build --variant sandbox` first")
+	}
+	makeZip := func(name, data string) string {
+		var b bytes.Buffer
+		w := zip.NewWriter(&b)
+		if fw, err := w.Create(name); err != nil {
+			t.Fatal(err)
+		} else if _, err := fw.Write([]byte(data)); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return b.String()
+	}
+	email := func(subject, name, data string) string {
+		return "From: Eve <eve@example.com>\r\nSubject: " + subject + "\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n" +
+			"--b\r\nContent-Type: text/plain\r\n\r\nsee attached\r\n" +
+			"--b\r\nContent-Type: application/zip\r\nContent-Disposition: attachment; filename=\"" + name + "\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" + base64.StdEncoding.EncodeToString([]byte(data)) + "\r\n" +
+			"--b--\r\n"
+	}
+	forwarded := "From: Bob <bob@example.com>\r\nSubject: fwd\r\nContent-Type: multipart/mixed; boundary=f\r\n\r\n" +
+		"--f\r\nContent-Type: text/plain\r\n\r\nsee below\r\n" +
+		"--f\r\nContent-Type: message/rfc822\r\n\r\n" + email("inner", "fwd.zip", makeZip("f.txt", "f\n")) + "\r\n--f--\r\n"
+	in := t.TempDir()
+	for name, data := range map[string]string{
+		"report.eml": email("report", "files.zip", makeZip("inner.zip", makeZip("deep.txt", "deep\n"))),
+		"fwd.eml":    forwarded,
+	} {
+		if err := os.WriteFile(filepath.Join(in, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := &Manager{Docker: d}
+	name := "itest-expand-hold"
+	container := config.ContainerName(name)
+	_ = d.Remove(ctx, container, true)
+	t.Cleanup(func() { _ = d.Remove(context.Background(), container, true) })
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name, Volumes: []string{in + ":/in"}}); err != nil {
+		t.Fatal(err)
+	}
+	run := func(script string) string {
+		t.Helper()
+		out, err := d.Exec(ctx, container, copyExec, SandboxCommand([]string{"sh", "-c", script})...)
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		return string(out)
+	}
+	first := run(`
+safeclaw-expand --hold mail-archives /in/report.eml /in/fwd.eml /sandbox/out; echo "first=$?"
+test -e /sandbox/out/1-report.eml.unpacked/1-files.zip.unpacked && echo opened
+echo ---
+safeclaw-expand --plan --hold mail-archives /sandbox/out; echo "plan=$?"
+safeclaw-expand /sandbox/out >/dev/null 2>/dev/null; echo "nohold=$?"
+`)
+	second := run(`
+safeclaw-expand --hold mail-archives --release 1-report.eml.unpacked/1-files.zip /in/report.eml /in/fwd.eml /sandbox/out; echo "second=$?"
+cat /sandbox/out/1-report.eml.unpacked/1-files.zip.unpacked/inner.zip.unpacked/deep.txt
+grep -c '"outcome": "held"' /sandbox/out/manifest.json
+`)
+	for _, c := range []struct{ out, want string }{
+		{first, "email\t1-report.eml\tUNPACKED\t1-report.eml.unpacked\nzip\t1-report.eml.unpacked/1-files.zip\tHELD\t-\nemail\t2-fwd.eml\tUNPACKED\t2-fwd.eml.unpacked\nzip\t2-fwd.eml.unpacked/1-fwd.zip\tHELD\t-\nfirst=0\n---\n"},
+		{first, "---\nzip\t1-report.eml.unpacked/1-files.zip\tHELD\t-\nentry\tfile\t"},
+		{first, "\tinner.zip\t-\nzip\t2-fwd.eml.unpacked/1-fwd.zip\tHELD\t-\nentry\tfile\t2\tf.txt\t-\nplan=0\nnohold=1\n"},
+		{second, "zip\t1-report.eml.unpacked/1-files.zip\tUNPACKED\t1-report.eml.unpacked/1-files.zip.unpacked\nemail\t2-fwd.eml\tUNPACKED\t2-fwd.eml.unpacked\nzip\t2-fwd.eml.unpacked/1-fwd.zip\tHELD\t-\nzip\t1-report.eml.unpacked/1-files.zip.unpacked/inner.zip\tUNPACKED\t"},
+		{second, "second=0\ndeep\n1\n"},
+	} {
+		if !strings.Contains(c.out, c.want) {
+			t.Errorf("output lacks %q:\n%s", c.want, c.out)
+		}
+	}
+	if strings.Contains(first, "opened") {
+		t.Errorf("held zip opened:\n%s", first)
+	}
+}

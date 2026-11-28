@@ -47,7 +47,8 @@ type Manifest struct {
 	// already there.
 	Containers []Container `json:"containers"`
 	// Skip are the containers to leave packed, flagged SKIPPED, by path,
-	// whether or not they have been found yet.
+	// whether or not they have been found yet. A held container is never
+	// on it: skipping one turns it into a skipped one.
 	Skip []string `json:"skip,omitempty"`
 }
 
@@ -60,6 +61,9 @@ type ManifestOptions struct {
 	// Password is whether a password was given; the password itself is
 	// never written.
 	Password bool `json:"password"`
+	// Hold are the hold kinds the destination has, sorted, such as
+	// HoldMailArchives; none when it holds nothing.
+	Hold []string `json:"hold,omitempty"`
 }
 
 // Input is one input's copy in the destination.

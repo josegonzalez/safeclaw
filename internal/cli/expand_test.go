@@ -3,10 +3,12 @@ package cli
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -68,11 +70,11 @@ func TestExpandJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.Schema != expand.SchemaVersion || m.Status != "ok" || m.Options != (expand.ManifestOptions{Depth: 1, MaxSize: 1024}) || len(m.Inputs) != 1 || len(m.Containers) != 0 {
+	if m.Schema != expand.SchemaVersion || m.Status != "ok" || !reflect.DeepEqual(m.Options, expand.ManifestOptions{Depth: 1, MaxSize: 1024}) || len(m.Inputs) != 1 || len(m.Containers) != 0 {
 		t.Errorf("manifest = %+v", m)
 	}
 	disk, err := expand.ReadManifest(dest)
-	if err != nil || disk.Options != m.Options {
+	if err != nil || !reflect.DeepEqual(disk.Options, m.Options) {
 		t.Errorf("manifest.json = %+v, %v", disk, err)
 	}
 }
@@ -310,5 +312,58 @@ func TestExpandDirectory(t *testing.T) {
 	}
 	if _, errOut, err := runExpand(t, in, filepath.Join(in, "out")); !errors.Is(err, exitCodeError{1}) || !strings.Contains(errOut, "is inside the input directory") {
 		t.Errorf("dest inside: %v %q", err, errOut)
+	}
+}
+
+// TestExpandHold checks --hold mail-archives over reruns on one DEST: the
+// HELD line, the plan's entries for it, the hold a rerun keeps, the flags
+// --plan refuses, and --release.
+func TestExpandHold(t *testing.T) {
+	if _, err := unpack.Find(); err != nil {
+		t.Skip(err)
+	}
+	var b bytes.Buffer
+	w := zip.NewWriter(&b)
+	if fw, err := w.Create("x.txt"); err != nil {
+		t.Fatal(err)
+	} else if _, err := fw.Write([]byte("x\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	msg := "From: Eve <eve@example.com>\r\nSubject: r\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Type: text/plain\r\n\r\nsee attached\r\n" +
+		"--b\r\nContent-Type: application/zip\r\nContent-Disposition: attachment; filename=\"a.zip\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" + base64.StdEncoding.EncodeToString(b.Bytes()) + "\r\n--b--\r\n"
+	in := writeTestMail(t, msg)
+	dest := filepath.Join(t.TempDir(), "out")
+	out, errOut, err := runExpand(t, "--hold", "mail-archives", in, dest)
+	if err != nil {
+		t.Fatalf("%v: %s", err, errOut)
+	}
+	if out != "email\t1-m.eml\tUNPACKED\t1-m.eml.unpacked\nzip\t1-m.eml.unpacked/1-a.zip\tHELD\t-\n" || errOut != "" {
+		t.Errorf("first run = %q, %q", out, errOut)
+	}
+	if out, _, err := runExpand(t, "--plan", "--hold", "mail-archives", dest); err != nil || out != "zip\t1-m.eml.unpacked/1-a.zip\tHELD\t-\nentry\tfile\t2\tx.txt\t-\n" {
+		t.Errorf("plan = %q, %v", out, err)
+	}
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{dest}, "a later run keeps it (--hold mail-archives)"},
+		{[]string{"--hold", "all", dest}, `unknown hold kind "all"`},
+		{[]string{"--plan", "--hold", "mail-archives", "--release-all", dest}, "--plan can't be given"},
+		{[]string{"--plan", "--hold", "mail-archives", "--release", "1-m.eml", dest}, "--plan can't be given"},
+		{[]string{"--hold", "mail-archives", "--release", `bad\q`, dest}, "--release"},
+		{[]string{"--hold", "mail-archives", "--release", "1-m.eml", dest}, "1-m.eml is not held, it is UNPACKED"},
+	} {
+		if _, errOut, err := runExpand(t, c.args...); !errors.Is(err, exitCodeError{1}) || !strings.Contains(errOut, c.want) {
+			t.Errorf("%v: %v %q", c.args, err, errOut)
+		}
+	}
+	out, errOut, err = runExpand(t, "--hold", "mail-archives", "--release", "1-m.eml.unpacked/1-a.zip", dest)
+	if err != nil || out != "email\t1-m.eml\tUNPACKED\t1-m.eml.unpacked\nzip\t1-m.eml.unpacked/1-a.zip\tUNPACKED\t1-m.eml.unpacked/1-a.zip.unpacked\n" {
+		t.Errorf("release = %q, %v %q", out, err, errOut)
 	}
 }
