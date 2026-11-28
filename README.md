@@ -262,7 +262,7 @@ The choice is remembered with the container, and changing it recreates the conta
 | Command | Description |
 |---------|-------------|
 | `safeclaw build` | Build the image from the build context embedded in the binary (`--context .` for a checkout), then each `--variant` and every variant already built. Warns about sessions on an older image; `--recreate` removes them, skipping offline sessions. |
-| `safeclaw pull` | Pull `ghcr.io/josegonzalez/safeclaw` for this version and tag it `safeclaw`, then fetch each `--variant` and every variant already present |
+| `safeclaw pull` | Pull `ghcr.io/josegonzalez/safeclaw` for this version and tag it `safeclaw`, then fetch each `--variant` and every variant already present. `--verify` checks each published image's build provenance attestation with `gh attestation verify` and pulls it by the verified digest |
 | `safeclaw run` | Start/reuse a container, inject auth, start ttyd. `-s name` for named sessions, `-v` for volumes, `--variant` for an image variant, `--secrets`, `--no-secrets`, or `--all-secrets` to choose the secrets it receives, `--host-ipc` to share the host's IPC namespace, `--no-memory` to turn Claude Code's auto memory off, `--fresh-history` to move its history aside and start with an empty one, `-n` to skip opening the browser, `-q "question"` to start with a query. |
 | `safeclaw new` | Same as `run` but never prompts (used by the dashboard) |
 | `safeclaw dashboard` | Web dashboard for managing sessions |

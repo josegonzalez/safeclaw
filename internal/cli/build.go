@@ -142,20 +142,16 @@ func buildVariant(ctx context.Context, d *docker.Client, out io.Writer, v varian
 }
 
 // pullVariant pulls a published built-in variant for tag and tags it
-// locally. Variants from the config file are built on the local base image
-// instead.
-func pullVariant(ctx context.Context, d *docker.Client, out io.Writer, v variant.Variant, tag string) error {
+// locally, verifying it first when ver is set. Variants from the config
+// file are built on the local base image instead.
+func pullVariant(ctx context.Context, d *docker.Client, out io.Writer, ver *verifier, v variant.Variant, tag string) error {
 	if !v.Published() {
 		return buildVariant(ctx, d, out, v, false)
 	}
 	ref := variant.RemoteRef(tag, v.Name)
-	if err := d.R.Passthrough(ctx, "pull", ref); err != nil {
+	if err := pullImage(ctx, d, out, ver, ref, v.Image()); err != nil {
 		return fmt.Errorf("pull %s: %w (build it locally with `safeclaw build --variant %s`)", ref, err, v.Name)
 	}
-	if err := d.Tag(ctx, ref, v.Image()); err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "Tagged %s as %s\n", ref, v.Image())
 	return nil
 }
 

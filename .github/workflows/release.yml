@@ -24,7 +24,10 @@ env:
   IMAGE: ghcr.io/josegonzalez/safeclaw
 
 jobs:
+  # Releases are cut only from main. Every other job needs this one, so a run
+  # dispatched from another branch skips them all.
   test:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -44,9 +47,18 @@ jobs:
       - name: Run tests
         run: go test -race ./...
 
+      # Not updated by dependabot; bump by hand, with the one in ci.yml.
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
   # Tags the tested commit, so a failed test run leaves no tag behind.
   tag:
     needs: test
+    # Checked again here, since this job is the first that can write.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -111,6 +123,9 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      # Keyless signing of the provenance attestation through Sigstore.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,6 +146,12 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # One build provenance attestation covering every archive in
+      # checksums.txt.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/checksums.txt
 
   image:
     needs: tag
@@ -191,6 +212,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       packages: write
+      id-token: write
+      attestations: write
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
     steps:
@@ -235,6 +258,16 @@ jobs:
           fi
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
           echo "Manifest digest: $DIGEST"
+
+      # Attests the multi-arch index, which the version tag and latest point
+      # to, and pushes the attestation to ghcr next to it. Storage records
+      # need an organization-owned repository.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
 
   # Built-in image variants, built on the multi-arch image the manifest job
   # just published, by digest.
@@ -316,6 +349,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       packages: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -345,3 +380,24 @@ jobs:
             -t "${IMAGE}:${NEW_VERSION#v}-${VARIANT}" \
             -t "${IMAGE}:${VARIANT}" \
             "${sources[@]}"
+
+      - name: Resolve manifest digest
+        id: digest
+        env:
+          NEW_VERSION: ${{ needs.tag.outputs.new_version }}
+          VARIANT: ${{ matrix.variant }}
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "${IMAGE}:${NEW_VERSION#v}-${VARIANT}" --format '{{json .Manifest}}' | jq -r .digest)
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "unexpected manifest digest: $DIGEST" >&2
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Manifest digest: $DIGEST"
+
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.digest.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
