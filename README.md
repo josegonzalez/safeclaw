@@ -138,7 +138,18 @@ safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- safeclaw-expand /in/report.e
 SAFECLAW_UNPACK_PASSWORD=... safeclaw sandbox exec -e SAFECLAW_UNPACK_PASSWORD triage -- safeclaw-expand --json --no-mail /in/dump.tar.gz /sandbox/out
 ```
 
-`safeclaw-expand` exits 0 when the run finished, even with containers left packed, since the manifest and the flags say what was; and 1 when the run itself failed: a usage or I/O error, an input that is missing or not a regular file, a DEST that isn't missing or empty, or an interrupt, which empties DEST.
+Running it again on the same DEST resumes from the manifest, which is checked first so code in the sandbox can't make it trust a path outside DEST. Containers already opened, rejected, skipped, or past `--depth` are kept, the ones left `NEEDS-PASSWORD`, `TOO-LARGE`, or `FAILED` are tried again with the new run's password and `--max-size`, which counts what is already in DEST, and new inputs are opened as usual. `--skip PATH`, with the path as the lines print it, leaves a container packed and flagged `SKIPPED` on that run and later ones, and `--unskip PATH` opens it on a later run. `--plan` prints the containers not opened yet with their entries or parts, and the rejected ones one line each, without opening anything.
+
+```bash
+# Open what opens, leaving a zip to decide on later
+safeclaw sandbox exec triage -- safeclaw-expand --skip 2-logs.zip /in/report.eml /in/logs.zip /sandbox/out
+
+# See what is still packed, then try again with the password the email gave
+safeclaw sandbox exec triage -- safeclaw-expand --plan /sandbox/out
+SAFECLAW_UNPACK_PASSWORD=... safeclaw sandbox exec -e SAFECLAW_UNPACK_PASSWORD triage -- safeclaw-expand /sandbox/out
+```
+
+`safeclaw-expand` exits 0 when the run finished, even with containers left packed, since the manifest and the flags say what was; and 1 when the run itself failed: a usage or I/O error, an input that is missing or not a regular file, a DEST that isn't missing or empty and has no manifest, a manifest that was refused, or an interrupt. A first run that fails empties DEST, and a rerun that fails leaves it as it was.
 
 ```bash
 # Create a sandbox, mounting host directories read-only (-v repeats)

@@ -23,8 +23,9 @@ const ManifestFile = "manifest.json"
 // maxManifestSize limits how much of a manifest ReadManifest reads.
 const maxManifestSize = 64 << 20
 
-// Manifest is what Run did: one record per input and per container, every
-// path relative to the destination.
+// Manifest is what the runs on a destination did: one record per input and
+// per container, every path relative to the destination. It is also the
+// state a later run resumes from.
 type Manifest struct {
 	// Schema is SchemaVersion.
 	Schema int `json:"schema"`
@@ -32,16 +33,22 @@ type Manifest struct {
 	// containers left packed.
 	Status string `json:"status"`
 	Code   int    `json:"code"`
-	// Options are the policy the run had.
+	// Options are the policy the last run had.
 	Options ManifestOptions `json:"options"`
 	// Size is the total size of what was opened, the input copies not
 	// included: what counts toward Options.MaxSize.
 	Size int64 `json:"size"`
-	// Inputs are the copies of the inputs, in the order they were given.
+	// Inputs are the copies of the inputs, in the order they were given,
+	// across runs.
 	Inputs []Input `json:"inputs"`
-	// Containers are every email and archive found, in the order they were
-	// opened: each before the containers found in it.
+	// Containers are every email and archive found, each before the
+	// containers found in it. A container opened again by a later run
+	// keeps its place, and what is found in it comes after the records
+	// already there.
 	Containers []Container `json:"containers"`
+	// Skip are the containers to leave packed, flagged SKIPPED, by path,
+	// whether or not they have been found yet.
+	Skip []string `json:"skip,omitempty"`
 }
 
 // ManifestOptions is the policy a run had.
@@ -63,6 +70,9 @@ type Input struct {
 	Size int64  `json:"size"`
 	// Kind is the copy's container kind, "" when it isn't a container.
 	Kind string `json:"kind,omitempty"`
+	// SHA256 is the hex SHA-256 of the copy's content. An input with the
+	// same content as one already in the destination isn't copied again.
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // Container is one email or archive. Its Path is its key: it is unique in
@@ -113,9 +123,9 @@ type Entry struct {
 
 // Check reports an error when m isn't a manifest of SchemaVersion or names
 // a path that isn't a clean path inside the destination: every input,
-// container, parent, directory, and output must be relative, use slashes,
-// and have no empty, ".", or ".." elements, and container paths must be
-// unique.
+// container, parent, directory, output, and skip must be relative, use
+// slashes, and have no empty, ".", or ".." elements, and container paths
+// must be unique. Run checks much more before resuming from a manifest.
 func (m *Manifest) Check() error {
 	if m.Schema != SchemaVersion {
 		return fmt.Errorf("manifest schema %d, want %d", m.Schema, SchemaVersion)
@@ -138,6 +148,11 @@ func (m *Manifest) Check() error {
 			if p != "" && (!fs.ValidPath(p) || p == ".") {
 				return fmt.Errorf("manifest container %q names %q, which is not a path inside the destination", c.Path, p)
 			}
+		}
+	}
+	for _, p := range m.Skip {
+		if !fs.ValidPath(p) || p == "." {
+			return fmt.Errorf("manifest skip %q is not a path inside the destination", p)
 		}
 	}
 	return nil
@@ -175,7 +190,9 @@ func ReadManifest(dest string) (*Manifest, error) {
 	return &m, nil
 }
 
-// writeManifest writes m into root, never over an existing file.
+// writeManifest writes m into root in one step: into a new file with a
+// random name, which then replaces the manifest, so a reader or a later
+// run sees either the old manifest or the new one, never part of one.
 func writeManifest(root string, m *Manifest) error {
 	if err := m.Check(); err != nil {
 		return err
@@ -184,10 +201,20 @@ func writeManifest(root string, m *Manifest) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(root, ManifestFile), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
+	if len(data) >= maxManifestSize {
+		return fmt.Errorf("the manifest would be over %d bytes", maxManifestSize)
+	}
+	f, err := os.CreateTemp(root, ".manifest-*.json")
 	if err != nil {
 		return err
 	}
 	_, err = f.Write(append(data, '\n'))
-	return errors.Join(err, f.Close())
+	err = errors.Join(err, f.Chmod(0o644), f.Close())
+	if err == nil {
+		err = os.Rename(f.Name(), filepath.Join(root, ManifestFile))
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
+	}
+	return err
 }

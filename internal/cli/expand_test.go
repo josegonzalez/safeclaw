@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -167,6 +168,71 @@ func TestExpandFailures(t *testing.T) {
 	t.Setenv("PW", "a\nb")
 	if _, errOut, err := runExpand(t, "--password-env", "PW", file, filepath.Join(t.TempDir(), "out")); !errors.Is(err, exitCodeError{1}) || !strings.Contains(errOut, "line break") {
 		t.Errorf("password with a line break: %v %q", err, errOut)
+	}
+}
+
+// TestExpandResume checks reruns on one DEST: --skip and --unskip as the
+// lines write paths, the options a rerun keeps, and --plan.
+func TestExpandResume(t *testing.T) {
+	good := writeTestMail(t, testMail)
+	bad := writeTestMail(t, rejectedMail)
+	dest := filepath.Join(t.TempDir(), "out")
+	out, errOut, err := runExpand(t, "--depth", "1", "--max-size", "1m", "--skip", "1-m.eml", "--skip", `9-x\u202e.zip`, good, bad, dest)
+	if err != nil {
+		t.Fatalf("%v: %s", err, errOut)
+	}
+	if out != "email\t1-m.eml\tSKIPPED\t-\nemail\t2-m.eml\tREJECTED\t-\n" {
+		t.Errorf("first run = %q", out)
+	}
+	if !strings.Contains(errOut, "safeclaw-expand: no container at 9-x\\u202e.zip yet; the skip is kept for a later run\n") {
+		t.Errorf("stderr = %q", errOut)
+	}
+	m, err := expand.ReadManifest(dest)
+	if err != nil || !slices.Equal(m.Skip, []string{"1-m.eml", "9-x\u202e.zip"}) {
+		t.Fatalf("manifest = %+v, %v", m, err)
+	}
+
+	out, errOut, err = runExpand(t, "--plan", "--depth", "1", dest)
+	if err != nil {
+		t.Fatalf("%v: %s", err, errOut)
+	}
+	if !strings.HasPrefix(out, "email\t1-m.eml\tSKIPPED\t-\npart\t1\tmultipart/mixed\t") || !strings.Contains(out, "\npart\t1.2\tapplication/pdf\t4\t../in\\tv\\x1b.pdf\t") || !strings.HasSuffix(out, "\nemail\t2-m.eml\tREJECTED\t-\n") {
+		t.Errorf("plan = %q", out)
+	}
+	out, _, err = runExpand(t, "--plan", "--json", "--depth", "1", dest)
+	var plan struct {
+		Status     string
+		Containers []struct {
+			Path  string
+			Flags []string
+			Parts []mailPartJSON
+		}
+	}
+	if err != nil || json.Unmarshal([]byte(out), &plan) != nil || plan.Status != "ok" || len(plan.Containers) != 2 || len(plan.Containers[0].Parts) != 3 || plan.Containers[1].Parts != nil {
+		t.Errorf("plan --json = %q, %v", out, err)
+	}
+
+	// A rerun must give DEST's depth; nothing in DEST sets it.
+	for _, args := range [][]string{{"--depth", "2", dest}, {dest}, {"--plan", dest}} {
+		if _, errOut, err := runExpand(t, args...); !errors.Is(err, exitCodeError{1}) || !strings.Contains(errOut, "a later run keeps it (--depth 1)") {
+			t.Errorf("%v: %v %q", args, err, errOut)
+		}
+	}
+	if _, errOut, err := runExpand(t, "--plan", "--skip", "1-m.eml", dest); !errors.Is(err, exitCodeError{1}) || !strings.Contains(errOut, "--plan") {
+		t.Errorf("plan with skip: %v %q", err, errOut)
+	}
+	if _, errOut, err := runExpand(t, "--skip", `bad\q`, dest); !errors.Is(err, exitCodeError{1}) || !strings.Contains(errOut, "--skip") {
+		t.Errorf("bad escape: %v %q", err, errOut)
+	}
+	out, errOut, err = runExpand(t, "--depth", "1", "--unskip", "1-m.eml", good, dest)
+	if err != nil {
+		t.Fatalf("%v: %s", err, errOut)
+	}
+	if out != "email\t1-m.eml\tUNPACKED,UNSAFE-NAME\t1-m.eml.unpacked\nemail\t2-m.eml\tREJECTED\t-\n" {
+		t.Errorf("unskip = %q", out)
+	}
+	if m, err = expand.ReadManifest(dest); err != nil || m.Options.Depth != 1 || m.Options.MaxSize != 512<<20 || len(m.Inputs) != 2 {
+		t.Errorf("manifest = %+v, %v", m, err)
 	}
 }
 

@@ -2,7 +2,9 @@ package expand
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -100,6 +102,11 @@ func sortedKeys(m map[string]string) []string {
 
 var b64 = base64.StdEncoding.EncodeToString
 
+func sha256Of(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
 // email returns a message with a text body and the attachments given as
 // name, content pairs.
 func email(subject, body string, attachments ...string) string {
@@ -140,7 +147,11 @@ func writeInputs(t *testing.T, files ...string) []string {
 // that got out would land in the test's own directory.
 func newDest(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(t.TempDir(), "a", "b", "out")
+	dest := filepath.Join(t.TempDir(), "a", "b", "out")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dest
 }
 
 func run(t *testing.T, f *fakeRunner, o Options, inputs ...string) (string, *Manifest) {
@@ -238,7 +249,7 @@ func TestRunTree(t *testing.T) {
 	if !strings.Contains(parts, "1.2\tapplication/octet-stream\t4\tfiles.zip\tATTACHMENT\t1-files.zip\n") {
 		t.Errorf("parts.txt = %q", parts)
 	}
-	if !slices.Equal(m.Inputs, []Input{{Path: "1-report.eml", Size: m.Inputs[0].Size, Kind: KindEmail}}) || m.Inputs[0].Size == 0 {
+	if !slices.Equal(m.Inputs, []Input{{Path: "1-report.eml", Size: m.Inputs[0].Size, Kind: KindEmail, SHA256: sha256Of(email("report", "see attached", "files.zip", zipHead))}}) || m.Inputs[0].Size == 0 {
 		t.Errorf("inputs = %+v", m.Inputs)
 	}
 	if m.Schema != SchemaVersion || m.Status != "ok" || m.Code != 0 || m.Options != (ManifestOptions{Depth: 3, MaxSize: DefaultMaxSize, Mail: true}) {
@@ -376,7 +387,7 @@ func TestRunKeepGoing(t *testing.T) {
 			t.Errorf("%s: %v", p, err)
 		}
 	}
-	if m.Inputs[5] != (Input{Path: "6-notes.txt", Size: 6}) {
+	if m.Inputs[5] != (Input{Path: "6-notes.txt", Size: 6, SHA256: sha256Of("notes\n")}) {
 		t.Errorf("notes input = %+v", m.Inputs[5])
 	}
 
@@ -607,8 +618,12 @@ func TestManifestCheck(t *testing.T) {
 	if err := writeManifest(dir, &ok); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeManifest(dir, &ok); err == nil {
-		t.Error("manifest overwritten")
+	// It is replaced in one step, leaving no temporary file.
+	if err := writeManifest(dir, &ok); err != nil {
+		t.Fatal(err)
+	}
+	if names, _ := os.ReadDir(dir); len(names) != 1 {
+		t.Errorf("left behind: %v", names)
 	}
 	if m, err := ReadManifest(dir); err != nil || !reflect.DeepEqual(*m, ok) {
 		t.Errorf("read = %+v, %v", m, err)

@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/josegonzalez/safeclaw/internal/expand"
+	"github.com/josegonzalez/safeclaw/internal/mail"
 	"github.com/josegonzalez/safeclaw/internal/session"
 	"github.com/josegonzalez/safeclaw/internal/termtext"
 	"github.com/josegonzalez/safeclaw/internal/unpack"
@@ -24,33 +25,41 @@ const expandProgram = "safeclaw-expand"
 
 const expandHelp = `Exit codes:
   0  the run finished, including with containers left packed and flagged
-  1  failed: a usage or I/O error, an input that is missing or not a regular file, DEST is not a missing or empty directory, or the run was interrupted
+  1  failed: a usage or I/O error, an input that is missing or not a regular file, DEST is not a missing or empty directory and has no manifest, the manifest was refused, or the run was interrupted
 Codes 2 to 5 are not used for the run: a container's own failure is recorded with the code safeclaw-unpack or safeclaw-mail would have exited with.
 
-Each container is printed as a tab-separated line: KIND, PATH, FLAGS, and DIR. KIND is email or the archive format (` + unpackFormats + `). PATH is the container in DEST, escaped as safeclaw-unpack list escapes paths. FLAGS is a comma-separated list: UNPACKED (opened into DIR), REJECTED, NEEDS-PASSWORD, TOO-LARGE, FAILED, or DEPTH-LIMIT (left packed), then for an email UNSAFE-NAME, BAD-ENCODING, or MALFORMED when its parts had them. DIR is the directory it was opened into, - when it was left packed. Each entry that got an archive rejected follows it as an entry line: entry, TYPE, PATH (inside the archive), and FLAGS. Each container left packed for a failure is also reported on stderr. --json prints the manifest instead, with the paths unescaped.`
+Each container in the manifest is printed as a tab-separated line: KIND, PATH, FLAGS, and DIR. KIND is email or the archive format (` + unpackFormats + `). PATH is the container in DEST, escaped as safeclaw-unpack list escapes paths. FLAGS is a comma-separated list: UNPACKED (opened into DIR), REJECTED, NEEDS-PASSWORD, TOO-LARGE, FAILED, DEPTH-LIMIT, or SKIPPED (left packed), then for an email UNSAFE-NAME, BAD-ENCODING, or MALFORMED when its parts had them. DIR is the directory it was opened into, - when it was left packed. Each entry that got an archive rejected follows it as an entry line: entry, TYPE, PATH (inside the archive), and FLAGS. Each container left packed for a failure is also reported on stderr. --json prints the manifest instead, with the paths unescaped.
+
+--plan prints each container not opened yet as the same container line, with NEW as the flag of an input not in DEST yet. One a rerun could open (NEEDS-PASSWORD, TOO-LARGE, FAILED, SKIPPED, or NEW) is followed by its entries, each as entry and then the TYPE, SIZE, PATH, and FLAGS that safeclaw-unpack list prints, or for an email by its parts, each as part and then the PART, TYPE, SIZE, NAME, and FLAGS that safeclaw-mail list prints. One that can't be listed is reported on stderr. --plan --json prints {"schema", "status", "code", "containers"}, each container its manifest record with its "entries" or "parts", or "list_error".`
 
 // newExpandCommand builds `safeclaw expand`, named use: "expand" under
 // safeclaw, or safeclaw-expand when run through that link.
 func newExpandCommand(use string) *cobra.Command {
 	var f unpackFlags
 	var maxSize string
-	var noMail bool
+	var noMail, plan bool
+	var skip, unskip []string
 	var o expand.Options
 	cmd := &cobra.Command{
-		Use:   use + " IN... DEST",
+		Use:   use + " [IN...] DEST",
 		Short: "Open a tree of untrusted emails and archives into DEST, leaving the ones that fail packed and flagged",
-		Long: "Open a tree of untrusted emails and archives into DEST, which must be missing or an empty directory, and not a symbolic link. Run it inside a sandbox: the sandbox image variant has 7z and links this command as " + expandProgram + ".\n\n" +
+		Long: "Open a tree of untrusted emails and archives into DEST, which must not be a symbolic link, and must be missing or an empty directory unless an earlier run left its manifest there. Run it inside a sandbox: the sandbox image variant has 7z and links this command as " + expandProgram + ".\n\n" +
 			"Each input is copied into DEST as N-NAME, N counting the inputs from 1 and NAME its base name made safe as safeclaw-mail makes attachment names safe. Every file that starts like a " + unpackFormats + " archive, or like an email, is a container: it is opened into PATH.unpacked next to it (PATH.unpacked-2 and so on when that name is taken), an archive as safeclaw-unpack extract unpacks it and an email as safeclaw-mail extract extracts it, with its part listing in parts.txt beside body.txt. The files in that directory are then looked at in turn, except body.txt and parts.txt, which are never taken for emails. " +
 			"--depth limits how many levels of containers are opened below the inputs, emails and archives alike, a forwarded message counting as a level; and --max-size limits the total size of everything opened, across the whole tree, the input copies not included. --password-env applies to every encrypted archive. --no-mail leaves emails as plain files.\n\n" +
 			"Every level keeps going, the inputs included: a container that is rejected, needs a password, would take the total past --max-size, fails otherwise, or is past --depth is left packed, flagged REJECTED, NEEDS-PASSWORD, TOO-LARGE, FAILED, or DEPTH-LIMIT, and what it extracted is removed, without following links. Everything else is kept. A nested file that only starts like an archive, which 7z can't open, is left as it is, as safeclaw-unpack leaves it. " +
-			"The manifest, DEST/manifest.json, records each input's copy and every container with its path, kind, depth, outcome, flags, the directory it was opened into, and the entries that got it rejected. On a failure of the run itself DEST is emptied, without following links.\n\n" + expandHelp,
+			"The manifest, DEST/manifest.json, records each input's copy and every container with its path, kind, depth, outcome, flags, the directory it was opened into, and the entries that got it rejected. On a failure of a first run DEST is emptied, without following links.\n\n" +
+			"Running again on a DEST with a manifest resumes it. The manifest is checked first, and one that names a path outside DEST, reaches a container through a link, no longer matches the files in DEST, or is otherwise not what a run writes is refused, changing nothing. Containers already opened, rejected, skipped, or past --depth are kept as they are; the ones left NEEDS-PASSWORD, TOO-LARGE, or FAILED are tried again with this run's password and --max-size, which counts what is already in DEST. The inputs given are then copied in and opened as usual, except one with the same name and content as an input already in DEST, which isn't copied again. --depth and --no-mail are DEST's, set by its first run: a rerun must give the same ones (nothing in DEST sets a limit), and one with others is refused. A rerun that fails removes what it added and leaves the manifest as it was.\n\n" +
+			"--skip PATH (repeatable) leaves the container at PATH, written as the lines below write it, packed and flagged SKIPPED, now or whenever a later run finds it; the skip is kept in the manifest. --unskip PATH takes a skip off, so that run opens the container. --plan prints what is not opened yet and what a rerun would open, without opening or changing anything.\n\n" + expandHelp,
 		Example: `  safeclaw sandbox exec --ephemeral -v ~/Downloads/report:/in -- safeclaw-expand /in/report.eml /in/logs.zip /sandbox/out
   SAFECLAW_UNPACK_PASSWORD=infected safeclaw-expand --json --depth 5 /sandbox/in/1-report.eml /sandbox/out
-  safeclaw-expand --no-mail --max-size 2g /sandbox/in/1-dump.tar.gz /sandbox/out`,
-		Args:          cobra.MinimumNArgs(2),
+  safeclaw-expand --no-mail --max-size 2g /sandbox/in/1-dump.tar.gz /sandbox/out
+  safeclaw-expand --plan /sandbox/out
+  SAFECLAW_UNPACK_PASSWORD=infected safeclaw-expand --skip 2-logs.zip /sandbox/out`,
+		Args:          cobra.MinimumNArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			inputs, dest := args[:len(args)-1], args[len(args)-1]
 			n, err := session.ParseSize(maxSize)
 			if err != nil || n <= 0 {
 				return expandFailure(cmd, f.json, fmt.Errorf("--max-size: invalid size %q: want a positive number of bytes with an optional k, m, g, or t suffix", maxSize))
@@ -60,6 +69,22 @@ func newExpandCommand(use string) *cobra.Command {
 				return expandFailure(cmd, f.json, errors.New("--depth can't be negative"))
 			}
 			o.NoMail = noMail
+			for _, s := range []struct {
+				flag string
+				in   []string
+				out  *[]string
+			}{{"--skip", skip, &o.Skip}, {"--unskip", unskip, &o.Unskip}} {
+				for _, p := range s.in {
+					u, err := termtext.UnescapeField(p)
+					if err != nil {
+						return expandFailure(cmd, f.json, fmt.Errorf("%s: %w", s.flag, err))
+					}
+					*s.out = append(*s.out, u)
+				}
+			}
+			if plan && (len(skip) > 0 || len(unskip) > 0) {
+				return expandFailure(cmd, f.json, errors.New("--plan can't be given with --skip or --unskip"))
+			}
 			if o.Password, err = f.password(); err != nil {
 				return expandFailure(cmd, f.json, err)
 			}
@@ -68,19 +93,100 @@ func newExpandCommand(use string) *cobra.Command {
 			if z, err := unpack.Find(); err == nil {
 				o.Runner = z
 			}
-			m, err := expand.Run(cmd.Context(), args[:len(args)-1], args[len(args)-1], o)
+			if plan {
+				items, err := expand.Plan(cmd.Context(), inputs, dest, o)
+				if err != nil {
+					return expandFailure(cmd, f.json, err)
+				}
+				return writePlan(cmd, f.json, items)
+			}
+			m, err := expand.Run(cmd.Context(), inputs, dest, o)
 			if err != nil {
 				return expandFailure(cmd, f.json, err)
 			}
-			return writeExpanded(cmd, f.json, m)
+			if err := writeExpanded(cmd, f.json, m); err != nil {
+				return err
+			}
+			found := map[string]bool{}
+			for _, c := range m.Containers {
+				found[c.Path] = true
+			}
+			for _, p := range o.Skip {
+				if !found[p] {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s: no container at %s yet; the skip is kept for a later run\n", cmd.Root().Name(), escapeField(p))
+				}
+			}
+			return nil
 		},
 	}
 	f.register(cmd)
 	cmd.Flags().Lookup("json").Usage = "print the manifest instead of tab-separated lines"
-	cmd.Flags().StringVar(&maxSize, "max-size", "512m", "limit on the total size of everything opened, across the whole tree (k, m, g, or t suffix)")
-	cmd.Flags().IntVar(&o.Depth, "depth", expand.DefaultDepth, "levels of containers to open below the inputs, 0 for only the inputs")
-	cmd.Flags().BoolVar(&noMail, "no-mail", false, "leave emails as plain files instead of opening them")
+	cmd.Flags().StringVar(&maxSize, "max-size", "512m", "limit on the total size of everything opened, across the whole tree, counting what earlier runs opened in DEST (k, m, g, or t suffix)")
+	cmd.Flags().IntVar(&o.Depth, "depth", expand.DefaultDepth, "levels of containers to open below the inputs, 0 for only the inputs; a rerun must give DEST's")
+	cmd.Flags().BoolVar(&noMail, "no-mail", false, "leave emails as plain files instead of opening them; a rerun must give DEST's")
+	cmd.Flags().StringArrayVar(&skip, "skip", nil, "leave the container at this path in DEST packed, flagged SKIPPED, on this run and later ones (repeatable)")
+	cmd.Flags().StringArrayVar(&unskip, "unskip", nil, "take a path off the skip list, so this run opens it (repeatable)")
+	cmd.Flags().BoolVar(&plan, "plan", false, "print the containers not opened yet, with their entries or parts, without opening or changing anything")
 	return cmd
+}
+
+// expandPlanJSON is --plan --json's output.
+type expandPlanJSON struct {
+	Schema     int                  `json:"schema"`
+	Status     string               `json:"status"`
+	Code       int                  `json:"code"`
+	Containers []expandPlanItemJSON `json:"containers"`
+}
+
+type expandPlanItemJSON struct {
+	expand.Container
+	Entries   []entryJSON    `json:"entries,omitempty"`
+	Parts     []mailPartJSON `json:"parts,omitempty"`
+	ListError string         `json:"list_error,omitempty"`
+}
+
+// writePlan prints a plan: a line per container, each a rerun could open
+// followed by its entries or parts, or the plan as JSON.
+func writePlan(cmd *cobra.Command, asJSON bool, items []expand.PlanItem) error {
+	out := cmd.OutOrStdout()
+	if asJSON {
+		v := expandPlanJSON{Schema: expand.SchemaVersion, Status: "ok", Containers: []expandPlanItemJSON{}}
+		for _, it := range items {
+			j := expandPlanItemJSON{Container: it.Container, ListError: it.ListError}
+			if len(it.Entries) > 0 {
+				j.Entries = jsonEntries(it.Entries)
+			}
+			if len(it.Parts) > 0 {
+				j.Parts = mailResultJSON(&mail.Result{Parts: it.Parts}).Parts
+			}
+			v.Containers = append(v.Containers, j)
+		}
+		return writeExpandJSON(out, v)
+	}
+	var b strings.Builder
+	for _, it := range items {
+		fmt.Fprintf(&b, "%s\t%s\t%s\t-\n", it.Kind, escapeField(it.Path), strings.Join(it.Flags, ","))
+		var lines strings.Builder
+		prefix := "entry\t"
+		if it.Kind == expand.KindEmail {
+			prefix = "part\t"
+			writeMailParts(&lines, it.Parts, false)
+		} else if err := writeEntries(&lines, it.Entries); err != nil {
+			return err
+		}
+		for line := range strings.Lines(lines.String()) {
+			b.WriteString(prefix + line)
+		}
+	}
+	if _, err := io.WriteString(out, b.String()); err != nil {
+		return err
+	}
+	for _, it := range items {
+		if it.ListError != "" {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s: can't list %s: %s\n", cmd.Root().Name(), escapeField(it.Path), termtext.Escape(it.ListError))
+		}
+	}
+	return nil
 }
 
 // writeExpanded prints a finished run: a line per container, or the

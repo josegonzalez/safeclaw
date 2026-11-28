@@ -83,3 +83,17 @@ func TestWriterFlushIncomplete(t *testing.T) {
 		t.Errorf("after Flush: %q, want %q", got, want)
 	}
 }
+
+func TestUnescapeField(t *testing.T) {
+	for _, s := range []string{"plain/path.zip", "a\tb\nc", `back\slash`, "a\u202eb", "a\xff\x1bb", "emoji \U0001F600", "\U000e0001", ""} {
+		got, err := UnescapeField(EscapeField(s))
+		if err != nil || got != s {
+			t.Errorf("UnescapeField(EscapeField(%q)) = %q, %v", s, got, err)
+		}
+	}
+	for _, bad := range []string{`a\`, `a\q`, `a\x1`, `a\xzz`, "raw\ttab", `\x41`, "\\u0041", `a\x2b`, `\u202`} {
+		if got, err := UnescapeField(bad); err == nil {
+			t.Errorf("UnescapeField(%q) = %q, want an error", bad, got)
+		}
+	}
+}
