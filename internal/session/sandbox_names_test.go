@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
 )
@@ -74,8 +73,8 @@ func TestResolveNamePrefix(t *testing.T) {
 		t.Errorf("a %d character prefix: %v", MaxNamePrefix, err)
 	}
 	full := prefixedName(longest, at, prefixAttempts-1)
-	if len(config.ContainerName(full)+".lock") != 255 || ValidateName(full) != nil {
-		t.Errorf("the longest name %q should be valid and its lock file name 255 bytes", full)
+	if len(full) != MaxName || ValidateNewName(full) != nil {
+		t.Errorf("the longest name %q should be a valid new name of %d characters", full, MaxName)
 	}
 	bad := map[string]string{
 		"":                           "invalid name prefix",
@@ -86,8 +85,8 @@ func TestResolveNamePrefix(t *testing.T) {
 		"tri\x1bage":                 "invalid name prefix",
 		"safeclaw-":                  "invalid name prefix",
 		"safeclaw-safeclaw-x":        `may not start with "safeclaw-"`,
-		longest + "a":                "at most 223 characters",
-		"safeclaw-" + longest + "aa": "at most 223 characters",
+		longest + "a":                "at most 212 characters",
+		"safeclaw-" + longest + "aa": "at most 212 characters",
 	}
 	for in, want := range bad {
 		if _, err := ResolveNamePrefix(in); err == nil || !strings.Contains(err.Error(), want) {

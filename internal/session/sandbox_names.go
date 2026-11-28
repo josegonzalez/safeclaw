@@ -21,13 +21,9 @@ const prefixTime = "20060102-150405"
 // names sorting in the order they were made.
 const prefixAttempts = 9
 
-// maxSandboxName is the longest sandbox name whose cp-in lock file, the
-// container name with .lock, fits the usual 255-byte limit on a file name.
-const maxSandboxName = 255 - len(config.ContainerPrefix) - len(".lock")
-
-// MaxNamePrefix is the longest name prefix, leaving room for the timestamp
-// and the longest suffix.
-const MaxNamePrefix = maxSandboxName - len("-"+prefixTime) - len("-9")
+// MaxNamePrefix is the longest name prefix, leaving room in MaxName for
+// the timestamp and the longest suffix.
+const MaxNamePrefix = MaxName - len("-"+prefixTime) - len("-9")
 
 // ResolveNamePrefix returns the canonical form of a one-off sandbox name
 // prefix, like ResolveName: one container prefix is removed and letters are
@@ -104,7 +100,7 @@ func (m *Manager) createOneOff(ctx context.Context, opts SandboxOptions) (string
 			return "", err
 		}
 		name := prefixedName(prefix, at, attempt)
-		if err := ValidateName(name); err != nil {
+		if err := ValidateNewName(name); err != nil {
 			return "", err
 		}
 		c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))

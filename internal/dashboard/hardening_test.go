@@ -236,6 +236,33 @@ func TestCreateRefusesWhenListFails(t *testing.T) {
 
 // A name given as its container, with the safeclaw- prefix, is the session
 // Ensure acts on, so create checks that session and refuses it in use.
+// A new session's name is refused past session.MaxName before Ensure is
+// called; one at the limit is created.
+func TestCreateChecksNameLength(t *testing.T) {
+	f := &fakeSessions{list: withSandboxes()}
+	h := newTestServer(t, f)
+	longest := strings.Repeat("a", session.MaxName)
+
+	rec := do(h, "POST", "/sessions", url.Values{"name": {longest + "a"}}, nil)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "at most 230 characters") {
+		t.Errorf("form = %d %s", rec.Code, rec.Body)
+	}
+	code, r := postJSON(h, "/api/create", `{"name":"`+longest+`a","recreate":true}`)
+	if code != http.StatusBadRequest || r.Success || !strings.Contains(r.Error, "at most 230 characters") {
+		t.Errorf("api = %d %+v", code, r)
+	}
+	if len(f.ensured) != 0 {
+		t.Fatalf("a long name reached Ensure: %+v", f.ensured)
+	}
+
+	if rec := do(h, "POST", "/sessions", url.Values{"name": {longest}}, nil); rec.Code != http.StatusNoContent {
+		t.Errorf("form at the limit = %d %s", rec.Code, rec.Body)
+	}
+	if code, r := postJSON(h, "/api/create", `{"name":"`+longest+`"}`); code != http.StatusOK || !r.Success {
+		t.Errorf("api at the limit = %d %+v", code, r)
+	}
+}
+
 func TestCreateChecksCanonicalName(t *testing.T) {
 	f := &fakeSessions{list: withSandboxes()}
 	h := newTestServer(t, f)

@@ -247,6 +247,41 @@ func ValidateName(name string) error {
 	return nil
 }
 
+// ErrNameTooLong is wrapped by the error returned for a new session or
+// sandbox name longer than MaxName.
+var ErrNameTooLong = fmt.Errorf("names can be at most %d characters", MaxName)
+
+// maxFileName is the usual limit on the length of a file name, in bytes.
+const maxFileName = 255
+
+// MaxName is the longest session or sandbox name, so that every host file
+// named after one fits maxFileName. The longest such name is a session's
+// history directory moved aside, NAME.old-TIMESTAMP (see archiveHistory).
+// The others are shorter: a saved network state's temporary file,
+// .NAME.RANDOM.tmp, whose RANDOM os.CreateTemp makes from a uint32, a
+// sandbox's cp-in lock, safeclaw-NAME.lock, and the state, choices, ttyd
+// credential, and Ensure lock files. Names are ASCII, so characters are
+// bytes. Docker sets no shorter limit on container names.
+const MaxName = maxFileName - max(
+	len(".old-"+archiveTime),
+	len("."+"."+"4294967295"+".tmp"),
+	len(config.ContainerPrefix+".lock"),
+)
+
+// ValidateNewName checks a name for a container about to be created: it
+// must be valid, as ValidateName checks, and at most MaxName characters.
+// Only creation checks the length, so a container made with a longer name
+// by an earlier version can still be stopped, removed, and inspected.
+func ValidateNewName(name string) error {
+	if err := ValidateName(name); err != nil {
+		return err
+	}
+	if len(name) > MaxName {
+		return fmt.Errorf("invalid session name %q: %w, so the host files named after it fit the 255-byte limit on a file name", name, ErrNameTooLong)
+	}
+	return nil
+}
+
 // legacyNameError explains a session name with uppercase letters, which
 // earlier versions accepted.
 func legacyNameError(name string) error {
@@ -683,6 +718,18 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		}
 		m.warnVolume(warnings)
 	}
+	// A name too long for a new container is refused before the session's
+	// lock, whose file is named after it, when there is no container to
+	// start. Whether one is created is checked again under the lock.
+	if len(name) > MaxName {
+		c, err := m.Docker.InspectOne(ctx, container)
+		if err != nil {
+			return nil, err
+		}
+		if c == nil {
+			return nil, ValidateNewName(name)
+		}
+	}
 
 	release, err := m.ensureLock(ctx, name)
 	if err != nil {
@@ -793,6 +840,13 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	argvCredential := existing != nil && !readsCredentialFile(existing.Config.Labels)
 	movePublish := legacyPublish && imageTTYD
 	recreate := existing != nil && (explicit || movePublish || oldTTYD || argvCredential)
+	// A container made with a longer name by an earlier version is still
+	// started, but never replaced by one with the same name.
+	if existing == nil || recreate {
+		if err := ValidateNewName(name); err != nil {
+			return nil, err
+		}
+	}
 	// So every ttyd started here, in a new container or a kept one, reads
 	// its credential from a file, and nothing is refused after the
 	// container it would replace is removed.

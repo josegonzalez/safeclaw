@@ -397,6 +397,14 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	if err != nil {
 		return nil, err
 	}
+	// Only a container about to be created, or recreated, needs a name
+	// short enough for its host files; an existing one is still started.
+	recreate := existing != nil && (len(opts.Volumes) > 0 || opts.Recreate || changed)
+	if existing == nil || recreate {
+		if err := ValidateNewName(name); err != nil {
+			return nil, err
+		}
+	}
 	image, err := m.checkImage(ctx, want)
 	if err != nil {
 		return nil, err
@@ -409,7 +417,7 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	// created is set when this call makes the container, which a failed
 	// verification removes again.
 	created := false
-	if existing != nil && (len(opts.Volumes) > 0 || opts.Recreate || changed) {
+	if recreate {
 		m.printf("Recreating sandbox: %s\n", container)
 		opts = opts.keep(*existing)
 		if err := m.Docker.Remove(ctx, container, true); err != nil {
@@ -451,7 +459,7 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 func (m *Manager) pickName(ctx context.Context, name string) (string, error) {
 	if name != "" {
 		name = config.SessionName(name)
-		if err := ValidateName(name); err != nil {
+		if err := ValidateNewName(name); err != nil {
 			return "", err
 		}
 		c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
