@@ -8,6 +8,7 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/spf13/cobra v1.10.2
+	github.com/spf13/pflag v1.1.0
 	github.com/zalando/go-keyring v0.2.8
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/net v0.63.0
@@ -58,7 +59,6 @@ require (
 	github.com/rivo/uniseg v0.4.8-0.20261110175422-3a370411ca06 // indirect
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
-	github.com/spf13/pflag v1.1.0 // indirect
 	github.com/tdewolff/parse/v2 v2.8.12 // indirect
 	github.com/xo/terminfo v1.3.1 // indirect
 	golang.org/x/sync v0.25.0 // indirect

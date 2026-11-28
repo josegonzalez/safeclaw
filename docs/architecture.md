@@ -496,6 +496,31 @@ Archives found inside a released or opened archive are opened as usual, since th
 
 A release is checked against the manifest the way a skip is, before anything is changed: releasing a path no container has, or a container that isn't held, such as one opened, skipped, or flagged `NEEDS-PASSWORD`, giving `--release` and `--skip` for the same path, `--release` together with `--release-all`, or either without `--hold`, fails the run with exit 1 and nothing changed. `--release-all` with nothing held, including on a first run, is fine, so the same command line works on every run. `--hold` is DEST's policy, as described above: a rerun must give it, and one that leaves it out, or gives it on a DEST whose first run didn't, is refused.
 
+### Opening a sandbox's files from the host
+
+`safeclaw sandbox open NAME` runs `safeclaw-expand` and, with `--text`, `safeclaw-totext` from the host on fixed paths, so a caller doesn't build their command lines, pass the password, or empty the output folder itself. It runs `safeclaw-expand -- /sandbox/in /sandbox/tree`, which opens every file `cp-in` copied into `/sandbox/in` into `/sandbox/tree` and resumes the tree on a rerun, or `safeclaw-expand --plan -- /sandbox/tree` with `--plan`. `--skip PATH` and `--unskip PATH` pass through as `--skip=PATH` and `--unskip=PATH`, so a path that starts with `-` stays a value. With `--text`, once `safeclaw-expand` has finished, it runs `safeclaw-totext --recursive --replace -- /sandbox/tree /sandbox/out`, which replaces an earlier run's results only once the new ones are complete.
+
+Before running anything it checks the options, that NAME is a running sandbox (an interactive session is refused, as for `cp-in`), and, with `docker exec --user sandbox`, that `safeclaw-expand`, and with `--text` `safeclaw-totext`, are on the sandbox user's PATH. The probe prints only the names it can't find, and any other output fails the check. An image without them, such as `base`, is refused with an error naming what is missing and saying to recreate the sandbox with `--variant sandbox`.
+
+`--password-env NAME` reads NAME from safeclaw's environment and passes its value to `safeclaw-expand` as `SAFECLAW_UNPACK_PASSWORD` through a pipe on `--env-file /dev/fd/3`, as [`exec -e`](#command-environment) does, so it is never in docker's arguments, and `safeclaw-totext` never gets it. NAME unset, or set to the empty string, means no password, as `--env-if-set` leaves out an unset name, so the same command line works before and after a caller has one. NAME is checked as `--env-if-set` checks one, whether or not it is set: it must be a portable name and not a stored secret's, `CLAUDE_CODE_OAUTH_TOKEN`, or `GH_TOKEN`, and the value must be UTF-8 without newlines, carriage returns, or NUL bytes.
+
+Each helper runs as `sandbox exec --escape-controls --timeout` runs a command: as a child of safeclaw, with stdout and stderr kept apart and control characters escaped, signals forwarded, and the run wrapped in coreutils `timeout` with `--timeout` (default `30m`, each helper getting its own), with the same backstop described in [command timeouts](#command-timeouts). The helpers' policy flags are registered on `sandbox open` with each helper's own type, default, and help, and passed through as `--NAME=VALUE` only when given, so the helper's defaults apply otherwise: `--depth`, `--max-size`, `--no-mail`, `--hold`, `--release`, and `--release-all` to `safeclaw-expand`, and `--max-pages`, `--ocr-threshold`, `--ocr-dpi`, `--ocr-lang`, `--max-files`, and `--max-output` to `safeclaw-totext`, which need `--text`. A rerun must give the tree's `--depth`, `--no-mail`, and `--hold`, as `safeclaw-expand` requires.
+
+`safeclaw-expand` exits 0 whether or not it left containers packed, so `sandbox open` reads its container lines, after escaping, to tell: a container line (not an `entry` line) whose DIR is `-` is a container left packed, whatever its flags, `SKIPPED`, `HELD`, and `DEPTH-LIMIT` included, as `safeclaw-totext --recursive` counts them. The lines come from the sandbox, so code in it can make that answer wrong, which only changes the exit code. With `--text` a tree with containers left packed is converted anyway, since the files around them are worth reading, and the packed containers are listed in `/sandbox/out/manifest.txt`; when `safeclaw-expand` fails, times out, or is killed, nothing is converted and `/sandbox/out` is left as it was. The exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Every container was opened, and with `--text` every file was converted (or `--plan` finished) |
+| 1 | Failed before running a helper: a usage error, not a running sandbox, the image lacks the helpers, or docker failed |
+| 2 | `safeclaw-expand` failed (with `--plan` too), leaving the tree as it was; with `--text` nothing was converted |
+| 3 | `safeclaw-expand` left containers packed; with `--text` the tree was converted anyway, ok or partial |
+| 4 | With `--text`, `safeclaw-totext` failed, so `/sandbox/out` is as it was |
+| 5 | With `--text`, every container was opened but the conversion was partial |
+| 124 | A helper ran past `--timeout`; when it was `safeclaw-expand`, nothing was converted |
+| 128+N | A signal N killed docker, and nothing more was run |
+
+A `safeclaw-totext` failure takes precedence over containers left packed, so 4 always means `/sandbox/out` wasn't rebuilt.
+
 ### Inspecting and verifying
 
 `safeclaw sandbox inspect NAME` and `safeclaw sandbox verify NAME` let a script confirm that a container really is an isolated sandbox, and whether it is running, without relying on the `safeclaw-` prefix, the labels, or `docker inspect` templates. Neither changes the sandbox. Both refuse interactive sessions and missing names.

@@ -174,6 +174,18 @@ safeclaw sandbox exec triage -- safeclaw-expand --hold mail-archives --release-a
 
 `safeclaw-expand` exits 0 when the run finished, even with containers left packed, since the manifest and the flags say what was; and 1 when the run itself failed: a usage or I/O error, an input that is missing or not a regular file or a directory, an input directory that is DEST, holds it, or is inside it, a DEST that isn't missing or empty and has no manifest, a manifest that was refused, or an interrupt. A first run that fails empties DEST, and a rerun that fails leaves it as it was.
 
+`safeclaw sandbox open NAME` runs both helpers from the host with fixed paths, so a caller doesn't build their command lines. It runs `safeclaw-expand` on everything `cp-in` copied into `/sandbox/in`, into `/sandbox/tree`, and prints its container lines; a rerun resumes the tree. It takes `--plan`, `--skip PATH`, and `--unskip PATH`, and `--password-env NAME` reads the archive password from NAME on the host and passes it in through a pipe, never as an argument, as `exec --env-if-set` does, so an unset NAME means no password. With `--text` it then rebuilds `/sandbox/out` from the tree with `safeclaw-totext --recursive --replace`. The helpers' policy flags (`--depth`, `--max-size`, `--no-mail`, `--hold`, `--release`, `--release-all`, and with `--text` `--max-pages`, `--ocr-threshold`, `--ocr-dpi`, `--ocr-lang`, `--max-files`, and `--max-output`) are passed through when given. Output is control-escaped as with `exec --escape-controls`, and each helper run gets `--timeout` (default `30m`). It refuses an interactive session, and a sandbox whose image lacks the helpers.
+
+A tree with containers left packed is still converted with `--text`, since the files around them are worth reading; when `safeclaw-expand` fails or times out, nothing is converted. It exits 0 when every container was opened (and with `--text` every file converted), 1 when it failed before running a helper, 2 when `safeclaw-expand` failed, 3 when containers were left packed (with `--text`, converted anyway), 4 when `safeclaw-totext` failed and left `/sandbox/out` as it was, 5 when every container was opened but the conversion was partial, and 124 when a helper timed out. See [opening a sandbox's files from the host](docs/architecture.md#opening-a-sandboxs-files-from-the-host).
+
+```bash
+safeclaw sandbox cp-in triage ~/Downloads/report.eml
+safeclaw sandbox open triage                       # exits 3: the zip in the email needs a password
+TRIAGE_PASSWORD=... safeclaw sandbox open triage --password-env TRIAGE_PASSWORD
+safeclaw sandbox open triage --text --max-pages 300
+safeclaw sandbox cp-out triage /sandbox/out ./text --only '*.txt' --mkdir --replace
+```
+
 ```bash
 # Create a sandbox, mounting host directories read-only (-v repeats)
 safeclaw sandbox run -s triage -v ~/inbox:/in -v ~/triage-tools:/opt/tools
