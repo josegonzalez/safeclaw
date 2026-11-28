@@ -66,6 +66,9 @@ type OpenRun struct {
 	// Totext, set with OpenOptions.Text, runs safeclaw-totext on
 	// OpenTreeDir into OpenOutDir.
 	Totext []string
+	// KeepInputs is the directory of the sandbox's input record, when it
+	// keeps one, which RecordOpen appends this run to.
+	KeepInputs string
 }
 
 func (o OpenOptions) validate() error {
@@ -152,7 +155,9 @@ func (m *Manager) PrepareOpen(ctx context.Context, name string, o OpenOptions) (
 		return OpenRun{}, fmt.Errorf("sandbox %q %w: its image has no %s. Recreate it with the sandbox image variant: `safeclaw sandbox run -s %s --variant sandbox`",
 			name, ErrNoHelpers, strings.Join(missing, " or "), name)
 	}
-	return OpenArgv(name, o), nil
+	run := OpenArgv(name, o)
+	run.KeepInputs = c.Label(config.LabelKeepInputs)
+	return run, nil
 }
 
 // OpenPasswordEnv returns the env file that passes the archive password,

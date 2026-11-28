@@ -120,6 +120,12 @@ const (
 	// MemoryOff is the LabelMemory value for a session with auto memory off.
 	MemoryOff = "off"
 
+	// LabelKeepInputs is the container label that records the absolute
+	// host directory a one-off sandbox made with --keep-inputs or
+	// --restore-from keeps its input record in, which `sandbox cp-in` and
+	// `sandbox open` append to.
+	LabelKeepInputs = "safeclaw.keep-inputs"
+
 	// LabelAuth marks the short-lived container `safeclaw auth login` runs
 	// `claude setup-token` in, with the random owner ID of the login that
 	// started it. That login locks a file named after the ID in AuthDir

@@ -3,6 +3,7 @@ package session
 import (
 	"archive/tar"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -97,15 +98,6 @@ func copyCommand(cmd ...string) []string {
 	return SandboxCommand(cmd)
 }
 
-// copyTarget returns the short name of the running sandbox a copy applies
-// to, refusing interactive sessions and stopped sandboxes.
-func (m *Manager) copyTarget(ctx context.Context, name string) (string, error) {
-	if _, err := m.runningSandbox(ctx, name); err != nil {
-		return "", err
-	}
-	return config.SessionName(name), nil
-}
-
 // runningSandbox returns the container of the named running sandbox,
 // refusing interactive sessions and stopped sandboxes.
 func (m *Manager) runningSandbox(ctx context.Context, name string) (*docker.Container, error) {
@@ -143,6 +135,8 @@ type source struct {
 	f       *os.File
 	size    int64
 	modTime time.Time
+	// sum is the sha256 of the bytes writeTar sent, once it has sent them.
+	sum []byte
 }
 
 // openSource opens a host file for cp-in, refusing symbolic links and
@@ -215,7 +209,8 @@ func nextIndex(listing []byte) int {
 }
 
 // writeTar writes each source as a regular file named names[i], sending
-// exactly the size that was checked.
+// exactly the size that was checked, and sets each source's sum to the
+// sha256 of what it sent.
 func writeTar(w io.Writer, srcs []*source, names []string) error {
 	tw := tar.NewWriter(w)
 	for i, s := range srcs {
@@ -229,12 +224,14 @@ func writeTar(w io.Writer, srcs []*source, names []string) error {
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
-		if _, err := io.CopyN(tw, s.f, s.size); err != nil {
+		h := sha256.New()
+		if _, err := io.CopyN(io.MultiWriter(tw, h), s.f, s.size); err != nil {
 			if errors.Is(err, io.EOF) {
 				return fmt.Errorf("%s shrank while being copied", s.path)
 			}
 			return fmt.Errorf("%s: %w", s.path, err)
 		}
+		s.sum = h.Sum(nil)
 	}
 	return tw.Close()
 }
@@ -247,6 +244,12 @@ var errCopyDone = errors.New("copy finished")
 // highest number already there, so names never collide. Files are
 // extracted by the sandbox user, so it owns them. It returns the container
 // path of each file, in the order given.
+//
+// A one-off sandbox made with KeepInputs or RestoreSandbox also gets each
+// file appended to its input record (see inputs.go), and only takes files
+// into OpenInDir, which is what the record holds. When the files were
+// copied but the record could not be written, their paths are returned
+// with the error.
 func (m *Manager) CopyIn(ctx context.Context, name string, files []string, dest string) ([]string, error) {
 	if len(files) == 0 {
 		return nil, errors.New("at least one file is required")
@@ -255,9 +258,14 @@ func (m *Manager) CopyIn(ctx context.Context, name string, files []string, dest 
 	if err != nil {
 		return nil, err
 	}
-	name, err = m.copyTarget(ctx, name)
+	c, err := m.runningSandbox(ctx, name)
 	if err != nil {
 		return nil, err
+	}
+	name = config.SessionName(name)
+	keep := c.Label(config.LabelKeepInputs)
+	if keep != "" && dest != OpenInDir {
+		return nil, fmt.Errorf("sandbox %q keeps a record of its inputs in %s, which holds only files copied into %s: copy without --to", name, keep, OpenInDir)
 	}
 	srcs := make([]*source, 0, len(files))
 	defer func() {
@@ -284,6 +292,19 @@ func (m *Manager) CopyIn(ctx context.Context, name string, files []string, dest 
 		return nil, err
 	}
 	defer unlock()
+	// The record is locked and checked before anything is copied, so a
+	// record that can't be read refuses the copy rather than missing it.
+	var rec *inputRecord
+	if keep != "" {
+		unlockRec, err := lockInputs(ctx, keep)
+		if err != nil {
+			return nil, err
+		}
+		defer unlockRec()
+		if rec, err = readInputs(keep); err != nil {
+			return nil, err
+		}
+	}
 	quiet := copyExec
 	quiet.MaxOutput = copyQuietMaxOutput
 	if _, err := m.Docker.Exec(ctx, container, quiet, copyCommand(mkdirBin, "-p", "--", dest)...); err != nil {
@@ -310,7 +331,20 @@ func (m *Manager) CopyIn(ctx context.Context, name string, files []string, dest 
 		names[i] = fmt.Sprintf("%d-%s", first+i, filepath.Base(s.path))
 		paths[i] = path.Join(dest, names[i])
 	}
+	if err := m.sendFiles(ctx, container, dest, srcs, names); err != nil {
+		return nil, err
+	}
+	if rec != nil {
+		if err := recordCopies(keep, rec, srcs, paths); err != nil {
+			return paths, fmt.Errorf("the files were copied, but could not be recorded in %s: %w", keep, err)
+		}
+	}
+	return paths, nil
+}
 
+// sendFiles extracts srcs into the container's dest as names, as the
+// sandbox user, refusing to overwrite anything.
+func (m *Manager) sendFiles(ctx context.Context, container, dest string, srcs []*source, names []string) error {
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
@@ -324,12 +358,9 @@ func (m *Manager) CopyIn(ctx context.Context, name string, files []string, dest 
 	// Unblock the writer if docker exited before reading everything.
 	_ = pr.CloseWithError(errCopyDone)
 	if err := <-done; err != nil && !errors.Is(err, errCopyDone) {
-		return nil, err
+		return err
 	}
-	if execErr != nil {
-		return nil, execErr
-	}
-	return paths, nil
+	return execErr
 }
 
 // CopyOutOptions configures CopyOut.

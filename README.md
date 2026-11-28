@@ -273,6 +273,18 @@ name=$(safeclaw sandbox run --rm --verify -v ~/inbox:/in)
 safeclaw sandbox exec --ephemeral --verify -v ~/inbox:/in -- pdftotext /in/report.pdf -
 ```
 
+A one-off sandbox takes everything in it with it when it goes, including when Docker restarts in the middle of a long job. `sandbox run --rm --keep-inputs DIR` keeps a record in `DIR/inputs.json` of what `cp-in` copied in (each file's host path, sha256, and container path) and of the `sandbox open` runs and their `--skip`, `--unskip`, `--hold`, and `--release` flags, so `sandbox run --rm --restore-from DIR` can rebuild it. The record holds no copy of any file, so keep your originals where they are. A restore copies each file from its host path to the same container path, and refuses before creating anything if any source is missing or its sha256 changed, naming each one. It verifies the new sandbox when the old one was made with `--verify`, and keeps recording to DIR. It never runs the helpers itself: it prints the `sandbox open` commands to run again, in order, on stderr. DIR is created mode 0700, and an existing one must be yours, mode 0700, and not a link. See [keeping a one-off sandbox's inputs](docs/architecture.md#keeping-a-one-off-sandboxs-inputs).
+
+```bash
+name=$(safeclaw sandbox run --rm --name-prefix triage --keep-inputs ~/triage/job1)
+safeclaw sandbox cp-in "$name" ~/Downloads/report.eml
+safeclaw sandbox open "$name" --skip 1-1-report.eml.unpacked/1-dump.tar.gz
+
+# After a Docker restart lost it
+name=$(safeclaw sandbox run --rm --name-prefix triage --restore-from ~/triage/job1)
+# prints: safeclaw sandbox open triage-... --skip=1-1-report.eml.unpacked/1-dump.tar.gz
+```
+
 ### Scanning for malware
 
 `cp-out` scans every file it copies with ClamAV before placing any of them, and refuses the whole copy when a file is flagged as infected or could not be scanned (over clamscan's size limits, or an encrypted archive or document), naming each file and the reason, so `HOST_DIR` is left as it was, with `--force` and `--replace` too. `--allow-flagged` copies them anyway, and `--no-scan` skips the scan, for files your own script wrote. Each file's result and the signatures' date go to stderr, and the copied paths to stdout as before. The scan runs in a fresh container of the `sandbox` variant with no network that sees only the copied files and the signatures, never in the sandbox, so nothing the untrusted files left running there can change it.
