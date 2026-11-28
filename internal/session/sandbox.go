@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -214,6 +215,11 @@ type SandboxOptions struct {
 	// before is kept, and a *SandboxVerifyError is returned. For
 	// PrepareEphemeral, the command waits for VerifyEphemeral.
 	Verify bool
+	// Profile and ProfileSHA256 record the sandbox profile the sandbox is
+	// created with, its ref and the hex SHA-256 of its contents, in
+	// config.LabelProfile and config.LabelProfileSHA256. Empty records
+	// none.
+	Profile, ProfileSHA256 string
 	// keepInputs is the absolute directory of the input record a one-off
 	// sandbox from KeepInputs or RestoreSandbox appends to, recorded in
 	// its LabelKeepInputs label.
@@ -284,6 +290,36 @@ func diskBytes(s string) (int64, error) {
 		return 0, fmt.Errorf("invalid disk size %q: must be more than 0", s)
 	}
 	return n, nil
+}
+
+// limitsDiffer reports whether a limit opts gives differs from the one c,
+// an existing sandbox, has. Limits set on the command line recreate a
+// sandbox through Recreate; this is for the ones a profile gives, which
+// recreate it only when they would change it, so naming the same profile
+// again keeps the sandbox and its files.
+func (o SandboxOptions) limitsDiffer(c docker.Container) bool {
+	h := c.HostConfig
+	if o.Memory != "" {
+		if n, err := ParseSize(o.Memory); err != nil || n != h.Memory {
+			return true
+		}
+	}
+	if o.PidsLimit != 0 && (h.PidsLimit == nil || int64(o.PidsLimit) != *h.PidsLimit) {
+		return true
+	}
+	if o.CPUs != "" {
+		if f, err := strconv.ParseFloat(o.CPUs, 64); err != nil || int64(math.Round(f*1e9)) != h.NanoCpus {
+			return true
+		}
+	}
+	if o.Disk != "" {
+		want, err := diskBytes(o.Disk)
+		have, _ := ParseSize(tmpfsSize(h.Tmpfs[config.SandboxDir]))
+		if err != nil || want != have {
+			return true
+		}
+	}
+	return false
 }
 
 // volumes returns the bind mounts to give the sandbox.
@@ -403,7 +439,7 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	}
 	// Only a container about to be created, or recreated, needs a name
 	// short enough for its host files; an existing one is still started.
-	recreate := existing != nil && (len(opts.Volumes) > 0 || opts.Recreate || changed)
+	recreate := existing != nil && (len(opts.Volumes) > 0 || opts.Recreate || changed || opts.limitsDiffer(*existing))
 	if existing == nil || recreate {
 		if err := ValidateNewName(name); err != nil {
 			return nil, err
@@ -589,6 +625,9 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 	}
 	if opts.keepInputs != "" {
 		args = append(args, "--label", config.LabelKeepInputs+"="+opts.keepInputs)
+	}
+	if opts.Profile != "" {
+		args = append(args, "--label", config.LabelProfile+"="+opts.Profile, "--label", config.LabelProfileSHA256+"="+opts.ProfileSHA256)
 	}
 	args = append(args, variantArgs(opts.Variant)...)
 	args = append(args,

@@ -100,6 +100,15 @@ const (
 	// line.
 	LabelCredentialFileTTYD = "io.github.josegonzalez.safeclaw.ttyd-credential-file"
 
+	// LabelProfile is the container label that records the sandbox
+	// profile a sandbox was created with: its NAME, or the absolute path
+	// of its FILE, either of which --profile takes back. Sandboxes created
+	// without a profile have neither it nor LabelProfileSHA256.
+	LabelProfile = "safeclaw.profile"
+	// LabelProfileSHA256 is the container label that records the hex
+	// SHA-256 of the contents of a sandbox's LabelProfile.
+	LabelProfileSHA256 = "safeclaw.profile.sha256"
+
 	// LabelSecrets is the container label that records which secrets an
 	// interactive session receives, as comma-separated names. Containers
 	// without it get every secret, and an empty value means none.
@@ -158,6 +167,12 @@ func Dir() string {
 		base = filepath.Join(home, ".config")
 	}
 	return filepath.Join(base, "safeclaw")
+}
+
+// ProfilesDir returns the directory named sandbox profiles are read from,
+// NAME.yaml for `--profile NAME`.
+func ProfilesDir() string {
+	return filepath.Join(Dir(), "profiles")
 }
 
 // CacheDir returns the safeclaw cache directory, honoring XDG_CACHE_HOME.

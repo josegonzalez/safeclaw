@@ -23,7 +23,7 @@ func newSandboxInspectCommand() *cobra.Command {
 		Use:   "inspect NAME",
 		Short: "Print a sandbox's isolation settings as JSON",
 		Long: "Print a sandbox's name, status, variant, network, user, capabilities, read-only root, limits, tmpfs mounts, " +
-			"bind mounts, and safeclaw labels as JSON, as docker reports them. Nothing in the sandbox is changed or run.\n\n" +
+			"bind mounts, safeclaw labels, and the sandbox profile it was created with as JSON, as docker reports them. Nothing in the sandbox is changed or run.\n\n" +
 			"The schema field is the version of the output: fields may be added within a version, but are never renamed, " +
 			"removed, or given a new meaning without a new version. See docs/architecture.md for the fields.\n\n" +
 			"With --field, only that top-level field is printed: a string as plain text, anything else as JSON.",

@@ -79,7 +79,8 @@ func TestSandboxVerifyFlags(t *testing.T) {
 	}
 	var f sandboxFlags
 	f.verify = true
-	if !f.options(func(string) bool { return false }).Verify {
+	none := func(string) bool { return false }
+	if !f.options(none, none).Verify {
 		t.Error("options lost Verify")
 	}
 }

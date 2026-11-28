@@ -17,6 +17,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
+	"github.com/josegonzalez/safeclaw/internal/profile"
 	"github.com/josegonzalez/safeclaw/internal/session"
 )
 
@@ -74,9 +75,11 @@ func (f *sandboxFlags) register(cmd *cobra.Command, nameHelp, recreates string) 
 }
 
 // options maps the flags to SandboxOptions. changed reports whether a flag
-// was set on the command line. Limits are only passed when set, so a
-// recreated sandbox keeps the others.
-func (f sandboxFlags) options(changed func(name string) bool) session.SandboxOptions {
+// was set, on the command line or by a profile, and typed whether it was
+// set on the command line. Limits are only passed when set, so a
+// recreated sandbox keeps the others. Typed limits recreate an existing
+// sandbox; a profile's recreate it only when they differ from its own.
+func (f sandboxFlags) options(changed, typed func(name string) bool) session.SandboxOptions {
 	opts := session.SandboxOptions{
 		Name:    f.session,
 		Volumes: f.volumes,
@@ -97,7 +100,7 @@ func (f sandboxFlags) options(changed func(name string) bool) session.SandboxOpt
 		opts.Disk = f.disk
 	}
 	for _, name := range limitFlags {
-		if changed(name) {
+		if typed(name) {
 			opts.Recreate = true
 		}
 	}
@@ -142,7 +145,8 @@ func newSandboxRunCommand() *cobra.Command {
   name=$(safeclaw sandbox run --rm --name-prefix triage)   # triage-20261128-110940`,
 		Args: cobra.MatchAll(cobra.NoArgs, sandboxRunArgs, sandboxInputArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			opts := f.options(func(name string) bool { return cmd.Flags().Changed(name) })
+			opts := f.options(flagSources(cmd))
+			opts.Profile, opts.ProfileSHA256 = appliedProfile(cmd)
 			opts.NamePrefix = namePrefix
 			var err error
 			if opts.Name, err = resolveName(cmd, opts.Name); err != nil {
@@ -169,6 +173,7 @@ func newSandboxRunCommand() *cobra.Command {
 	cmd.Flags().StringVar(&namePrefix, "name-prefix", "", "with --rm, name the sandbox PREFIX-YYYYMMDD-HHMMSS in UTC, adding -2 to -9 when that name is taken")
 	cmd.Flags().BoolVar(&f.verify, "verify", false, "run the sandbox verify checks once it has started, and remove it if a check fails and this run created it")
 	inputs.register(cmd)
+	useProfile(cmd, profile.Run)
 	return cmd
 }
 
@@ -265,7 +270,8 @@ func newSandboxExecCommand() *cobra.Command {
 			}
 			var argv []string
 			if ephemeral {
-				opts := f.options(func(name string) bool { return cmd.Flags().Changed(name) })
+				opts := f.options(flagSources(cmd))
+				opts.Profile, opts.ProfileSHA256 = appliedProfile(cmd)
 				if opts.Name, err = resolveName(cmd, opts.Name); err != nil {
 					return err
 				}
@@ -302,6 +308,7 @@ func newSandboxExecCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&ephemeral, "ephemeral", false, "run the command in a new one-off sandbox that is removed when it exits")
 	f.register(cmd, "name for the --ephemeral sandbox (random by default)", " (with --ephemeral)")
 	cmd.Flags().BoolVar(&f.verify, "verify", false, "run the sandbox verify checks on the --ephemeral sandbox before the command, and remove it without running the command if a check fails")
+	useProfile(cmd, profile.Exec)
 	return cmd
 }
 
@@ -573,6 +580,7 @@ func newSandboxCopyOutCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&noScan, "no-scan", false, "copy without scanning the files for malware")
 	cmd.Flags().BoolVar(&allowFlagged, "allow-flagged", false, "copy files the malware scan flags as infected or could not scan")
 	cmd.Flags().BoolVar(&mkdir, "mkdir", false, "create HOST_DIR and its missing parents once the copy has passed every check")
+	useProfile(cmd, profile.CopyOut)
 	return cmd
 }
 
