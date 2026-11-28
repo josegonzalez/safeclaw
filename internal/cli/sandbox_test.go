@@ -86,6 +86,43 @@ func TestSandboxRunFlags(t *testing.T) {
 	}
 }
 
+func TestSandboxRunNamePrefixFlag(t *testing.T) {
+	cases := []struct {
+		flags []string
+		err   string
+	}{
+		{[]string{"--rm", "--name-prefix", "triage"}, ""},
+		{[]string{"--rm", "-s", "job"}, ""},
+		{[]string{"-s", "job"}, ""},
+		{[]string{"--rm", "-s", "job", "--name-prefix", "triage"}, "-s and --name-prefix can't be used together"},
+		{[]string{"-s", "job", "--name-prefix", "triage"}, "-s and --name-prefix can't be used together"},
+		{[]string{"--name-prefix", "triage"}, "--name-prefix can only be used with --rm"},
+		{[]string{"--rm=false", "--name-prefix", "triage"}, "--name-prefix can only be used with --rm"},
+		{[]string{"--rm", "--name-prefix", ""}, "--name-prefix can't be empty"},
+	}
+	for _, c := range cases {
+		cmd := newSandboxRunCommand()
+		if err := cmd.ParseFlags(c.flags); err != nil {
+			t.Fatal(err)
+		}
+		err := cmd.Args(cmd, nil)
+		if c.err == "" && err != nil || c.err != "" && (err == nil || !strings.Contains(err.Error(), c.err)) {
+			t.Errorf("%q: err = %v, want %q", c.flags, err, c.err)
+		}
+	}
+	// The conflicts are refused before docker is called.
+	cmd := newSandboxRunCommand()
+	cmd.SetArgs([]string{"-s", "job", "--rm", "--name-prefix", "triage"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "can't be used together") {
+		t.Errorf("err = %v", err)
+	}
+	if cmd = newSandboxRunCommand(); cmd.Args(cmd, []string{"x"}) == nil {
+		t.Error("an argument should still be refused")
+	}
+}
+
 func TestSandboxExecArgs(t *testing.T) {
 	cases := []struct {
 		flags []string

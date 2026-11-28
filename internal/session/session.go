@@ -379,6 +379,9 @@ type Manager struct {
 	AuthDir string
 	// Sleep defaults to time.Sleep.
 	Sleep func(time.Duration)
+	// Now dates the names of one-off sandboxes given a name prefix.
+	// Defaults to time.Now.
+	Now func() time.Time
 	// OpenBrowser defaults to open/xdg-open.
 	OpenBrowser func(url string) error
 	// PromptTimeout bounds how long a query waits for Claude Code's prompt.
