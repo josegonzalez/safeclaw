@@ -253,8 +253,17 @@ func TestIntegrationSandbox(t *testing.T) {
 	if out, err := run("stat", "-c", "%U %a", "/sandbox"); err != nil || out != config.SandboxUser+" 700" {
 		t.Errorf("/sandbox owner and mode = %q, %v", out, err)
 	}
-	if len(c.Mounts) != 1 || c.Mounts[0].Destination != "/in" {
-		t.Errorf("mounts = %+v, want only the -v bind mount", c.Mounts)
+	// The -v bind and the read-only signatures, and no docker volume.
+	var dsts []string
+	for _, mt := range c.Mounts {
+		dsts = append(dsts, mt.Destination)
+		if mt.Destination == "/var/lib/clamav" && (mt.RW || mt.Source != m.signaturesDir()) {
+			t.Errorf("signature mount = %+v", mt)
+		}
+	}
+	slices.Sort(dsts)
+	if !slices.Equal(dsts, []string{"/in", "/var/lib/clamav"}) {
+		t.Errorf("mounts = %+v, want only the -v bind mount and the signatures", c.Mounts)
 	}
 	// Writes within the size work, and writes past it fail.
 	if _, err := run("dd", "if=/dev/zero", "of=/sandbox/small", "bs=1M", "count=4"); err != nil {
@@ -285,7 +294,7 @@ func TestIntegrationSandbox(t *testing.T) {
 	// A real sandbox passes every verify check, and inspect reports its
 	// --disk.
 	info, err := m.InspectSandbox(ctx, name)
-	if err != nil || info.Limits.DiskBytes != 8<<20 || !info.Running || len(info.Mounts) != 1 || !info.Mounts[0].RecursiveReadOnly {
+	if err != nil || info.Limits.DiskBytes != 8<<20 || !info.Running || len(info.Mounts) != 2 || !info.Mounts[0].RecursiveReadOnly || !info.Mounts[1].RecursiveReadOnly {
 		t.Errorf("inspect = %+v, %v", info, err)
 	}
 	report, err := m.VerifySandbox(ctx, name)
@@ -955,7 +964,7 @@ func TestIntegrationSandboxCopy(t *testing.T) {
 	if err := os.Mkdir(host, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	opts := CopyOutOptions{Only: []string{"*.txt"}}
+	opts := CopyOutOptions{NoScan: true, Only: []string{"*.txt"}}
 	got, err := m.CopyOut(ctx, name, "/sandbox/out", host, opts)
 	if err != nil {
 		t.Fatal(err)
@@ -991,7 +1000,7 @@ func TestIntegrationSandboxCopy(t *testing.T) {
 	if err := os.Symlink(filepath.Join(host, "keep.log"), filepath.Join(host, "link.txt")); err != nil {
 		t.Fatal(err)
 	}
-	opts = CopyOutOptions{Only: []string{"*.txt"}, Replace: true, MaxSize: 1}
+	opts = CopyOutOptions{NoScan: true, Only: []string{"*.txt"}, Replace: true, MaxSize: 1}
 	if _, err := m.CopyOut(ctx, name, "/sandbox/out", host, opts); !errors.Is(err, ErrTooLarge) {
 		t.Errorf("--replace --max-size: err = %v, want ErrTooLarge", err)
 	}
@@ -1010,12 +1019,12 @@ func TestIntegrationSandboxCopy(t *testing.T) {
 	if want := []string{"a.txt", "keep.log", "link.txt", "sub"}; !slices.Equal(names, want) {
 		t.Errorf("after --replace host dir = %v, want %v", names, want)
 	}
-	opts = CopyOutOptions{Only: []string{"*"}, MaxSize: 1}
+	opts = CopyOutOptions{NoScan: true, Only: []string{"*"}, MaxSize: 1}
 	if _, err := m.CopyOut(ctx, name, "/sandbox/out", t.TempDir(), opts); !errors.Is(err, ErrTooLarge) {
 		t.Errorf("--max-size: err = %v, want ErrTooLarge", err)
 	}
 	// The sandbox user can't read /home/sclaw, so neither can cp-out.
-	if _, err := m.CopyOut(ctx, name, "/home/sclaw", t.TempDir(), CopyOutOptions{Only: []string{"*"}}); err == nil {
+	if _, err := m.CopyOut(ctx, name, "/home/sclaw", t.TempDir(), CopyOutOptions{NoScan: true, Only: []string{"*"}}); err == nil {
 		t.Error("cp-out of /home/sclaw should fail")
 	}
 

@@ -27,7 +27,7 @@ const (
 )
 
 // Sandbox is the name of the built-in variant with document extraction
-// tools, which sandboxes use by default.
+// and malware scanning tools, which sandboxes use by default.
 const Sandbox = "sandbox"
 
 var (
@@ -84,7 +84,7 @@ func Builtins() []Variant {
 	return []Variant{
 		{
 			Name:     Sandbox,
-			Packages: []string{"7zip", "file", "poppler-utils", "tesseract-ocr", "tesseract-ocr-eng"},
+			Packages: []string{"7zip", "clamav", "clamav-freshclam", "file", "poppler-utils", "tesseract-ocr", "tesseract-ocr-eng"},
 			// safeclaw run as safeclaw-unpack is `safeclaw unpack`, which
 			// drives the 7z installed above, run as safeclaw-totext is
 			// `safeclaw totext`, which drives poppler-utils and tesseract,

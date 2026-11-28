@@ -16,6 +16,7 @@ import (
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
+	"github.com/josegonzalez/safeclaw/internal/scan"
 	"github.com/josegonzalez/safeclaw/internal/variant"
 )
 
@@ -212,6 +213,9 @@ type SandboxOptions struct {
 
 	// kept are the bind mounts carried over from a recreated sandbox.
 	kept []string
+	// signatures is the host directory of malware signatures, mounted
+	// read-only at scan.DatabaseDir when set.
+	signatures string
 	// image is the ID checkImage returned for Variant's image. Sandboxes
 	// run it rather than the tag, so the image whose labels were checked
 	// is the one that runs.
@@ -221,7 +225,7 @@ type SandboxOptions struct {
 // keep fills in what opts leaves unset from the sandbox it recreates.
 func (o SandboxOptions) keep(c docker.Container) SandboxOptions {
 	if len(o.Volumes) == 0 {
-		o.kept = c.BindSpecs()
+		o.kept = c.BindSpecs(scan.DatabaseDir)
 	}
 	if o.Memory == "" && c.HostConfig.Memory > 0 {
 		o.Memory = strconv.FormatInt(c.HostConfig.Memory, 10)
@@ -347,6 +351,9 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 			return nil, err
 		}
 		opts.Variant, opts.image = want, image
+		if opts.signatures, err = m.signaturesMount(); err != nil {
+			return nil, err
+		}
 		name, err := m.pickName(ctx, opts.Name)
 		if err != nil {
 			return nil, err
@@ -392,6 +399,9 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 		return nil, err
 	}
 	opts.Variant, opts.image = want, image
+	if opts.signatures, err = m.signaturesMount(); err != nil {
+		return nil, err
+	}
 
 	// created is set when this call makes the container, which a failed
 	// verification removes again.
@@ -494,6 +504,9 @@ func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, exe
 		return nil, "", err
 	}
 	opts.Variant, opts.image = want, image
+	if opts.signatures, err = m.signaturesMount(); err != nil {
+		return nil, "", err
+	}
 	name, err := m.pickName(ctx, opts.Name)
 	if err != nil {
 		return nil, "", err
@@ -577,6 +590,10 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 	// Docker refuses two mounts at one path itself, but with a less
 	// helpful error, after the image checks.
 	seen := map[string]string{"/tmp": "the /tmp tmpfs", config.SandboxDir: "the " + config.SandboxDir + " tmpfs"}
+	if opts.signatures != "" {
+		seen[scan.DatabaseDir] = "the malware signatures"
+		args = append(args, "--mount", ReadOnlyBind{Source: opts.signatures, Target: scan.DatabaseDir}.Mount())
+	}
 	for _, volume := range opts.volumes() {
 		b, err := ReadOnlyVolume(volume)
 		if err != nil {

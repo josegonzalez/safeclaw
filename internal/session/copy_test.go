@@ -314,7 +314,7 @@ func TestCopyTarget(t *testing.T) {
 		if _, err := m.CopyIn(context.Background(), name, []string{file}, ""); !errors.Is(err, want) {
 			t.Errorf("cp-in %s: err = %v, want %v", name, err, want)
 		}
-		if _, err := m.CopyOut(context.Background(), name, "/sandbox/out", host, CopyOutOptions{Only: []string{"*"}}); !errors.Is(err, want) {
+		if _, err := m.CopyOut(context.Background(), name, "/sandbox/out", host, CopyOutOptions{NoScan: true, Only: []string{"*"}}); !errors.Is(err, want) {
 			t.Errorf("cp-out %s: err = %v, want %v", name, err, want)
 		}
 		if hasExec(r) {
@@ -473,7 +473,7 @@ var resultsTar = []entry{
 func TestCopyOut(t *testing.T) {
 	host := t.TempDir()
 	m, r := newCopyManager(t, &copyFake{tarOut: makeTar(t, resultsTar...)})
-	paths, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{Only: []string{"*.txt"}})
+	paths, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{NoScan: true, Only: []string{"*.txt"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +499,7 @@ func TestCopyOut(t *testing.T) {
 	// Several globs keep a file matching any of them.
 	host = t.TempDir()
 	m, _ = newCopyManager(t, &copyFake{tarOut: makeTar(t, resultsTar...)})
-	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"a.*", "*.log"}}); err != nil {
+	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: []string{"a.*", "*.log"}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := dirContents(t, host); !reflect.DeepEqual(got, map[string]string{"a.txt": "alpha", "b.log": "log"}) {
@@ -523,7 +523,7 @@ func TestCopyOutRefusesStreams(t *testing.T) {
 	for _, tc := range cases {
 		host := t.TempDir()
 		m, _ := newCopyManager(t, &copyFake{tarOut: tc.tar, tarErr: tc.tarErr})
-		_, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{Only: []string{"*"}, MaxSize: tc.maxSize})
+		_, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{NoScan: true, Only: []string{"*"}, MaxSize: tc.maxSize})
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
 		}
@@ -561,7 +561,7 @@ func TestExtractTopHugeSize(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	_, err := extractTop(bytes.NewReader(buf.Bytes()), dir, CopyOutOptions{Only: []string{"*"}, MaxSize: 1024})
+	_, err := extractTop(bytes.NewReader(buf.Bytes()), dir, CopyOutOptions{NoScan: true, Only: []string{"*"}, MaxSize: 1024})
 	if !errors.Is(err, ErrTooLarge) {
 		t.Errorf("err = %v, want %v", err, ErrTooLarge)
 	}
@@ -577,7 +577,7 @@ func TestCopyOutExisting(t *testing.T) {
 	host := t.TempDir()
 	writeFile(t, filepath.Join(host, "a.txt"), "old a")
 	m, _ := newCopyManager(t, &copyFake{tarOut: stream})
-	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: only}); !errors.Is(err, ErrFileExists) {
+	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: only}); !errors.Is(err, ErrFileExists) {
 		t.Errorf("err = %v, want ErrFileExists", err)
 	}
 	if got := dirContents(t, host); !reflect.DeepEqual(got, map[string]string{"a.txt": "old a"}) {
@@ -590,7 +590,7 @@ func TestCopyOutExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ = newCopyManager(t, &copyFake{tarOut: stream})
-	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: only, Force: true}); err != nil {
+	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: only, Force: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := dirContents(t, host); !reflect.DeepEqual(got, map[string]string{"a.txt": "new a", "b.txt": "new b"}) {
@@ -609,7 +609,7 @@ func TestCopyOutExisting(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ = newCopyManager(t, &copyFake{tarOut: stream})
-	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: only, Force: true}); !errors.Is(err, ErrIsDirectory) {
+	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: only, Force: true}); !errors.Is(err, ErrIsDirectory) {
 		t.Errorf("err = %v, want ErrIsDirectory", err)
 	}
 	if got := dirContents(t, host); len(got) != 1 {
@@ -677,7 +677,7 @@ var replaceStream = []entry{
 func TestCopyOutReplace(t *testing.T) {
 	host, outside := replaceHost(t)
 	m, _ := newCopyManager(t, &copyFake{tarOut: makeTar(t, replaceStream...)})
-	paths, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*.txt"}, Replace: true})
+	paths, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: []string{"*.txt"}, Replace: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -712,7 +712,7 @@ func TestCopyOutReplace(t *testing.T) {
 	writeFile(t, filepath.Join(host, "x.log"), "x")
 	writeFile(t, filepath.Join(host, "x.txt"), "x")
 	m, _ = newCopyManager(t, &copyFake{tarOut: makeTar(t, replaceStream...)})
-	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"a.*", "*.log"}, Replace: true}); err != nil {
+	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: []string{"a.*", "*.log"}, Replace: true}); err != nil {
 		t.Fatal(err)
 	}
 	want = map[string]string{"a.txt": "file:new a", "c.log": "file:new c", "x.txt": "file:x"}
@@ -725,7 +725,7 @@ func TestCopyOutReplace(t *testing.T) {
 	writeFile(t, filepath.Join(host, "a.txt"), "old")
 	writeFile(t, filepath.Join(host, "b.log"), "log")
 	m, _ = newCopyManager(t, &copyFake{tarOut: makeTar(t, entry{"./", tar.TypeDir, "", 0o755})})
-	paths, err = m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*.txt"}, Replace: true})
+	paths, err = m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: []string{"*.txt"}, Replace: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -738,7 +738,7 @@ func TestCopyOutReplace(t *testing.T) {
 
 	// --replace still needs a glob, so it never removes every file.
 	m, _ = newCopyManager(t, &copyFake{tarOut: makeTar(t, replaceStream...)})
-	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Replace: true}); !errors.Is(err, ErrNoGlob) {
+	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Replace: true}); !errors.Is(err, ErrNoGlob) {
 		t.Errorf("err = %v, want ErrNoGlob", err)
 	}
 }
@@ -751,13 +751,13 @@ func TestCopyOutReplaceFailureKeepsHost(t *testing.T) {
 		opts   CopyOutOptions
 		want   string
 	}{
-		{"tar failed", makeTar(t, replaceStream...), errors.New("tar: out: Cannot open: No such file or directory"), CopyOutOptions{}, "No such file"},
-		{"truncated", makeTar(t, replaceStream...)[:1026], nil, CopyOutOptions{}, "unexpected EOF"},
-		{"too large", makeTar(t, replaceStream...), nil, CopyOutOptions{MaxSize: 6}, ErrTooLarge.Error()},
-		{"too many", makeTar(t, replaceStream...), nil, CopyOutOptions{MaxFiles: 1}, ErrTooManyFiles.Error()},
-		{"duplicate", makeTar(t, entry{"./a.txt", tar.TypeReg, "1", 0}, entry{"a.txt", tar.TypeReg, "2", 0}), nil, CopyOutOptions{}, "more than once"},
-		{"unsafe name", makeTar(t, entry{"./-a.txt", tar.TypeReg, "1", 0}), nil, CopyOutOptions{}, ErrUnsafeName.Error()},
-		{"directory clash", makeTar(t, entry{"./dir.txt", tar.TypeReg, "1", 0}), nil, CopyOutOptions{}, ErrIsDirectory.Error()},
+		{"tar failed", makeTar(t, replaceStream...), errors.New("tar: out: Cannot open: No such file or directory"), CopyOutOptions{NoScan: true}, "No such file"},
+		{"truncated", makeTar(t, replaceStream...)[:1026], nil, CopyOutOptions{NoScan: true}, "unexpected EOF"},
+		{"too large", makeTar(t, replaceStream...), nil, CopyOutOptions{NoScan: true, MaxSize: 6}, ErrTooLarge.Error()},
+		{"too many", makeTar(t, replaceStream...), nil, CopyOutOptions{NoScan: true, MaxFiles: 1}, ErrTooManyFiles.Error()},
+		{"duplicate", makeTar(t, entry{"./a.txt", tar.TypeReg, "1", 0}, entry{"a.txt", tar.TypeReg, "2", 0}), nil, CopyOutOptions{NoScan: true}, "more than once"},
+		{"unsafe name", makeTar(t, entry{"./-a.txt", tar.TypeReg, "1", 0}), nil, CopyOutOptions{NoScan: true}, ErrUnsafeName.Error()},
+		{"directory clash", makeTar(t, entry{"./dir.txt", tar.TypeReg, "1", 0}), nil, CopyOutOptions{NoScan: true}, ErrIsDirectory.Error()},
 	}
 	for _, tc := range cases {
 		host, _ := replaceHost(t)
@@ -790,7 +790,7 @@ func TestCopyOutReplaceUndo(t *testing.T) {
 			return orig(from, to)
 		}
 		m, _ := newCopyManager(t, &copyFake{tarOut: makeTar(t, replaceStream...)})
-		_, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*.txt"}, Replace: true})
+		_, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: []string{"*.txt"}, Replace: true})
 		renameFile = orig
 		if err == nil || !strings.Contains(err.Error(), "injected failure") {
 			t.Errorf("%s: err = %v", failOn, err)
@@ -812,7 +812,7 @@ func TestCopyOutMaxFiles(t *testing.T) {
 
 	host := t.TempDir()
 	m, _ := newCopyManager(t, &copyFake{tarOut: stream})
-	_, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{Only: []string{"*.txt"}, MaxFiles: 4})
+	_, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{NoScan: true, Only: []string{"*.txt"}, MaxFiles: 4})
 	if !errors.Is(err, ErrTooManyFiles) || !strings.Contains(err.Error(), "(4 files)") {
 		t.Errorf("over the limit: err = %v, want ErrTooManyFiles", err)
 	}
@@ -824,7 +824,7 @@ func TestCopyOutMaxFiles(t *testing.T) {
 	for _, limit := range []int{5, 0} {
 		host = t.TempDir()
 		m, _ = newCopyManager(t, &copyFake{tarOut: stream})
-		paths, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{Only: []string{"*.txt"}, MaxFiles: limit})
+		paths, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{NoScan: true, Only: []string{"*.txt"}, MaxFiles: limit})
 		if err != nil || len(paths) != 5 {
 			t.Errorf("MaxFiles %d: got %d files, err = %v", limit, len(paths), err)
 		}
@@ -902,7 +902,7 @@ func TestCopyOutDropsSparse(t *testing.T) {
 
 	host := t.TempDir()
 	m, _ := newCopyManager(t, &copyFake{tarOut: buf.Bytes()})
-	paths, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{Only: []string{"*"}})
+	paths, err := m.CopyOut(context.Background(), "box", "/sandbox/out", host, CopyOutOptions{NoScan: true, Only: []string{"*"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -921,13 +921,13 @@ func TestCopyOutArgs(t *testing.T) {
 		opts    CopyOutOptions
 		want    string
 	}{
-		{"no glob", "out", host, CopyOutOptions{}, ErrNoGlob.Error()},
-		{"bad glob", "out", host, CopyOutOptions{Only: []string{"["}}, "syntax error"},
-		{"negative", "out", host, CopyOutOptions{Only: []string{"*"}, MaxSize: -1}, "negative"},
-		{"negative files", "out", host, CopyOutOptions{Only: []string{"*"}, MaxFiles: -1}, "--max-files must not be negative"},
-		{"no src", "", host, CopyOutOptions{Only: []string{"*"}}, "sandbox directory is required"},
-		{"missing host dir", "out", filepath.Join(host, "missing"), CopyOutOptions{Only: []string{"*"}}, "no such file"},
-		{"host file", "out", file, CopyOutOptions{Only: []string{"*"}}, "not a directory"},
+		{"no glob", "out", host, CopyOutOptions{NoScan: true}, ErrNoGlob.Error()},
+		{"bad glob", "out", host, CopyOutOptions{NoScan: true, Only: []string{"["}}, "syntax error"},
+		{"negative", "out", host, CopyOutOptions{NoScan: true, Only: []string{"*"}, MaxSize: -1}, "negative"},
+		{"negative files", "out", host, CopyOutOptions{NoScan: true, Only: []string{"*"}, MaxFiles: -1}, "--max-files must not be negative"},
+		{"no src", "", host, CopyOutOptions{NoScan: true, Only: []string{"*"}}, "sandbox directory is required"},
+		{"missing host dir", "out", filepath.Join(host, "missing"), CopyOutOptions{NoScan: true, Only: []string{"*"}}, "no such file"},
+		{"host file", "out", file, CopyOutOptions{NoScan: true, Only: []string{"*"}}, "not a directory"},
 	}
 	for _, tc := range cases {
 		m, r := newCopyManager(t, &copyFake{})
@@ -1010,7 +1010,7 @@ func TestCopyOutRefusesUnsafeNames(t *testing.T) {
 		host := t.TempDir()
 		stream := makeTar(t, entry{"./ok.txt", tar.TypeReg, "ok", 0}, entry{"./" + name, tar.TypeReg, "x", 0})
 		m, _ := newCopyManager(t, &copyFake{tarOut: stream})
-		_, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*"}})
+		_, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: []string{"*"}})
 		if !errors.Is(err, ErrUnsafeName) {
 			t.Errorf("%q: err = %v, want ErrUnsafeName", name, err)
 			continue
@@ -1034,7 +1034,7 @@ func TestCopyOutIgnoresUnsafeNamesNotKept(t *testing.T) {
 	)
 	host := t.TempDir()
 	m, _ := newCopyManager(t, &copyFake{tarOut: stream})
-	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*.txt"}}); err != nil {
+	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: []string{"*.txt"}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := dirContents(t, host); !reflect.DeepEqual(got, map[string]string{"ok.txt": "ok"}) {
@@ -1061,7 +1061,7 @@ func TestCopyOutHiddenFiles(t *testing.T) {
 	} {
 		host := t.TempDir()
 		m, _ := newCopyManager(t, &copyFake{tarOut: stream})
-		if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: tc.only}); err != nil {
+		if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: tc.only}); err != nil {
 			t.Fatalf("%v: %v", tc.only, err)
 		}
 		if got := dirContents(t, host); !reflect.DeepEqual(got, tc.want) {
@@ -1079,7 +1079,7 @@ func TestCopyOutQuotesNames(t *testing.T) {
 	}
 	writeFile(t, filepath.Join(host, "a.txt"), "old")
 	m, _ := newCopyManager(t, &copyFake{tarOut: makeTar(t, entry{"./a.txt", tar.TypeReg, "new", 0})})
-	_, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*"}})
+	_, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: []string{"*"}})
 	if want := strconv.Quote(filepath.Join(host, "a.txt")) + " " + ErrFileExists.Error(); err == nil || err.Error() != want {
 		t.Errorf("err = %v, want %s", err, want)
 	}
@@ -1087,7 +1087,7 @@ func TestCopyOutQuotesNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	m, _ = newCopyManager(t, &copyFake{tarOut: makeTar(t, entry{"./d.txt", tar.TypeReg, "new", 0})})
-	_, err = m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*"}, Force: true})
+	_, err = m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{NoScan: true, Only: []string{"*"}, Force: true})
 	if want := strconv.Quote(filepath.Join(host, "d.txt")) + " " + ErrIsDirectory.Error(); err == nil || err.Error() != want {
 		t.Errorf("err = %v, want %s", err, want)
 	}
@@ -1099,11 +1099,11 @@ func TestCopyOutQuotesNames(t *testing.T) {
 		t.Errorf("placeError = %v", err)
 	}
 	dup := makeTar(t, entry{"./a.txt", tar.TypeReg, "1", 0}, entry{"a.txt", tar.TypeReg, "2", 0})
-	if _, err := extractTop(bytes.NewReader(dup), t.TempDir(), CopyOutOptions{Only: []string{"*"}}); err == nil || err.Error() != `"a.txt" appears more than once` {
+	if _, err := extractTop(bytes.NewReader(dup), t.TempDir(), CopyOutOptions{NoScan: true, Only: []string{"*"}}); err == nil || err.Error() != `"a.txt" appears more than once` {
 		t.Errorf("duplicate err = %v", err)
 	}
 	short := makeTar(t, entry{"./a.txt", tar.TypeReg, "12345", 0})[:514]
-	if _, err := extractTop(bytes.NewReader(short), t.TempDir(), CopyOutOptions{Only: []string{"*"}}); err == nil || !strings.HasPrefix(err.Error(), `"a.txt": `) {
+	if _, err := extractTop(bytes.NewReader(short), t.TempDir(), CopyOutOptions{NoScan: true, Only: []string{"*"}}); err == nil || !strings.HasPrefix(err.Error(), `"a.txt": `) {
 		t.Errorf("short read err = %v", err)
 	}
 }

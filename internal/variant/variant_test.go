@@ -21,7 +21,7 @@ func TestDefault(t *testing.T) {
 	if err != nil || !v.Published() || v.Image() != "safeclaw:sandbox" {
 		t.Errorf("sandbox = %+v, %v", v, err)
 	}
-	for _, p := range []string{"poppler-utils", "tesseract-ocr", "tesseract-ocr-eng", "7zip", "file"} {
+	for _, p := range []string{"poppler-utils", "tesseract-ocr", "tesseract-ocr-eng", "7zip", "file", "clamav", "clamav-freshclam"} {
 		if !slices.Contains(v.Packages, p) {
 			t.Errorf("sandbox variant lacks %s", p)
 		}

@@ -476,12 +476,19 @@ func newTestManager(t *testing.T, w *world) (*Manager, *dockertest.Runner) {
 		DashboardDir:  filepath.Join(dir, "dashboard"),
 		NetworkDir:    filepath.Join(dir, "network"),
 		CopyDir:       filepath.Join(dir, "copy"),
+		SignaturesDir: filepath.Join(dir, "clamav"),
 		PortFree:      func(int) bool { return true },
 		Sleep:         func(time.Duration) {},
 		OpenBrowser:   func(string) error { return nil },
 		PromptTimeout: time.Second,
 	}
 	return m, r
+}
+
+// sigMount is the flag that mounts m's signature directory into a sandbox,
+// with a leading space.
+func sigMount(m *Manager) string {
+	return " --mount " + ReadOnlyBind{Source: m.SignaturesDir, Target: "/var/lib/clamav"}.Mount()
 }
 
 func hasCall(r *dockertest.Runner, prefix string) bool {

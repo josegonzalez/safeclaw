@@ -100,24 +100,33 @@ func copyCommand(cmd ...string) []string {
 // copyTarget returns the short name of the running sandbox a copy applies
 // to, refusing interactive sessions and stopped sandboxes.
 func (m *Manager) copyTarget(ctx context.Context, name string) (string, error) {
+	if _, err := m.runningSandbox(ctx, name); err != nil {
+		return "", err
+	}
+	return config.SessionName(name), nil
+}
+
+// runningSandbox returns the container of the named running sandbox,
+// refusing interactive sessions and stopped sandboxes.
+func (m *Manager) runningSandbox(ctx context.Context, name string) (*docker.Container, error) {
 	name = config.SessionName(name)
 	if err := ValidateName(name); err != nil {
-		return "", err
+		return nil, err
 	}
 	c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if c == nil {
-		return "", fmt.Errorf("session %q %w", name, ErrNotFound)
+		return nil, fmt.Errorf("session %q %w", name, ErrNotFound)
 	}
 	if TypeOf(*c) != config.TypeSandbox {
-		return "", wrongType(name, ErrNotSandbox)
+		return nil, wrongType(name, ErrNotSandbox)
 	}
 	if !c.State.Running {
-		return "", fmt.Errorf("sandbox %q %w: start it with `safeclaw sandbox run -s %s`", name, ErrNotRunning, name)
+		return nil, fmt.Errorf("sandbox %q %w: start it with `safeclaw sandbox run -s %s`", name, ErrNotRunning, name)
 	}
-	return name, nil
+	return c, nil
 }
 
 func (m *Manager) copyDir() string {
@@ -337,17 +346,72 @@ type CopyOutOptions struct {
 	MaxSize int64
 	// MaxFiles caps the number of files kept. 0 means no limit.
 	MaxFiles int
+	// NoScan skips the malware scan. Without it, every file kept is
+	// scanned before anything is placed, and the copy is refused when no
+	// signatures are installed.
+	NoScan bool
+	// AllowFlagged places files the scan flags as infected or could not
+	// scan, rather than refusing the copy.
+	AllowFlagged bool
 }
 
-// CopyOut copies the regular files directly in a running sandbox's src
+// CopyOutResult is what CopyOutReport copied.
+type CopyOutResult struct {
+	// Paths are the host path of each file, sorted.
+	Paths []string
+	// Scan is the scan of the files, with each result's Path the file's
+	// name, or nil with NoScan.
+	Scan *ScanReport
+}
+
+// FlaggedError is returned when cp-out refuses files its scan flagged.
+// Nothing was placed.
+type FlaggedError struct {
+	Report *ScanReport
+}
+
+func (e *FlaggedError) Error() string {
+	flagged := e.Report.Flagged()
+	parts := make([]string, len(flagged))
+	for i, r := range flagged {
+		parts[i] = fmt.Sprintf("%s: %s", strconv.Quote(r.Path), r)
+	}
+	return fmt.Sprintf("refusing to copy %d flagged or unscannable file(s), so nothing was copied (--allow-flagged copies them anyway): %s",
+		len(flagged), strings.Join(parts, "; "))
+}
+
+// Is makes FlaggedError match ErrFlagged.
+func (e *FlaggedError) Is(target error) bool { return target == ErrFlagged }
+
+// ErrFlagged is matched by a *FlaggedError.
+var ErrFlagged = errors.New("files were flagged by the malware scan")
+
+// CopyOut is CopyOutReport returning only the host paths.
+func (m *Manager) CopyOut(ctx context.Context, name, src, hostDir string, opts CopyOutOptions) ([]string, error) {
+	res, err := m.CopyOutReport(ctx, name, src, hostDir, opts)
+	if err != nil {
+		return nil, err
+	}
+	return res.Paths, nil
+}
+
+// CopyOutReport copies the regular files directly in a running sandbox's src
 // whose names match opts.Only into the existing hostDir. Links,
 // directories, other file types, and anything nested are dropped. The
 // files are read by the sandbox user and land with mode 0644, less the
 // umask. Nothing is written to hostDir unless every file arrives, and
 // existing names are refused unless opts.Force or opts.Replace is set. With
 // opts.Replace, hostDir's other regular files matching opts.Only are
-// removed. It returns the host path of each file, sorted.
-func (m *Manager) CopyOut(ctx context.Context, name, src, hostDir string, opts CopyOutOptions) ([]string, error) {
+// removed.
+//
+// Unless opts.NoScan is set, the files are scanned for malware once they
+// have all arrived in the temporary directory, in a fresh container (see
+// scanCopied), and a file flagged as infected or that could not be scanned
+// refuses the whole copy with a *FlaggedError unless opts.AllowFlagged is
+// set. Signatures and the scan image are checked before anything is read
+// from the sandbox. It returns the host path of each file, sorted, and the
+// scan.
+func (m *Manager) CopyOutReport(ctx context.Context, name, src, hostDir string, opts CopyOutOptions) (*CopyOutResult, error) {
 	if len(opts.Only) == 0 {
 		return nil, ErrNoGlob
 	}
@@ -372,10 +436,17 @@ func (m *Manager) CopyOut(ctx context.Context, name, src, hostDir string, opts C
 	if !fi.IsDir() {
 		return nil, fmt.Errorf("%s is not a directory", hostDir)
 	}
-	name, err = m.copyTarget(ctx, name)
+	var prepared *scanPrepared
+	if !opts.NoScan {
+		if prepared, err = m.prepareScan(ctx); err != nil {
+			return nil, err
+		}
+	}
+	c, err := m.runningSandbox(ctx, name)
 	if err != nil {
 		return nil, err
 	}
+	name = config.SessionName(name)
 
 	tmp, err := os.MkdirTemp(hostDir, ".safeclaw-cp-*")
 	if err != nil {
@@ -401,10 +472,26 @@ func (m *Manager) CopyOut(ctx context.Context, name, src, hostDir string, opts C
 	if err != nil {
 		return nil, err
 	}
-	if opts.Replace {
-		return replaceFiles(tmp, hostDir, names, opts.Only)
+	res := &CopyOutResult{}
+	if prepared != nil {
+		results, err := m.scanCopied(ctx, *c, prepared, tmp, names)
+		if err != nil {
+			return nil, err
+		}
+		res.Scan = &ScanReport{Signatures: prepared.sigs, Results: results}
+		if len(res.Scan.Flagged()) > 0 && !opts.AllowFlagged {
+			return nil, &FlaggedError{Report: res.Scan}
+		}
 	}
-	return placeFiles(tmp, hostDir, names, opts.Force)
+	if opts.Replace {
+		res.Paths, err = replaceFiles(tmp, hostDir, names, opts.Only)
+	} else {
+		res.Paths, err = placeFiles(tmp, hostDir, names, opts.Force)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 // topLevel returns the name of a tar entry directly in the archive's root

@@ -22,3 +22,16 @@ func TestContainerName(t *testing.T) {
 		}
 	}
 }
+
+// The cache directory honors XDG_CACHE_HOME, falling back to ~/.cache.
+func TestCacheDir(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", "/xdg")
+	if got := SignaturesDir(); got != "/xdg/safeclaw/clamav" {
+		t.Errorf("SignaturesDir = %q", got)
+	}
+	t.Setenv("XDG_CACHE_HOME", "")
+	t.Setenv("HOME", "/home/u")
+	if got := CacheDir(); got != "/home/u/.cache/safeclaw" {
+		t.Errorf("CacheDir = %q", got)
+	}
+}
