@@ -532,7 +532,7 @@ func TestRunRefuses(t *testing.T) {
 	}
 	dest := newDest(t)
 	check("missing input", []string{filepath.Join(t.TempDir(), "nope")}, dest, o)
-	check("directory input", []string{t.TempDir()}, dest, o)
+	check("device input", []string{os.DevNull}, dest, o)
 	check("no inputs", nil, dest, o)
 	check("no size", in, dest, Options{})
 	check("negative depth", in, dest, Options{MaxSize: 1, Depth: -1})

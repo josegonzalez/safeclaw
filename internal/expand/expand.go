@@ -110,6 +110,10 @@ type Options struct {
 	// Unskip are paths to take off the skip list, so a container skipped
 	// before is opened.
 	Unskip []string
+	// Ignore, when set, is called with each entry of an input directory
+	// that is left out, a link, a directory, or anything else that isn't a
+	// regular file, and why.
+	Ignore func(path, why string)
 }
 
 // Run copies inputs into dest and opens every container in the tree,
@@ -117,6 +121,14 @@ type Options struct {
 // not be a symbolic link. Without a manifest in it, dest must be missing
 // or an empty directory; with one, Run resumes from it, as described in
 // resume.go.
+//
+// An input that is a directory, or a link to one, stands for every regular
+// file directly in it, in order of name; links, directories, and anything
+// else in it are left out without being followed, and given to
+// Options.Ignore. A directory with none is no inputs. An input directory
+// must not be dest, hold dest, or be inside it. A run that names inputs but
+// finds no files in them still writes the manifest, making dest if it's
+// missing, so the same command line works on every run.
 //
 // Each input is copied in as N-NAME, so inputs never collide. Each file
 // that starts like an archive unpack.Detect knows, or like an email
@@ -136,8 +148,8 @@ type Options struct {
 // path on the list is left packed, flagged SKIPPED, unless it is past
 // Options.Depth.
 //
-// An input that is missing or not a regular file (a link to one is
-// followed), or a usage error, fails the run before dest is touched. An
+// An input that is missing or not a regular file or a directory (a link to
+// one is followed), or a usage error, fails the run before dest is touched. An
 // I/O error outside a container, or ctx ending, fails it too: a first run
 // empties dest, and a resumed one removes what it added, both without
 // following links.
@@ -145,7 +157,8 @@ func Run(ctx context.Context, inputs []string, dest string, o Options) (*Manifes
 	if o.MaxSize <= 0 {
 		return nil, errors.New("the size limit must be positive")
 	}
-	if err := checkOptions(inputs, o); err != nil {
+	sources, err := checkOptions(inputs, dest, o)
+	if err != nil {
 		return nil, err
 	}
 	st, err := openState(dest)
@@ -177,7 +190,7 @@ func Run(ctx context.Context, inputs []string, dest string, o Options) (*Manifes
 	if err := x.prepare(); err != nil {
 		return nil, err
 	}
-	if err := x.run(inputs); err != nil {
+	if err := x.run(sources); err != nil {
 		if ctx.Err() != nil {
 			err = fmt.Errorf("interrupted: %w", err)
 		}
@@ -194,29 +207,22 @@ func Run(ctx context.Context, inputs []string, dest string, o Options) (*Manifes
 }
 
 // checkOptions checks what Run and Plan can check before looking at the
-// destination.
-func checkOptions(inputs []string, o Options) error {
+// destination's contents, returning the files the inputs name.
+func checkOptions(inputs []string, dest string, o Options) ([]source, error) {
 	if o.Depth < 0 {
-		return errors.New("the depth limit can't be negative")
-	}
-	for _, in := range inputs {
-		if fi, err := os.Stat(in); err != nil {
-			return err
-		} else if !fi.Mode().IsRegular() {
-			return fmt.Errorf("%s is not a regular file", in)
-		}
+		return nil, errors.New("the depth limit can't be negative")
 	}
 	for _, p := range append(slices.Clone(o.Skip), o.Unskip...) {
 		if !fs.ValidPath(p) || p == "." {
-			return fmt.Errorf("%q is not a path inside the destination", p)
+			return nil, fmt.Errorf("%q is not a path inside the destination", p)
 		}
 	}
 	for _, p := range o.Skip {
 		if slices.Contains(o.Unskip, p) {
-			return fmt.Errorf("%s is both skipped and unskipped", p)
+			return nil, fmt.Errorf("%s is both skipped and unskipped", p)
 		}
 	}
-	return nil
+	return resolveInputs(inputs, dest, o.Ignore)
 }
 
 type expander struct {
@@ -299,7 +305,7 @@ func checkPolicy(rec ManifestOptions, o Options) error {
 	return nil
 }
 
-func (x *expander) run(inputs []string) error {
+func (x *expander) run(inputs []source) error {
 	for _, i := range x.reopen {
 		c := x.m.Containers[i]
 		if err := x.ctx.Err(); err != nil {
@@ -316,13 +322,13 @@ func (x *expander) run(inputs []string) error {
 		}
 	}
 	for _, in := range inputs {
-		p := filepath.Join(x.root, fmt.Sprintf("%d-%s", len(x.m.Inputs)+1, inputName(in)))
+		p := filepath.Join(x.root, fmt.Sprintf("%d-%s", len(x.m.Inputs)+1, inputName(in.path)))
 		n, sum, created, err := copyInput(in, p)
 		if created {
 			x.added = append(x.added, p)
 		}
 		if err != nil {
-			return fmt.Errorf("copying %s: %w", in, err)
+			return fmt.Errorf("copying %s: %w", in.path, err)
 		}
 		key := inputKey(x.rel(p), sum)
 		if have[key] {
@@ -695,19 +701,14 @@ func removeDir(dir string) error {
 }
 
 // copyInput copies the regular file in to the new file p, following a link
-// to in but never p, and returns its size and hex SHA-256, and whether it
-// made p.
-func copyInput(in, p string) (int64, string, bool, error) {
-	src, err := os.OpenFile(in, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+// to in unless it was found in an input directory, and never p, and returns
+// its size and hex SHA-256, and whether it made p.
+func copyInput(in source, p string) (int64, string, bool, error) {
+	src, err := openSource(in)
 	if err != nil {
 		return 0, "", false, err
 	}
 	defer src.Close()
-	if fi, err := src.Stat(); err != nil {
-		return 0, "", false, err
-	} else if !fi.Mode().IsRegular() {
-		return 0, "", false, fmt.Errorf("%s is not a regular file", in)
-	}
 	dst, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
 		return 0, "", false, err
@@ -718,19 +719,35 @@ func copyInput(in, p string) (int64, string, bool, error) {
 }
 
 // hashFile returns the size and hex SHA-256 of the regular file in,
-// following a link to it.
-func hashFile(in string) (int64, string, error) {
-	f, err := os.OpenFile(in, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+// following a link to it unless it was found in an input directory.
+func hashFile(in source) (int64, string, error) {
+	f, err := openSource(in)
 	if err != nil {
 		return 0, "", err
 	}
 	defer f.Close()
-	if fi, err := f.Stat(); err != nil {
-		return 0, "", err
-	} else if !fi.Mode().IsRegular() {
-		return 0, "", fmt.Errorf("%s is not a regular file", in)
-	}
 	h := sha256.New()
 	n, err := io.Copy(h, f)
 	return n, hex.EncodeToString(h.Sum(nil)), err
+}
+
+// openSource opens the regular file in for reading, following a link to it
+// unless it was found in an input directory.
+func openSource(in source) (*os.File, error) {
+	flags := os.O_RDONLY | syscall.O_NONBLOCK
+	if in.inDir {
+		flags |= syscall.O_NOFOLLOW
+	}
+	f, err := os.OpenFile(in.path, flags, 0)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := f.Stat(); err != nil {
+		_ = f.Close()
+		return nil, err
+	} else if !fi.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s is not a regular file", in.path)
+	}
+	return f, nil
 }

@@ -25,7 +25,7 @@ const expandProgram = "safeclaw-expand"
 
 const expandHelp = `Exit codes:
   0  the run finished, including with containers left packed and flagged
-  1  failed: a usage or I/O error, an input that is missing or not a regular file, DEST is not a missing or empty directory and has no manifest, the manifest was refused, or the run was interrupted
+  1  failed: a usage or I/O error, an input that is missing or not a regular file or a directory, an input directory that is DEST, holds it, or is inside it, DEST is not a missing or empty directory and has no manifest, the manifest was refused, or the run was interrupted
 Codes 2 to 5 are not used for the run: a container's own failure is recorded with the code safeclaw-unpack or safeclaw-mail would have exited with.
 
 Each container in the manifest is printed as a tab-separated line: KIND, PATH, FLAGS, and DIR. KIND is email or the archive format (` + unpackFormats + `). PATH is the container in DEST, escaped as safeclaw-unpack list escapes paths. FLAGS is a comma-separated list: UNPACKED (opened into DIR), REJECTED, NEEDS-PASSWORD, TOO-LARGE, FAILED, DEPTH-LIMIT, or SKIPPED (left packed), then for an email UNSAFE-NAME, BAD-ENCODING, or MALFORMED when its parts had them. DIR is the directory it was opened into, - when it was left packed. Each entry that got an archive rejected follows it as an entry line: entry, TYPE, PATH (inside the archive), and FLAGS. Each container left packed for a failure is also reported on stderr. --json prints the manifest instead, with the paths unescaped.
@@ -44,6 +44,7 @@ func newExpandCommand(use string) *cobra.Command {
 		Use:   use + " [IN...] DEST",
 		Short: "Open a tree of untrusted emails and archives into DEST, leaving the ones that fail packed and flagged",
 		Long: "Open a tree of untrusted emails and archives into DEST, which must not be a symbolic link, and must be missing or an empty directory unless an earlier run left its manifest there. Run it inside a sandbox: the sandbox image variant has 7z and links this command as " + expandProgram + ".\n\n" +
+			"An input that is a directory stands for every regular file directly in it, in order of name, as if each were given; links, directories, and anything else in it are left out without being followed, each noted on stderr, and a directory with none is no inputs. A link given as an input, to a file or a directory, is followed. An input directory must not be DEST, hold it, or be inside it. A run given only directories with no files in them still writes the manifest, making DEST if it's missing, so the same command line works on every run.\n\n" +
 			"Each input is copied into DEST as N-NAME, N counting the inputs from 1 and NAME its base name made safe as safeclaw-mail makes attachment names safe. Every file that starts like a " + unpackFormats + " archive, or like an email, is a container: it is opened into PATH.unpacked next to it (PATH.unpacked-2 and so on when that name is taken), an archive as safeclaw-unpack extract unpacks it and an email as safeclaw-mail extract extracts it, with its part listing in parts.txt beside body.txt. The files in that directory are then looked at in turn, except body.txt and parts.txt, which are never taken for emails. " +
 			"--depth limits how many levels of containers are opened below the inputs, emails and archives alike, a forwarded message counting as a level; and --max-size limits the total size of everything opened, across the whole tree, the input copies not included. --password-env applies to every encrypted archive. --no-mail leaves emails as plain files.\n\n" +
 			"Every level keeps going, the inputs included: a container that is rejected, needs a password, would take the total past --max-size, fails otherwise, or is past --depth is left packed, flagged REJECTED, NEEDS-PASSWORD, TOO-LARGE, FAILED, or DEPTH-LIMIT, and what it extracted is removed, without following links. Everything else is kept. A nested file that only starts like an archive, which 7z can't open, is left as it is, as safeclaw-unpack leaves it. " +
@@ -53,6 +54,7 @@ func newExpandCommand(use string) *cobra.Command {
 		Example: `  safeclaw sandbox exec --ephemeral -v ~/Downloads/report:/in -- safeclaw-expand /in/report.eml /in/logs.zip /sandbox/out
   SAFECLAW_UNPACK_PASSWORD=infected safeclaw-expand --json --depth 5 /sandbox/in/1-report.eml /sandbox/out
   safeclaw-expand --no-mail --max-size 2g /sandbox/in/1-dump.tar.gz /sandbox/out
+  safeclaw-expand /sandbox/in /sandbox/out
   safeclaw-expand --plan /sandbox/out
   SAFECLAW_UNPACK_PASSWORD=infected safeclaw-expand --skip 2-logs.zip /sandbox/out`,
 		Args:          cobra.MinimumNArgs(1),
@@ -69,6 +71,9 @@ func newExpandCommand(use string) *cobra.Command {
 				return expandFailure(cmd, f.json, errors.New("--depth can't be negative"))
 			}
 			o.NoMail = noMail
+			o.Ignore = func(p, why string) {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s: ignoring %s: %s\n", cmd.Root().Name(), escapeField(p), why)
+			}
 			for _, s := range []struct {
 				flag string
 				in   []string

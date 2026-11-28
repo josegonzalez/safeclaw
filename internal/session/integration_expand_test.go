@@ -188,3 +188,90 @@ cmp -s /sandbox/out/manifest.json /sandbox/before.json && echo unchanged
 		}
 	}
 }
+
+// TestIntegrationSandboxExpandDir runs `safeclaw-expand /sandbox/in DEST`
+// in a sandbox of the sandbox variant, without a shell, after cp-in: on an
+// empty /sandbox/in, after copying a zip and a text file in, and after
+// copying one more in, each time the same command line. A link and a
+// directory in /sandbox/in are left out, and noted on stderr.
+func TestIntegrationSandboxExpandDir(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, variant.Image(variant.Sandbox)); err != nil || id == "" {
+		t.Skip("sandbox variant not built; run `safeclaw build --variant sandbox` first")
+	}
+	var b bytes.Buffer
+	w := zip.NewWriter(&b)
+	if fw, err := w.Create("inside.txt"); err != nil {
+		t.Fatal(err)
+	} else if _, err := fw.Write([]byte("inside\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	host := t.TempDir()
+	files := map[string]string{"logs.zip": b.String(), "notes.txt": "notes\n", "later.txt": "later\n"}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(host, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := &Manager{Docker: d}
+	name := "itest-expand-dir"
+	container := config.ContainerName(name)
+	_ = d.Remove(ctx, container, true)
+	t.Cleanup(func() { _ = d.Remove(context.Background(), container, true) })
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name}); err != nil {
+		t.Fatal(err)
+	}
+	exec := func(cmd ...string) string {
+		t.Helper()
+		out, err := d.Exec(ctx, container, copyExec, SandboxCommand(cmd)...)
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", cmd, err, out)
+		}
+		return string(out)
+	}
+	expand := []string{"safeclaw-expand", "/sandbox/in", "/sandbox/tree"}
+
+	// An empty /sandbox/in is no inputs, and the run still writes the
+	// manifest.
+	exec("mkdir", "-p", "/sandbox/in")
+	if out := exec(expand...); out != "" {
+		t.Errorf("empty run = %q", out)
+	}
+	if out := exec("grep", "-c", `"inputs": \[\]`, "/sandbox/tree/manifest.json"); out != "1\n" {
+		t.Errorf("empty manifest: %q", out)
+	}
+
+	if _, err := m.CopyIn(ctx, name, []string{filepath.Join(host, "logs.zip"), filepath.Join(host, "notes.txt")}, ""); err != nil {
+		t.Fatal(err)
+	}
+	exec("ln", "-s", "/etc/passwd", "/sandbox/in/0-link")
+	exec("mkdir", "/sandbox/in/0-sub")
+	if out := exec(expand...); out != "zip\t1-1-logs.zip\tUNPACKED\t1-1-logs.zip.unpacked\n" {
+		t.Errorf("first run = %q", out)
+	}
+	if out := exec("cat", "/sandbox/tree/1-1-logs.zip.unpacked/inside.txt", "/sandbox/tree/2-2-notes.txt"); out != "inside\nnotes\n" {
+		t.Errorf("copies = %q", out)
+	}
+
+	// The same command line copies in only what is new, and notes what it
+	// leaves out.
+	if _, err := m.CopyIn(ctx, name, []string{filepath.Join(host, "later.txt")}, ""); err != nil {
+		t.Fatal(err)
+	}
+	out := exec("sh", "-c", `safeclaw-expand /sandbox/in /sandbox/tree 2>&1; echo "second=$?"; ls /sandbox/tree`)
+	for _, want := range []string{
+		"zip\t1-1-logs.zip\tUNPACKED\t1-1-logs.zip.unpacked\n",
+		"safeclaw-expand: ignoring /sandbox/in/0-link: a symbolic link\n",
+		"safeclaw-expand: ignoring /sandbox/in/0-sub: a directory\n",
+		"second=0\n1-1-logs.zip\n1-1-logs.zip.unpacked\n2-2-notes.txt\n3-3-later.txt\nmanifest.json\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("second run lacks %q:\n%s", want, out)
+		}
+	}
+}
