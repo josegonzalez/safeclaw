@@ -36,6 +36,8 @@ type openWorld struct {
 	dir     string
 	r       *dockertest.Runner
 	missing string
+	// containers are the inspect JSON of each container, by name.
+	containers map[string]string
 }
 
 func newOpenWorld(t *testing.T) *openWorld {
@@ -51,6 +53,7 @@ func newOpenWorld(t *testing.T) *openWorld {
 		"safeclaw-box":  fakeContainer("safeclaw-box", "sandbox", true),
 		"safeclaw-chat": fakeContainer("safeclaw-chat", "session", true),
 	}
+	w.containers = cs
 	w.r = &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
 		if args[0] == "ps" {
 			return []byte("safeclaw-box\nsafeclaw-chat\n"), nil

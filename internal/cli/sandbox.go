@@ -124,8 +124,9 @@ func sandboxRunArgs(cmd *cobra.Command, _ []string) error {
 func newSandboxRunCommand() *cobra.Command {
 	var f sandboxFlags
 	var namePrefix string
+	var inputs inputFlags
 	cmd := &cobra.Command{
-		Use:   "run [-s NAME] [--rm [--name-prefix PREFIX]]",
+		Use:   "run [-s NAME] [--rm [--name-prefix PREFIX] [--keep-inputs DIR | --restore-from DIR]]",
 		Short: "Create or start a sandbox",
 		Long: "Create or start a sandbox. -s is required unless --rm is set.\n\n" +
 			"/sandbox is a tmpfs of --disk bytes: writes past it fail, its pages count toward --memory, and it is emptied when the sandbox stops.\n\n" +
@@ -135,11 +136,11 @@ func newSandboxRunCommand() *cobra.Command {
 			"with -2 to -9 added when that name is taken. The prefix follows the session name rules, and can't be used with -s.\n\n" +
 			"With --verify, the sandbox gets the checks of `safeclaw sandbox verify` once it has started. If any fails, the report is printed " +
 			"to stderr and it exits non-zero naming the failed checks. A sandbox this run created or recreated is then removed, " +
-			"including when safeclaw is interrupted before the checks end; one that already existed is left as it was.",
+			"including when safeclaw is interrupted before the checks end; one that already existed is left as it was.\n\n" + keepInputsHelp,
 		Example: `  safeclaw sandbox run -s triage -v ~/inbox:/in
   name=$(safeclaw sandbox run --rm -v ~/inbox:/in)
   name=$(safeclaw sandbox run --rm --name-prefix triage)   # triage-20261128-110940`,
-		Args: cobra.MatchAll(cobra.NoArgs, sandboxRunArgs),
+		Args: cobra.MatchAll(cobra.NoArgs, sandboxRunArgs, sandboxInputArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts := f.options(func(name string) bool { return cmd.Flags().Changed(name) })
 			opts.NamePrefix = namePrefix
@@ -152,7 +153,7 @@ func newSandboxRunCommand() *cobra.Command {
 			if opts.Remove {
 				m.Out = cmd.ErrOrStderr()
 			}
-			res, err := m.EnsureSandbox(cmd.Context(), opts)
+			res, err := inputs.ensure(cmd, m, opts)
 			if err != nil {
 				return verifyReport(cmd.ErrOrStderr(), err)
 			}
@@ -167,6 +168,7 @@ func newSandboxRunCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&f.remove, "rm", false, "create a one-off sandbox that is removed when it stops")
 	cmd.Flags().StringVar(&namePrefix, "name-prefix", "", "with --rm, name the sandbox PREFIX-YYYYMMDD-HHMMSS in UTC, adding -2 to -9 when that name is taken")
 	cmd.Flags().BoolVar(&f.verify, "verify", false, "run the sandbox verify checks once it has started, and remove it if a check fails and this run created it")
+	inputs.register(cmd)
 	return cmd
 }
 
@@ -478,18 +480,20 @@ func newSandboxCopyInCommand() *cobra.Command {
 			"Each file is named N-NAME, with N continuing after the highest number already in the destination, " +
 			"so files with the same name never overwrite each other. Numbers above 999999999 are ignored, and a destination " +
 			"whose listing is over 8 MiB is refused. The container path of each file is printed, in order, " +
-			"quoted when it is not printable text.",
+			"quoted when it is not printable text.\n\n" +
+			"For a one-off sandbox made with `sandbox run --rm --keep-inputs` or `--restore-from`, each file's absolute host path, sha256, size, and container path " +
+			"are also appended to its input record, and a --to other than " + session.OpenInDir + " is refused, since the record holds only files there. " +
+			"The record is checked before anything is copied.",
 		Args:              cobra.MinimumNArgs(2),
 		ValidArgsFunction: completeSandboxFirst,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := resolveArg(cmd, args); err != nil {
 				return err
 			}
+			// Paths come back with an error when the files were copied
+			// but could not be recorded, and are printed then too.
 			paths, err := session.NewManager(nil).CopyIn(cmd.Context(), args[0], args[1:], to)
-			if err != nil {
-				return err
-			}
-			return writePaths(cmd.OutOrStdout(), paths)
+			return errors.Join(writePaths(cmd.OutOrStdout(), paths), err)
 		},
 	}
 	cmd.Flags().StringVar(&to, "to", session.DefaultCopyDest, "destination directory, under "+config.SandboxDir)

@@ -214,6 +214,10 @@ type SandboxOptions struct {
 	// before is kept, and a *SandboxVerifyError is returned. For
 	// PrepareEphemeral, the command waits for VerifyEphemeral.
 	Verify bool
+	// keepInputs is the absolute directory of the input record a one-off
+	// sandbox from KeepInputs or RestoreSandbox appends to, recorded in
+	// its LabelKeepInputs label.
+	keepInputs string
 
 	// kept are the bind mounts carried over from a recreated sandbox.
 	kept []string
@@ -582,6 +586,9 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 	args := []string{
 		"--name", container,
 		"--label", config.LabelType + "=" + config.TypeSandbox,
+	}
+	if opts.keepInputs != "" {
+		args = append(args, "--label", config.LabelKeepInputs+"="+opts.keepInputs)
 	}
 	args = append(args, variantArgs(opts.Variant)...)
 	args = append(args,

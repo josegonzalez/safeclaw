@@ -35,7 +35,8 @@ const (
 
 const openHelp = `Exit codes:
   0    every container was opened, and with --text every file was converted
-  1    failed before running a helper: a usage error, NAME is not a running sandbox, its image lacks the helpers, or docker failed
+  1    failed before running a helper: a usage error, NAME is not a running sandbox, its image lacks the helpers, or docker failed;
+       or, for a sandbox that keeps its inputs, safeclaw-expand finished but the run could not be recorded, and nothing was converted
   2    safeclaw-expand failed (with --plan too), so the tree is as it was before this run; with --text nothing was converted
   3    safeclaw-expand finished but left containers packed; with --text the tree was converted anyway, ok or partial
   4    with --text, safeclaw-totext failed, so ` + session.OpenOutDir + ` is as it was
@@ -65,7 +66,10 @@ func newSandboxOpenCommand() *cobra.Command {
 			"As with safeclaw-expand, a rerun must give the tree's --depth, --no-mail, and --hold.\n\n" +
 			"The helpers' output is escaped as `sandbox exec --escape-controls` escapes it, so control characters from untrusted files never reach the terminal, " +
 			"and each helper run gets --timeout as `sandbox exec --timeout` does. " +
-			"The sandbox must be running, and its image must have the helpers, which the sandbox image variant links; an interactive session is refused.\n\n" + openHelp,
+			"The sandbox must be running, and its image must have the helpers, which the sandbox image variant links; an interactive session is refused.\n\n" +
+			"For a one-off sandbox made with `sandbox run --rm --keep-inputs` or `--restore-from`, each run whose safeclaw-expand finished, --plan aside, is recorded: " +
+			"its --skip, --unskip, --hold, --release, --release-all, --depth, --max-size, and --no-mail, never the password, " +
+			"so that a restore can print the runs to make again.\n\n" + openHelp,
 		Example: `  safeclaw sandbox cp-in triage ~/Downloads/report.eml
   safeclaw sandbox open triage
   TRIAGE_PASSWORD=infected safeclaw sandbox open triage --password-env TRIAGE_PASSWORD
@@ -170,6 +174,11 @@ func runOpen(cmd *cobra.Command, m *session.Manager, run session.OpenRun, o sess
 	}
 	if o.Plan {
 		return nil
+	}
+	if run.KeepInputs != "" {
+		if err := m.RecordOpen(cmd.Context(), run.KeepInputs, o); err != nil {
+			return fmt.Errorf("%s finished, but this run could not be recorded in %s, so a restore won't replay it: %w", session.ExpandHelper, run.KeepInputs, err)
+		}
 	}
 	if packed.found {
 		msg := "Some containers were left packed in " + session.OpenTreeDir + "; see the lines above"
