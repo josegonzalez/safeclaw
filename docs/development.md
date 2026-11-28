@@ -151,6 +151,9 @@ safeclaw sandbox exec --ephemeral -v ./docs:/in -v ./README.md:/in -- true   # r
 name=$(safeclaw sandbox run --rm -v ./docs:/in)
 safeclaw sandbox ls                                       # yes under ONE-OFF
 safeclaw sandbox stop "$name"                             # and it is gone
+safeclaw sandbox stop --missing-ok "$name"                # Sandbox "tmp-..." is missing, nothing to stop, on stderr; exits 0
+safeclaw sandbox rm -f --missing-ok "$name"               # ... is missing, nothing to remove; exits 0
+safeclaw sandbox stop --missing-ok default                # refused: an interactive session
 name=$(safeclaw sandbox run --rm --verify)                # Verified sandbox: all 20 checks passed, only the name on stdout
 safeclaw sandbox stop "$name"
 safeclaw sandbox exec --ephemeral --verify -i -- sh -c 'cat; ls -A /tmp' < README.md   # prints the file, nothing in /tmp

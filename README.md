@@ -222,6 +222,10 @@ name=$(safeclaw sandbox run --rm -v ~/inbox:/in)
 safeclaw sandbox exec "$name" -- unzip -d /sandbox/out /in/report.zip
 safeclaw sandbox cp-out "$name" /sandbox/out ./results --only '*.pdf'
 safeclaw sandbox stop "$name"
+
+# Clean up whether or not it is still there; prints on stderr when there was nothing to do
+safeclaw sandbox stop --missing-ok "$name"
+safeclaw sandbox rm -f --missing-ok triage
 ```
 
 Scripts that drive a sandbox can check it before handing it untrusted files, without relying on container names, labels, or `docker inspect`:
@@ -436,8 +440,8 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw sandbox status NAME` | Print `running`, `stopped`, or `missing`, exiting 0, 3, or 4. A name that is an interactive session exits 5 with an error, and any other error exits 1. |
 | `safeclaw sandbox inspect NAME` | Print a sandbox's status, variant, network, user, capabilities, read-only root, limits including `--disk`, mounts, and safeclaw labels as JSON with a versioned schema. `--field NAME` prints one top-level field, a string as plain text and anything else as JSON. |
 | `safeclaw sandbox verify NAME` | Check a sandbox's configuration and, when it is running, what the sandbox user sees inside it against the sandbox's isolation guarantees, exiting non-zero and naming the failed checks. The configuration checks are authoritative, and the live checks advisory, since the sandbox can lie to them. `--json` prints the report as JSON. |
-| `safeclaw sandbox stop NAME` | Stop a sandbox, emptying its `/sandbox` |
-| `safeclaw sandbox rm NAME` | Delete a sandbox |
+| `safeclaw sandbox stop NAME` | Stop a sandbox, emptying its `/sandbox`. `--missing-ok` exits 0 when it doesn't exist or is already stopped, saying which on stderr; an interactive session is still refused ([details](docs/architecture.md#stopping-and-removing)) |
+| `safeclaw sandbox rm NAME` | Delete a sandbox (`-f` for a running one). `--missing-ok` exits 0 when it doesn't exist, saying so on stderr; an interactive session is still refused |
 | `safeclaw variant ls` | List image variants, whether their images exist, and which session types default to them |
 | `safeclaw variant dockerfile NAME` | Print the Dockerfile that builds a variant |
 | `safeclaw completion SHELL` | Shell completions |

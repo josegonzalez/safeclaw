@@ -586,46 +586,63 @@ func writeSandboxes(out io.Writer, list []session.Session) error {
 }
 
 func newSandboxStopCommand() *cobra.Command {
-	return &cobra.Command{
-		Use:               "stop NAME",
-		Short:             "Stop a sandbox",
-		Long:              "Stop a sandbox. Its /sandbox is a tmpfs, so the files in it are lost. A one-off sandbox is removed.",
+	var missingOK bool
+	cmd := &cobra.Command{
+		Use:   "stop NAME",
+		Short: "Stop a sandbox",
+		Long: "Stop a sandbox. Its /sandbox is a tmpfs, so the files in it are lost. A one-off sandbox is removed. " +
+			"With --missing-ok, a sandbox that doesn't exist, including a one-off one removed meanwhile, or is already stopped is left alone: " +
+			"it prints which on stderr and exits 0. A name that belongs to an interactive session is still refused.",
+		Example: `  safeclaw sandbox stop triage
+  safeclaw sandbox stop --missing-ok "$name"`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeType(config.TypeSandbox),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := resolveArg(cmd, args); err != nil {
 				return err
 			}
-			m := session.NewManager(nil)
-			if err := m.RequireType(cmd.Context(), args[0], config.TypeSandbox); err != nil {
-				return err
-			}
-			return m.Stop(cmd.Context(), args[0])
+			skipped, err := newManager().StopSandbox(cmd.Context(), args[0], session.SandboxStopOptions{MissingOK: missingOK})
+			printSkipped(cmd, args[0], skipped, "stop")
+			return err
 		},
 	}
+	cmd.Flags().BoolVar(&missingOK, "missing-ok", false, "exit 0 when the sandbox doesn't exist or is already stopped")
+	return cmd
 }
 
 func newSandboxRemoveCommand() *cobra.Command {
-	var force bool
+	var force, missingOK bool
 	cmd := &cobra.Command{
-		Use:               "rm NAME",
-		Aliases:           []string{"delete"},
-		Short:             "Delete a sandbox",
+		Use:     "rm NAME",
+		Aliases: []string{"delete"},
+		Short:   "Delete a sandbox",
+		Long: "Delete a sandbox. A running one needs -f. " +
+			"With --missing-ok, a sandbox that doesn't exist, including a one-off one removed meanwhile, is left alone: " +
+			"it prints that on stderr and exits 0. It doesn't stand in for -f, and a name that belongs to an interactive session is still refused.",
+		Example: `  safeclaw sandbox rm -f triage
+  safeclaw sandbox rm -f --missing-ok "$name"`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeType(config.TypeSandbox),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := resolveArg(cmd, args); err != nil {
 				return err
 			}
-			m := session.NewManager(nil)
-			if err := m.RequireType(cmd.Context(), args[0], config.TypeSandbox); err != nil {
-				return err
-			}
-			return m.Delete(cmd.Context(), args[0], force)
+			skipped, err := newManager().DeleteSandbox(cmd.Context(), args[0], session.SandboxStopOptions{Force: force, MissingOK: missingOK})
+			printSkipped(cmd, args[0], skipped, "remove")
+			return err
 		},
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "remove a running sandbox too")
+	cmd.Flags().BoolVar(&missingOK, "missing-ok", false, "exit 0 when the sandbox doesn't exist")
 	return cmd
+}
+
+// printSkipped tells stderr why `sandbox stop` or `sandbox rm` did nothing,
+// keeping stdout empty for scripts. verb is "stop" or "remove".
+func printSkipped(cmd *cobra.Command, name string, skipped session.Skipped, verb string) {
+	if skipped != session.NotSkipped {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Sandbox %q is %s, nothing to %s\n", name, skipped, verb)
+	}
 }
 
 // variantColumn returns a session's variant for listings, "-" for the base
