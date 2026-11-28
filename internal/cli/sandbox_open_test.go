@@ -177,16 +177,76 @@ func TestSandboxOpenPlan(t *testing.T) {
 	w := newOpenWorld(t)
 	w.helper(t, "expand", packedOut, "0")
 	// A plan lists packed containers, which is not a failure.
-	out, stderr, err := runStderr("sandbox", "open", "box", "--plan", "--depth", "2")
+	out, stderr, err := runStderr("sandbox", "open", "box", "--plan", "--depth", "2", "--max-size", "1g", "--no-mail", "--hold", "mail-archives")
 	if err != nil || out != packedOut || stderr != "" {
 		t.Errorf("err = %v, out = %q, stderr = %q", err, out, stderr)
 	}
-	if got := w.calls(); len(got) != 1 || !slices.Equal(got[0][len(got[0])-5:], []string{"safeclaw-expand", "--depth=2", "--plan", "--", "/sandbox/tree"}) {
-		t.Errorf("argv = %q", got)
+	// The inputs are planned with the tree, with the same policy flags a
+	// run gets.
+	want := []string{"docker", "exec", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box", "/bin/sh", "-c", `umask 022; exec "$@"`, "sh",
+		"timeout", "--kill-after=5s", "--", "1800s", "safeclaw-expand", "--depth=2", "--max-size=1g", "--no-mail=true", "--hold=mail-archives",
+		"--plan", "--", "/sandbox/in", "/sandbox/tree"}
+	if got := w.calls(); len(got) != 1 || !slices.Equal(got[0], want) {
+		t.Errorf("argv = %q\nwant %q", got, want)
+	}
+	// The probe looks for what the plan reads.
+	probe, ok := w.r.Find("exec --user sandbox --workdir /sandbox safeclaw-box /bin/sh -c")
+	if !ok || !slices.Equal(probe.Args[len(probe.Args)-3:], []string{"safeclaw-expand", "/sandbox/in", "/sandbox/tree"}) {
+		t.Errorf("probe = %q", probe.Args)
 	}
 	w.helper(t, "expand", "", "1")
 	if _, _, err := runStderr("sandbox", "open", "box", "--plan"); !errors.Is(err, exitCodeError{openExpandFailed}) {
 		t.Errorf("failed plan: err = %v", err)
+	}
+}
+
+// A plan takes the open section's policy from a profile, as a run does.
+func TestSandboxOpenPlanProfile(t *testing.T) {
+	w := newOpenWorld(t)
+	w.helper(t, "expand", packedOut, "0")
+	p := testProfile(t, "open:\n  depth: 3\n  hold: [mail-archives]\n  no-mail: true\n  max-size: 2g\n  max-pages: 300\n")
+	if _, stderr, err := runStderr("sandbox", "open", "box", "--plan", "--profile", p); err != nil {
+		t.Fatalf("err = %v, stderr = %q", err, stderr)
+	}
+	want := []string{"safeclaw-expand", "--depth=3", "--max-size=2g", "--no-mail=true", "--hold=mail-archives", "--plan", "--", "/sandbox/in", "/sandbox/tree"}
+	if got := w.calls(); len(got) != 1 || !slices.Equal(got[0][len(got[0])-len(want):], want) {
+		t.Errorf("argv = %q\nwant it to end %q", got, want)
+	}
+}
+
+func TestSandboxOpenPlanNothing(t *testing.T) {
+	// Nothing new and nothing packed: an empty plan, said on stderr.
+	w := newOpenWorld(t)
+	w.helper(t, "expand", "", "0")
+	out, stderr, err := runStderr("sandbox", "open", "box", "--plan")
+	if err != nil || out != "" || stderr != "Nothing to open: no archive or email in /sandbox/in is new, and none is left packed in /sandbox/tree\n" {
+		t.Errorf("empty plan: err = %v, out = %q, stderr = %q", err, out, stderr)
+	}
+
+	// Nothing copied in: the tree alone is planned.
+	w = newOpenWorld(t)
+	w.missing = "/sandbox/in\n"
+	w.helper(t, "expand", packedOut, "0")
+	if out, _, err := runStderr("sandbox", "open", "box", "--plan"); err != nil || out != packedOut {
+		t.Errorf("no inputs: err = %v, out = %q", err, out)
+	}
+	if got := w.calls(); len(got) != 1 || !slices.Equal(got[0][len(got[0])-4:], []string{"safeclaw-expand", "--plan", "--", "/sandbox/tree"}) {
+		t.Errorf("no inputs: argv = %q", got)
+	}
+
+	// Nothing copied in or opened: no helper runs.
+	w = newOpenWorld(t)
+	w.missing = "/sandbox/tree\n/sandbox/in\n"
+	out, stderr, err = runStderr("sandbox", "open", "box", "--plan")
+	if err != nil || out != "" || stderr != "Nothing to plan: nothing has been copied into /sandbox/in, and /sandbox/tree has not been opened\n" {
+		t.Errorf("nothing: err = %v, out = %q, stderr = %q", err, out, stderr)
+	}
+	if w.read("argv") != "" {
+		t.Errorf("nothing: ran %s", w.read("argv"))
+	}
+	// Without --plan the paths aren't looked for.
+	if _, _, err := runStderr("sandbox", "open", "box"); err == nil || !strings.Contains(err.Error(), "unexpected output") {
+		t.Errorf("open: err = %v", err)
 	}
 }
 
@@ -284,6 +344,8 @@ func TestSandboxOpenRefuses(t *testing.T) {
 		{[]string{"box", "--max-pages", "3"}, "", "--max-pages needs --text"},
 		{[]string{"box", "--plan", "--skip", "a"}, "", "--plan can't be given with --skip or --unskip"},
 		{[]string{"box", "--plan", "--text"}, "", "--plan can't be given with --text"},
+		{[]string{"box", "--plan", "--hold", "mail-archives", "--release", "1-a.zip"}, "", "--plan can't be given with --release or --release-all"},
+		{[]string{"box", "--plan", "--hold", "mail-archives", "--release-all"}, "", "--plan can't be given with --release or --release-all"},
 		{[]string{"box", "--timeout", "0s"}, "", "invalid --timeout 0s"},
 		{[]string{"box", "--password-env", "GH_TOKEN"}, "", "--password-env GH_TOKEN is the name of a safeclaw secret"},
 	} {

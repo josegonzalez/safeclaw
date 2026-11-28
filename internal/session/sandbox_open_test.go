@@ -3,6 +3,9 @@ package session
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -38,7 +41,14 @@ func TestOpenArgv(t *testing.T) {
 		{
 			name:   "plan",
 			o:      OpenOptions{Timeout: 30 * time.Minute, Plan: true, EnvFile: "/dev/fd/3"},
-			expand: slices.Concat(prefix("--env-file", "/dev/fd/3"), []string{"safeclaw-expand", "--plan", "--", "/sandbox/tree"}),
+			expand: slices.Concat(prefix("--env-file", "/dev/fd/3"), []string{"safeclaw-expand", "--plan", "--", "/sandbox/in", "/sandbox/tree"}),
+		},
+		{
+			// A plan gets the tree's policy, as a run does.
+			name: "plan with policy",
+			o:    OpenOptions{Timeout: 30 * time.Minute, Plan: true, ExpandArgs: []string{"--depth=2", "--max-size=1g", "--no-mail=true", "--hold=mail-archives"}},
+			expand: slices.Concat(prefix(), []string{"safeclaw-expand", "--depth=2", "--max-size=1g", "--no-mail=true", "--hold=mail-archives",
+				"--plan", "--", "/sandbox/in", "/sandbox/tree"}),
 		},
 		{
 			// safeclaw-totext never gets the password.
@@ -114,6 +124,71 @@ func TestPrepareOpen(t *testing.T) {
 	if _, err := m.PrepareOpen(ctx, "box", o); err == nil || errors.Is(err, ErrNoHelpers) || !strings.Contains(err.Error(), `unexpected output "\x1b[2J`) {
 		t.Errorf("err = %v", err)
 	}
+	// Only a plan looks for its paths, and nothing is printed twice.
+	for _, missing := range []string{"/sandbox/in\n", "safeclaw-expand\nsafeclaw-expand\n"} {
+		m, _ = newOpenManager(t, missing)
+		if _, err := m.PrepareOpen(ctx, "box", OpenOptions{Timeout: time.Minute}); err == nil || !strings.Contains(err.Error(), "unexpected output") {
+			t.Errorf("%q: err = %v", missing, err)
+		}
+	}
+}
+
+func TestPrepareOpenPlan(t *testing.T) {
+	ctx := context.Background()
+	o := OpenOptions{Timeout: 30 * time.Minute, Plan: true, ExpandArgs: []string{"--hold=mail-archives"}}
+	tail := func(paths ...string) []string {
+		return slices.Concat([]string{"safeclaw-expand", "--hold=mail-archives", "--plan", "--"}, paths)
+	}
+	for _, tc := range []struct {
+		missing string
+		want    []string
+	}{
+		{"", tail("/sandbox/in", "/sandbox/tree")},
+		// Before the first open there is no tree, which a plan of the
+		// inputs doesn't need.
+		{"/sandbox/tree\n", tail("/sandbox/in", "/sandbox/tree")},
+		// Nothing copied in means no new inputs.
+		{"/sandbox/in\n", tail("/sandbox/tree")},
+		// Nothing copied in or opened means nothing to plan from.
+		{"/sandbox/in\n/sandbox/tree\n", nil},
+	} {
+		m, r := newOpenManager(t, tc.missing)
+		run, err := m.PrepareOpen(ctx, "box", o)
+		if err != nil {
+			t.Fatalf("%q: %v", tc.missing, err)
+		}
+		if got := run.Expand; tc.want == nil && got != nil || tc.want != nil && (len(got) < len(tc.want) || !slices.Equal(got[len(got)-len(tc.want):], tc.want)) {
+			t.Errorf("%q: expand = %q, want it to end %q", tc.missing, got, tc.want)
+		}
+		probe, ok := r.Find("exec --user sandbox --workdir /sandbox safeclaw-box /bin/sh -c")
+		if !ok || !slices.Equal(probe.Args[len(probe.Args)-4:], []string{"sh", "safeclaw-expand", "/sandbox/in", "/sandbox/tree"}) {
+			t.Errorf("probe = %q", probe.Args)
+		}
+	}
+	for _, missing := range []string{"/sandbox/in\n/sandbox/in\n", "/sandbox/out\n"} {
+		m, _ := newOpenManager(t, missing)
+		if _, err := m.PrepareOpen(ctx, "box", o); err == nil || !strings.Contains(err.Error(), "unexpected output") {
+			t.Errorf("%q: err = %v", missing, err)
+		}
+	}
+}
+
+// TestOpenProbeScript runs the probe with the host's sh: it prints each
+// command and path that is missing, and a dangling link is not missing.
+func TestOpenProbeScript(t *testing.T) {
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(filepath.Join(dir, "nowhere"), link); err != nil {
+		t.Fatal(err)
+	}
+	gone := filepath.Join(dir, "gone")
+	out, err := exec.Command("/bin/sh", "-c", openProbeScript, "sh", "sh", "safeclaw-no-such-helper", dir, link, gone).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "safeclaw-no-such-helper\n" + gone + "\n"; string(out) != want {
+		t.Errorf("out = %q, want %q", out, want)
+	}
 }
 
 func TestPrepareOpenRefuses(t *testing.T) {
@@ -138,6 +213,8 @@ func TestPrepareOpenRefuses(t *testing.T) {
 		{OpenOptions{Timeout: time.Minute, Plan: true, Skip: []string{"a"}}, "--plan can't be given with --skip or --unskip"},
 		{OpenOptions{Timeout: time.Minute, Plan: true, Unskip: []string{"a"}}, "--plan can't be given with --skip or --unskip"},
 		{OpenOptions{Timeout: time.Minute, Plan: true, Text: true}, "--plan can't be given with --text"},
+		{OpenOptions{Timeout: time.Minute, Plan: true, ExpandArgs: []string{"--release=1-a.zip"}}, "--plan can't be given with --release or --release-all"},
+		{OpenOptions{Timeout: time.Minute, Plan: true, ExpandArgs: []string{"--release-all=true"}}, "--plan can't be given with --release or --release-all"},
 		{OpenOptions{}, "invalid timeout 0s"},
 		{OpenOptions{Timeout: time.Minute, TotextArgs: []string{"--max-pages=3"}}, "--max-pages needs --text"},
 		{OpenOptions{Timeout: time.Minute, ExpandArgs: []string{"depth=3"}}, `invalid helper flag "depth=3"`},
