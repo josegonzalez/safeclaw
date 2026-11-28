@@ -270,6 +270,45 @@ For `list` and `extract`, "not an archive" is told apart from "corrupt" by two c
 
 The password is read from `SAFECLAW_UNPACK_PASSWORD`, or the variable `--password-env` names, and removed from the environment before 7z starts. It is written to 7z's stdin, where 7z reads its password prompt, so it is never in an argument list that `ps` shows; pass it into a sandbox with `sandbox exec -e SAFECLAW_UNPACK_PASSWORD`. Without a password 7z's stdin is empty, so its prompt fails at once instead of waiting. A password with a line break is refused, since 7z reads one line. Every 7z run gets `-spd`, so names are never wildcards, and the archive is passed after `--` as an absolute path, so it is never read as a switch or a list file.
 
+### Extracting text
+
+The `sandbox` image variant also links `/usr/local/bin/safeclaw-totext` to the image's `safeclaw` binary, which runs as `safeclaw totext` when called by that name, so callers share one tested way of turning an untrusted document into text that is safe to read instead of each writing its own script around poppler and tesseract. Like `safeclaw-unpack` it needs no config directory, and it limits what a hostile file can do to the tools, but the sandbox is what contains them.
+
+`safeclaw-totext FILE OUTDIR` needs OUTDIR to be missing or an empty directory, and not a symbolic link, as for `safeclaw-unpack extract`. The file must be a regular file, and its type comes from its first bytes, never its name: a PDF starts with `%PDF-`, or has it within its first 1024 bytes and isn't text (poppler skips that much junk); a PNG, JPEG, GIF, TIFF, BMP (with a valid header size after its `BM`), or WebP image is recognized by its magic; text is valid UTF-8 with no NUL bytes in its first 8 KiB, an empty file included. Anything else is unsupported.
+
+A PDF's page count and page sizes are read with `pdfinfo -f 1 -l MAX`. pdfinfo prints the document's metadata first, and a crafted Title can hold line breaks that look like pdfinfo's own lines, so only the lines after its last `Pages:` line are read; nothing the file controls is printed after it. A PDF that needs a password (pdfinfo or pdftotext reports an incorrect password, or pdftotext exits 3 for the document's permissions) is refused as encrypted. One encrypted with only an owner password opens without one and is converted, with `encrypted` set in the report. Each page up to `--max-pages` (default `100`) is extracted with `pdftotext -layout -enc UTF-8 -f N -l N` into `pNNN.txt`, numbered from `p001.txt` and padded to the width of the last page's number when that is wider; the pages after the limit are skipped as one `page-limit` range. A page whose text has fewer than `--ocr-threshold` (default `10`) characters, not counting whitespace, is rendered with `pdftoppm -gray -png -singlefile` at `--ocr-dpi` (default `300`), lowered for a page whose longer side would pass 10000 pixels so a crafted page size can't make an enormous image, and OCR'd with `tesseract --dpi` in `--ocr-lang` (default `eng`). The OCR text replaces the page's text unless it has fewer characters, and `--ocr-threshold 0` turns this off. A page whose pdftotext run times out or fails is OCR'd the same way, unless OCR is off, and has no file when that fails too. Rendered pages go in a temporary directory outside OUTDIR, removed afterwards.
+
+An image is OCR'd with tesseract into `ocr.txt`, and a text file is copied into `text.txt`. Everything written, from every tool and the text file alike, passes through the same filter: C0 and C1 control characters other than newline and tab, DEL, and the bidirectional formatting characters (U+061C, U+200E, U+200F, U+202A to U+202E, and U+2066 to U+2069) are removed, so a form feed between pages or a carriage return goes too, and bytes that are not valid UTF-8 become U+FFFD. The characters counted for the report and the OCR threshold are those left that are not whitespace.
+
+Each tool runs with `--timeout` (default `1m`) of its own, with stdin from `/dev/null`, in a process group of its own; when the timeout passes the whole group is killed with SIGKILL, so a tool that forked can't outlive it. The tools are run directly, never through a shell, and file names reach them as absolute paths: after `--` for poppler, whose argument parser stops there, and first for tesseract, which takes no `--`, where an absolute path can't be read as an option. tesseract gets `OMP_THREAD_LIMIT=1`, so it doesn't start a thread per CPU. `--ocr-lang` must be language names joined with `+`, so it can't smuggle in another option or a path.
+
+The report is printed as tab-separated lines: `type` with the type, the page count, and `ENCRYPTED` or `-`; a `page` line for each file written with the page, its character count, the file name, and `OCR` or `-`; and a `skipped` line for each thing skipped with its first and last page (`0` and `0` for the whole file), the reason, the tool or `-`, and a detail escaped as in a Go string, or `-`. `--json` prints one JSON object instead. `schema` is the version of the output: fields may be added within a version, but are never renamed, removed, or given a new meaning without a new one. Lists are never `null`.
+
+| Field | Meaning |
+|---|---|
+| `schema` | `1` |
+| `status`, `code` | The outcome and its exit code: `ok`, `failed`, `encrypted`, `unsupported`, `partial`, or `timed-out` |
+| `error` | What went wrong, when the status is not `ok` or `partial` |
+| `type` | `pdf`, `png`, `jpeg`, `gif`, `tiff`, `bmp`, `webp`, `text`, or `unknown` |
+| `pages` | A PDF's page count, `1` for an image or text file, and `0` when unknown |
+| `encrypted` | Whether a PDF is encrypted, readable or not |
+| `files` | Each file written, in page order, as `page`, `path` (its name in OUTDIR), `chars` (characters not counting whitespace), and `ocr` (whether its text came from OCR) |
+| `ocr_pages` | The pages whose file holds OCR text |
+| `skipped` | Each thing skipped as `first_page` and `last_page` (both `0` for the whole file), `reason` (`encrypted`, `page-limit`, `timed-out`, `unsupported`, or `failed`), `tool` when a tool timed out or failed, and `detail`, for people rather than parsing |
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | ok: every page was converted |
+| 1 | failed: a tool failed on the whole file, the file is corrupt, a tool is missing, or a usage or I/O error |
+| 3 | encrypted: the PDF needs a password, or its permissions don't allow extracting its text |
+| 5 | unsupported: not a PDF, a supported image, or UTF-8 text |
+| 6 | partial: text was written, but pages over `--max-pages`, or a page whose extraction or OCR timed out or failed, were skipped |
+| 7 | timed out: pdfinfo, or tesseract on an image, ran past `--timeout`, so nothing was written |
+
+1, 3, and 5 mean what they do for `safeclaw-unpack` (failed, needs a password, not a file it handles), and 2 and 4, its rejected and too large, are unused. On every exit but 0 and 6, OUTDIR is emptied without following links, while the report still says what was skipped and why; on 6 it keeps what was written.
+
 ### Inspecting and verifying
 
 `safeclaw sandbox inspect NAME` and `safeclaw sandbox verify NAME` let a script confirm that a container really is an isolated sandbox, and whether it is running, without relying on the `safeclaw-` prefix, the labels, or `docker inspect` templates. Neither changes the sandbox. Both refuse interactive sessions and missing names.
@@ -350,7 +389,7 @@ Sessions using host networking, or sharing another container's network, can't be
 
 An image variant is the base `safeclaw` image with extra apt packages or `run` commands, tagged `safeclaw:NAME`. Variants come from two places:
 
-- built in: `sandbox` adds poppler-utils, tesseract-ocr and tesseract-ocr-eng, 7zip, and file, and links `safeclaw-unpack` (see [unpacking archives](#unpacking-archives))
+- built in: `sandbox` adds poppler-utils, tesseract-ocr and tesseract-ocr-eng, 7zip, and file, and links `safeclaw-unpack` (see [unpacking archives](#unpacking-archives)) and `safeclaw-totext` (see [extracting text](#extracting-text))
 - `~/.config/safeclaw/config.yaml` (honoring `XDG_CONFIG_HOME`), whose `variants` map adds variants or replaces a built-in of the same name, and whose `defaults` pick the variant each session type uses when none is given (`base` for sessions and `sandbox` for sandboxes unless set)
 
 The config file is decoded strictly, so unknown keys are errors. Names are lowercase and may not be `base`, which means the base image, or `latest`. Package names are checked, and `run` commands are one line each and run as root. The file is read whenever a variant is resolved, so the dashboard sees edits without a restart, and commands that don't resolve variants, like `ls`, `stop`, and `rm`, don't read it.

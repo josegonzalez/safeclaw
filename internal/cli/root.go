@@ -25,6 +25,9 @@ func Execute() int {
 	if isUnpackProgram(os.Args[0]) {
 		return executeUnpack(ctx, os.Args[1:])
 	}
+	if isTotextProgram(os.Args[0]) {
+		return executeTotext(ctx, os.Args[1:])
+	}
 	// Every command may read or write the config directory, which holds
 	// session history and credentials, so it is checked before any runs.
 	if err := config.SecureDir(os.Stderr); err != nil {
@@ -78,6 +81,7 @@ func NewRootCommand() *cobra.Command {
 		newVariantCommand(),
 		newTTYDWrapperCommand(),
 		newUnpackCommand("unpack"),
+		newTotextCommand("totext"),
 		newVersionCommand(),
 	)
 	return root
