@@ -40,7 +40,7 @@ func Execute() int {
 		printError(os.Stderr, err)
 		return 1
 	}
-	if err := NewRootCommand().ExecuteContext(ctx); err != nil {
+	if err := NewRootCommand().ExecuteContext(context.WithValue(ctx, ownProcessKey{}, true)); err != nil {
 		var exit exitCodeError
 		if errors.As(err, &exit) {
 			return exit.code
@@ -49,6 +49,19 @@ func Execute() int {
 		return 1
 	}
 	return 0
+}
+
+// ownProcessKey marks the context Execute runs the command tree with.
+type ownProcessKey struct{}
+
+// ownsProcess reports whether cmd was run by Execute, as the safeclaw
+// program, rather than in-process by other code through NewRootCommand.
+// Only then may a command replace the process with another program, since
+// nothing else in it is left to run and the command's output streams are
+// the process's own.
+func ownsProcess(cmd *cobra.Command) bool {
+	ctx := cmd.Context()
+	return ctx != nil && ctx.Value(ownProcessKey{}) == true
 }
 
 // printError prints a command's error with control characters escaped.

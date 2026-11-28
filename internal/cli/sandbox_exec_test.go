@@ -2,8 +2,10 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -165,4 +167,42 @@ func TestRunSandboxExec(t *testing.T) {
 			t.Errorf("err = %v, out = %q, stderr = %q", err, out.String(), errOut.String())
 		}
 	})
+}
+
+// inProcessExecEnv, when set, makes TestSandboxExecInProcess run the
+// execs itself rather than run a copy of the test binary to do them.
+const inProcessExecEnv = "SAFECLAW_TEST_IN_PROCESS_EXEC"
+
+// TestSandboxExecInProcess runs `sandbox exec` twice through
+// NewRootCommand in one process, with and without --escape-controls,
+// writing to os.Stdout around them. It does so in a copy of the test
+// binary whose stdout is a pipe, so an exec that replaced the process or
+// closed its stdout loses the later writes there rather than this test's
+// own output.
+func TestSandboxExecInProcess(t *testing.T) {
+	if os.Getenv(inProcessExecEnv) == "" {
+		c := exec.Command(os.Args[0], "-test.run=^TestSandboxExecInProcess$", "-test.v")
+		c.Env = append(os.Environ(), inProcessExecEnv+"=1")
+		out, err := c.Output()
+		want := "before\nfrom docker\nmiddle\nfrom docker\nafter\n"
+		if err != nil || !strings.Contains(string(out), want) || !strings.Contains(string(out), "--- PASS: TestSandboxExecInProcess") {
+			t.Fatalf("err = %v, output:\n%s\nwant it to contain:\n%s", err, out, want)
+		}
+		return
+	}
+	w := newOpenWorld(t)
+	w.helper(t, "expand", "from docker\n", "0")
+	execute := func(args ...string) {
+		t.Helper()
+		root := NewRootCommand()
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil {
+			t.Fatalf("%q: %v", args, err)
+		}
+	}
+	fmt.Println("before")
+	execute("sandbox", "exec", "--escape-controls", "box", "--", "true")
+	fmt.Println("middle")
+	execute("sandbox", "exec", "box", "--", "true")
+	fmt.Println("after")
 }

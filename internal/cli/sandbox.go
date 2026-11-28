@@ -253,8 +253,10 @@ func newSandboxExecCommand() *cobra.Command {
 			}
 			// Without --timeout, --escape-controls or --verify safeclaw
 			// replaces itself with docker, which then inherits the env
-			// pipe as is.
-			replace := !escape && timeout == 0 && run.verify == nil
+			// pipe as is. Code running the command in-process keeps its
+			// process, and docker runs as a child writing to the
+			// command's output streams.
+			replace := !escape && timeout == 0 && run.verify == nil && ownsProcess(cmd)
 			x := session.ExecOptions{Interactive: interactive, TTY: tty, Timeout: timeout}
 			if env != "" {
 				if run.envFile, err = envPipe(env); err != nil {
