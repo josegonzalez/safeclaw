@@ -47,6 +47,7 @@ func TestIntegrationLifecycle(t *testing.T) {
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 		OpenBrowser: func(string) error { return nil },
+		Network:     itestNetwork(t),
 	}
 	name := fmt.Sprintf("itest-%d", rand.IntN(1_000_000))
 	t.Cleanup(func() { _ = d.Remove(ctx, config.ContainerName(name), true) })
@@ -548,6 +549,7 @@ func TestIntegrationSecrets(t *testing.T) {
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 		OpenBrowser: func(string) error { return nil },
+		Network:     itestNetwork(t),
 	}
 	name := fmt.Sprintf("itest-secrets-%d", rand.IntN(1_000_000))
 	container := config.ContainerName(name)
@@ -638,6 +640,7 @@ func TestIntegrationMemory(t *testing.T) {
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 		OpenBrowser: func(string) error { return nil },
+		Network:     itestNetwork(t),
 	}
 	name := fmt.Sprintf("itest-memory-%d", rand.IntN(1_000_000))
 	container := config.ContainerName(name)
@@ -724,6 +727,7 @@ func TestIntegrationNetwork(t *testing.T) {
 		NetworkDir:  filepath.Join(dir, "network"),
 		Out:         os.Stdout,
 		OpenBrowser: func(string) error { return nil },
+		Network:     itestNetwork(t),
 	}
 	name := fmt.Sprintf("itest-net-%d", rand.IntN(1_000_000))
 	container := config.ContainerName(name)

@@ -129,6 +129,19 @@ const (
 	// outside ContainerPrefix, so sign-in containers are never listed as
 	// sessions, and sessions are never mistaken for sign-in containers.
 	AuthContainerPrefix = "safeclaw.auth."
+
+	// SessionNetwork is the docker bridge network every interactive session
+	// is created on. safeclaw creates it with inter-container traffic off,
+	// so sessions can't reach each other over it.
+	SessionNetwork = "safeclaw"
+	// LabelNetwork is the network label that marks a network safeclaw
+	// created for sessions, with the value NetworkSessions.
+	LabelNetwork = "safeclaw.network"
+	// NetworkSessions is the LabelNetwork value of the session network.
+	NetworkSessions = "sessions"
+	// BridgeICCOption is the bridge driver option that turns traffic
+	// between containers on the same bridge on or off.
+	BridgeICCOption = "com.docker.network.bridge.enable_icc"
 )
 
 // Dir returns the safeclaw config directory, honoring XDG_CONFIG_HOME.

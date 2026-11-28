@@ -96,7 +96,7 @@ func TestEnsureUnhardenedSession(t *testing.T) {
 
 	// A hardened container gets no warning.
 	m, _ = newTestManager(t, &world{image: "img", containers: map[string]*fakeContainer{
-		"safeclaw-old": {Running: true, Port: 7705, HostIP: "::1", Image: "img"},
+		"safeclaw-old": {Running: true, Port: 7705, HostIP: "::1", Image: "img", NetworkMode: "safeclaw"},
 	}, native: true})
 	out.Reset()
 	m.Out = &out

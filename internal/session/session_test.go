@@ -48,8 +48,8 @@ type fakeContainer struct {
 	NetworkMode string
 	// IpcMode defaults to "private".
 	IpcMode string
-	// Nets are the attached networks. Nil means only "bridge", unless
-	// Offline is set.
+	// Nets are the attached networks. Nil means only the network named by
+	// NetworkMode, "bridge" by default, unless Offline is set.
 	Nets map[string]docker.Endpoint
 	// Offline means no attached networks.
 	Offline bool
@@ -65,8 +65,12 @@ type fakeContainer struct {
 func (c *fakeContainer) networks() map[string]docker.Endpoint {
 	if c.Nets == nil {
 		c.Nets = map[string]docker.Endpoint{}
+		mode := c.NetworkMode
+		if mode == "" || mode == "default" {
+			mode = "bridge"
+		}
 		if !c.Offline {
-			c.Nets["bridge"] = docker.Endpoint{}
+			c.Nets[mode] = docker.Endpoint{}
 		}
 	}
 	return c.Nets
@@ -114,6 +118,12 @@ type world struct {
 	// onInspectImage runs after image inspect answers, for example to move
 	// a tag before the run.
 	onInspectImage func(tag string)
+	// networks are the docker networks that exist, by name, besides the
+	// built-in ones. network create adds to it.
+	networks map[string]*docker.Network
+	// failNetworkCreate fails network create, leaving behind the network it
+	// holds, if any, as if another process created it meanwhile.
+	failNetworkCreate *docker.Network
 }
 
 // servedImage is an image as image inspect described it.
@@ -358,6 +368,39 @@ func (w *world) handle(args []string, _ string) ([]byte, error) {
 		if w.attachOnStart {
 			c.networks()["bridge"] = docker.Endpoint{}
 		}
+	case args[0] == "network" && args[1] == "inspect":
+		n, ok := w.networks[args[len(args)-1]]
+		if !ok {
+			return nil, &docker.Error{Args: args, Stderr: "Error response from daemon: network " + args[len(args)-1] + " not found", Err: errors.New("exit 1")}
+		}
+		b, _ := json.Marshal([]*docker.Network{n})
+		return b, nil
+	case args[0] == "network" && args[1] == "create":
+		name := args[len(args)-1]
+		if w.networks == nil {
+			w.networks = map[string]*docker.Network{}
+		}
+		if w.failNetworkCreate != nil {
+			w.networks[name] = w.failNetworkCreate
+			return nil, errors.New("network with name " + name + " already exists")
+		}
+		if _, ok := w.networks[name]; ok {
+			return nil, errors.New("network with name " + name + " already exists")
+		}
+		n := &docker.Network{Name: name, ID: "net-" + name, Options: map[string]string{}, Labels: map[string]string{}}
+		for i := 2; i < len(args)-1; i++ {
+			switch args[i] {
+			case "--driver":
+				n.Driver = args[i+1]
+			case "--opt":
+				k, v, _ := strings.Cut(args[i+1], "=")
+				n.Options[k] = v
+			case "--label":
+				k, v, _ := strings.Cut(args[i+1], "=")
+				n.Labels[k] = v
+			}
+		}
+		w.networks[name] = n
 	case args[0] == "network" && args[1] == "disconnect":
 		c := w.containers[args[3]]
 		nets := c.networks()
@@ -470,9 +513,12 @@ func TestEnsureCreatesContainer(t *testing.T) {
 	if !ok {
 		t.Fatal("no docker run")
 	}
-	want := "run -d --name safeclaw-work --label safeclaw.type=session --user sclaw --cap-drop ALL --security-opt no-new-privileges -p [::1]:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects --label safeclaw.image=safeclaw sha256:new sleep infinity"
+	want := "run -d --name safeclaw-work --label safeclaw.type=session --user sclaw --cap-drop ALL --security-opt no-new-privileges --network safeclaw -p [::1]:7683:7681 -v " + filepath.Join(m.SessionsDir, "work") + ":/home/sclaw/.claude/projects --label safeclaw.image=safeclaw sha256:new sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
+	}
+	if !hasCall(r, "network create --driver bridge --opt com.docker.network.bridge.enable_icc=false --label safeclaw.network=sessions safeclaw") {
+		t.Errorf("session network not created: %v", r.Commands())
 	}
 	if _, err := os.Stat(filepath.Join(m.SessionsDir, "work")); err != nil {
 		t.Errorf("session dir not created: %v", err)

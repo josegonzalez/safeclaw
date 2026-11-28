@@ -18,6 +18,8 @@ This lets you run Claude Code with `--dangerously-skip-permissions` safely and f
 
 Each Claude Code session runs in its own container. Spin up as many as you need - they're isolated from each other and start in seconds. Conversation history is stored on your host machine via a volume mount.
 
+Sessions share one docker network, `safeclaw`, which safeclaw creates with traffic between its containers off, so a dev server or other service one session runs can't be reached from the others. Docker enforces that with its firewall rules on native Linux and Docker Desktop, but OrbStack, and docker with `"iptables": false`, let the traffic through anyway. Sessions created by earlier versions stay on docker's default bridge, where they can reach each other, and `run` warns about them until they are recreated, for example with `-v` or after `safeclaw rm`. See [session network](docs/architecture.md#session-network).
+
 ## Install
 
 ```bash

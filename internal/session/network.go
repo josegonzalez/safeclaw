@@ -61,6 +61,114 @@ var ErrOffline = errors.New("is offline")
 // hold but a session could not be disconnected from every network.
 var ErrStillOnline = errors.New("is held offline but still attached")
 
+// ErrForeignNetwork is wrapped by the error returned when the session
+// network exists but safeclaw did not create it with traffic between its
+// containers off.
+var ErrForeignNetwork = errors.New("is not safeclaw's session network")
+
+// sessionNetwork returns the docker network sessions are created on.
+func (m *Manager) sessionNetwork() string {
+	if m.Network != "" {
+		return m.Network
+	}
+	return config.SessionNetwork
+}
+
+// sessionNetworkOptions are how safeclaw creates the session network: a
+// bridge whose containers can't reach each other, labeled as safeclaw's.
+var sessionNetworkOptions = docker.NetworkCreateOptions{
+	Driver:  "bridge",
+	Options: map[string]string{config.BridgeICCOption: "false"},
+	Labels:  map[string]string{config.LabelNetwork: config.NetworkSessions},
+}
+
+// ensureNetwork returns the session network, creating it if it does not
+// exist. One that exists is used only if safeclaw created it: a bridge
+// labeled as the session network with traffic between its containers off.
+// Anything else is refused with an error wrapping ErrForeignNetwork, rather
+// than putting sessions on a network where they could reach each other.
+func (m *Manager) ensureNetwork(ctx context.Context) (*docker.Network, error) {
+	name := m.sessionNetwork()
+	n, err := m.Docker.NetworkInspect(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	if n == nil {
+		m.printf("Creating network %s, with traffic between sessions off\n", name)
+		// Something else may have created it meanwhile, so it is inspected
+		// either way and checked like any network found.
+		cerr := m.Docker.NetworkCreate(ctx, name, sessionNetworkOptions)
+		if n, err = m.Docker.NetworkInspect(ctx, name); err != nil || n == nil {
+			if cerr != nil {
+				return nil, cerr
+			}
+			return nil, fmt.Errorf("docker network %q is missing right after it was created: %w", name, err)
+		}
+	}
+	if err := checkSessionNetwork(n); err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+// reattachSessionNetwork reconnects a stopped session to the session
+// network when the network it was attached to has been removed and created
+// again, such as after `docker network prune` while every session was
+// stopped. Docker keeps the old network's ID on a stopped container, and
+// refuses to start it once that network is gone.
+func (m *Manager) reattachSessionNetwork(ctx context.Context, c docker.Container) error {
+	if c.HostConfig.NetworkMode != m.sessionNetwork() {
+		return nil
+	}
+	n, err := m.ensureNetwork(ctx)
+	if err != nil {
+		return err
+	}
+	ep, ok := c.NetworkSettings.Networks[n.Name]
+	if !ok || ep.NetworkID == "" || ep.NetworkID == n.ID {
+		return nil
+	}
+	container := c.ShortName()
+	m.printf("Reattaching %s to %s, which was removed and created again\n", container, n.Name)
+	if err := m.Docker.NetworkDisconnect(ctx, n.Name, container); err != nil {
+		return err
+	}
+	return m.Docker.NetworkConnect(ctx, n.Name, container, saveNetwork(c, n.Name).connectOptions())
+}
+
+// checkSessionNetwork refuses a network safeclaw did not create for
+// sessions.
+func checkSessionNetwork(n *docker.Network) error {
+	var why string
+	switch {
+	case n.Labels[config.LabelNetwork] != config.NetworkSessions:
+		why = fmt.Sprintf("it lacks the label %s=%s that safeclaw creates it with", config.LabelNetwork, config.NetworkSessions)
+	case n.Driver != "bridge":
+		why = fmt.Sprintf("it uses the %s driver rather than bridge", n.Driver)
+	case n.Options[config.BridgeICCOption] != "false":
+		why = fmt.Sprintf("it lets its containers reach each other, without %s=false", config.BridgeICCOption)
+	case n.Internal:
+		why = "it is internal, so sessions on it couldn't reach the internet"
+	default:
+		return nil
+	}
+	return fmt.Errorf("docker network %q %w: %s. Remove it with `docker network rm %s`, disconnecting its containers first, and safeclaw creates it again", n.Name, ErrForeignNetwork, why, n.Name)
+}
+
+// onDefaultBridge reports whether an interactive session was created on
+// docker's default bridge, as ones created before sessions moved to the
+// session network were.
+func onDefaultBridge(c docker.Container) bool {
+	if TypeOf(c) == config.TypeSandbox {
+		return false
+	}
+	switch c.HostConfig.NetworkMode {
+	case "", "default", "bridge":
+		return true
+	}
+	return false
+}
+
 // Hold records one owner keeping a session offline.
 type Hold struct {
 	// Owner names who holds the session offline. "" is the unnamed hold
@@ -556,6 +664,13 @@ func (m *Manager) NetOn(ctx context.Context, name string, opts NetOnOptions) (*N
 	for _, n := range targets {
 		if _, ok := c.NetworkSettings.Networks[n.Name]; ok {
 			continue
+		}
+		// The session network may have been removed while this session was
+		// off it, and one created in its place outside safeclaw is refused.
+		if n.Name == m.sessionNetwork() {
+			if _, err := m.ensureNetwork(ctx); err != nil {
+				return nil, err
+			}
 		}
 		m.printf("Connecting %s to %s\n", container, n.Name)
 		if err := m.Docker.NetworkConnect(ctx, n.Name, container, n.connectOptions()); err != nil {

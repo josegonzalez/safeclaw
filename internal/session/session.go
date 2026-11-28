@@ -320,6 +320,9 @@ type Manager struct {
 	// NetworkDir holds the saved state of offline sessions. Defaults to
 	// config.NetworkDir().
 	NetworkDir string
+	// Network is the docker network sessions are created on. Defaults to
+	// config.SessionNetwork.
+	Network string
 	// ChoicesDir holds each session's policy choices, kept so they outlive
 	// its container. Defaults to the choices directory next to SessionsDir.
 	ChoicesDir string
@@ -829,6 +832,11 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 				m.warnVolume(warnings)
 			}
 		}
+		// The network the new one is created on is checked before anything
+		// is removed too.
+		if _, err := m.ensureNetwork(ctx); err != nil {
+			return nil, err
+		}
 		switch {
 		case opts.Volume != "":
 			m.printf("Volume mount requested. Removing existing container...\n")
@@ -915,6 +923,9 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			}
 		}
 	}
+	if existing != nil && onDefaultBridge(*existing) {
+		m.printf("Warning: session %s is on docker's default bridge, where other containers, including other sessions, can reach any service it runs, because it was created before sessions moved to the %s network. Recreate it, for example with -v or `safeclaw rm`, to move it\n", name, m.sessionNetwork())
+	}
 
 	if port == 0 {
 		port, err = m.allocatePort(ctx)
@@ -944,6 +955,11 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		m.sleep(time.Second)
 	case existing != nil:
 		m.printf("Starting existing container: %s\n", container)
+		// The session network may have been removed while nothing running
+		// was attached to it, such as by `docker network prune`.
+		if err := m.reattachSessionNetwork(ctx, *existing); err != nil {
+			return nil, err
+		}
 		if err := m.Docker.Start(ctx, container); err != nil {
 			return nil, err
 		}
@@ -1220,6 +1236,10 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 	if err != nil {
 		return err
 	}
+	network, err := m.ensureNetwork(ctx)
+	if err != nil {
+		return err
+	}
 	args := []string{"-d"}
 	args = append(args, ipcArgs(hostIPC)...)
 	args = append(args,
@@ -1228,6 +1248,7 @@ func (m *Manager) create(ctx context.Context, name, container string, port int, 
 	)
 	args = append(args, userArgs...)
 	args = append(args, hardenArgs...)
+	args = append(args, "--network", network.Name)
 	args = append(args, publishArgs(port)...)
 	args = append(args, "-v", dataDir+":"+config.ProjectsMount)
 	args = append(args, variantArgs(variantName)...)

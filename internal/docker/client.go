@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -79,6 +81,9 @@ type Endpoint struct {
 	Aliases    []string    `json:"Aliases"`
 	Links      []string    `json:"Links"`
 	IPAMConfig *IPAMConfig `json:"IPAMConfig"`
+	// NetworkID is the ID of the network, which a stopped container keeps
+	// even after the network is removed.
+	NetworkID string `json:"NetworkID"`
 }
 
 // Container is the subset of `docker inspect` output safeclaw uses.
@@ -386,6 +391,59 @@ func (c *Client) NetworkConnect(ctx context.Context, network, container string, 
 		args = append(args, "--ip6", opts.IPv6)
 	}
 	_, err := c.R.Output(ctx, nil, append(args, network, container)...)
+	return err
+}
+
+// Network is the part of `docker network inspect` safeclaw reads.
+type Network struct {
+	Name     string            `json:"Name"`
+	ID       string            `json:"Id"`
+	Driver   string            `json:"Driver"`
+	Internal bool              `json:"Internal"`
+	Options  map[string]string `json:"Options"`
+	Labels   map[string]string `json:"Labels"`
+}
+
+// NetworkInspect returns a network, or nil if it does not exist.
+func (c *Client) NetworkInspect(ctx context.Context, name string) (*Network, error) {
+	out, err := c.R.Output(ctx, nil, "network", "inspect", name)
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var ns []Network
+	if err := json.Unmarshal(out, &ns); err != nil {
+		return nil, fmt.Errorf("parse docker network inspect: %w", err)
+	}
+	if len(ns) == 0 {
+		return nil, nil
+	}
+	return &ns[0], nil
+}
+
+// NetworkCreateOptions configures NetworkCreate.
+type NetworkCreateOptions struct {
+	Driver  string
+	Options map[string]string
+	Labels  map[string]string
+}
+
+// NetworkCreate creates a network. Options and labels are passed in key
+// order.
+func (c *Client) NetworkCreate(ctx context.Context, name string, opts NetworkCreateOptions) error {
+	args := []string{"network", "create"}
+	if opts.Driver != "" {
+		args = append(args, "--driver", opts.Driver)
+	}
+	for _, k := range slices.Sorted(maps.Keys(opts.Options)) {
+		args = append(args, "--opt", k+"="+opts.Options[k])
+	}
+	for _, k := range slices.Sorted(maps.Keys(opts.Labels)) {
+		args = append(args, "--label", k+"="+opts.Labels[k])
+	}
+	_, err := c.R.Output(ctx, nil, append(args, name)...)
 	return err
 }
 
