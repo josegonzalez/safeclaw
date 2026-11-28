@@ -9,6 +9,17 @@ make image      # build the image from this checkout (safeclaw build --context .
 ./safeclaw build --context . --variant sandbox   # also build the sandbox variant
 ```
 
+### Version checks
+
+`safeclaw version --json` prints `{"schema": 1, "version", "commit", "built"}`, where `version` is the version the binary was built with (`dev` for a plain `go build`, `git describe` output for `make build`), `commit` the short commit, and `built` the build time. `schema` is the version of the output: fields may be added within a version, but are never renamed, removed, or given a new meaning without a new one.
+
+Scripts that need a given release can run `safeclaw version --require 0.3.0`, which prints the version as usual and then exits non-zero with an error naming the installed and required versions when the installed one is older. Versions are `MAJOR.MINOR.PATCH`, with or without a leading `v`, and a malformed required version is refused before anything is printed. Only a release version counts as installed: a development build, including `dev`, `make build` output between tags or with local changes (such as `v0.3.0-5-g8d41adf` or `v0.3.0-dirty`), and goreleaser snapshots, has no release version and fails any `--require`, since its version is unknown.
+
+```bash
+safeclaw version --require 0.3.0 >/dev/null || exit 1
+safeclaw version --json | jq -r .version
+```
+
 ## Testing
 
 ```bash

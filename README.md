@@ -306,7 +306,7 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw variant ls` | List image variants, whether their images exist, and which session types default to them |
 | `safeclaw variant dockerfile NAME` | Print the Dockerfile that builds a variant |
 | `safeclaw completion SHELL` | Shell completions |
-| `safeclaw version` | Version information |
+| `safeclaw version` | Version information. `--json` prints the version, commit, and build time as JSON with a versioned schema, and `--require VERSION` exits non-zero, naming both versions, when this build is older than `VERSION` or is a development build ([details](docs/development.md#version-checks)) |
 
 ## Aliases
 
