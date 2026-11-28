@@ -913,6 +913,33 @@ func TestIntegrationSandboxCopy(t *testing.T) {
 	if _, err := m.CopyOut(ctx, name, "/sandbox/out", host, opts); err != nil {
 		t.Errorf("--force: %v", err)
 	}
+	// --replace removes a stale match but keeps non-matches, directories,
+	// and symlinks, and a failed copy leaves everything in place.
+	writeFile(t, filepath.Join(host, "stale.txt"), "old")
+	writeFile(t, filepath.Join(host, "keep.log"), "log")
+	writeFile(t, filepath.Join(host, "sub", "x.txt"), "x")
+	if err := os.Symlink(filepath.Join(host, "keep.log"), filepath.Join(host, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	opts = CopyOutOptions{Only: []string{"*.txt"}, Replace: true, MaxSize: 1}
+	if _, err := m.CopyOut(ctx, name, "/sandbox/out", host, opts); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("--replace --max-size: err = %v, want ErrTooLarge", err)
+	}
+	if _, err := os.Lstat(filepath.Join(host, "stale.txt")); err != nil {
+		t.Errorf("a failed --replace removed stale.txt: %v", err)
+	}
+	opts.MaxSize = 0
+	if got, err := m.CopyOut(ctx, name, "/sandbox/out", host, opts); err != nil || !slices.Equal(got, []string{filepath.Join(host, "a.txt")}) {
+		t.Errorf("--replace = %v, %v", got, err)
+	}
+	var names []string
+	entries, _ = os.ReadDir(host)
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if want := []string{"a.txt", "keep.log", "link.txt", "sub"}; !slices.Equal(names, want) {
+		t.Errorf("after --replace host dir = %v, want %v", names, want)
+	}
 	opts = CopyOutOptions{Only: []string{"*"}, MaxSize: 1}
 	if _, err := m.CopyOut(ctx, name, "/sandbox/out", t.TempDir(), opts); !errors.Is(err, ErrTooLarge) {
 		t.Errorf("--max-size: err = %v, want ErrTooLarge", err)

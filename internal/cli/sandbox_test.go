@@ -203,6 +203,17 @@ func TestSandboxCopyCommands(t *testing.T) {
 	if err := out.Execute(); err == nil || !strings.Contains(err.Error(), `"only" not set`) {
 		t.Errorf("cp-out without --only: err = %v", err)
 	}
+	// --replace still needs --only, so it never removes every file.
+	out = newSandboxCopyOutCommand()
+	out.SetArgs([]string{"box", "/sandbox/out", ".", "--replace"})
+	out.SetOut(io.Discard)
+	out.SetErr(io.Discard)
+	if err := out.Execute(); err == nil || !strings.Contains(err.Error(), `"only" not set`) {
+		t.Errorf("cp-out --replace without --only: err = %v", err)
+	}
+	if got := newSandboxCopyOutCommand().Flags().Lookup("replace").DefValue; got != "false" {
+		t.Errorf("--replace default = %q", got)
+	}
 	out = newSandboxCopyOutCommand()
 	out.SetArgs([]string{"box", "/sandbox/out", ".", "--only", "*", "--max-size", "lots"})
 	out.SetOut(io.Discard)

@@ -617,6 +617,190 @@ func TestCopyOutExisting(t *testing.T) {
 	}
 }
 
+// hostEntries describes each entry in dir by type: file:CONTENT, link:TARGET,
+// dir, or other.
+func hostEntries(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		switch {
+		case e.Type().IsRegular():
+			b, _ := os.ReadFile(p)
+			out[e.Name()] = "file:" + string(b)
+		case e.Type()&fs.ModeSymlink != 0:
+			target, _ := os.Readlink(p)
+			out[e.Name()] = "link:" + target
+		case e.IsDir():
+			out[e.Name()] = "dir"
+		default:
+			out[e.Name()] = "other"
+		}
+	}
+	return out
+}
+
+// replaceHost fills a host dir for the --replace tests: matching and
+// non-matching files, a hidden file, directories, and symlinks, one of them
+// named like a file the stream brings.
+func replaceHost(t *testing.T) (host, outside string) {
+	t.Helper()
+	host = t.TempDir()
+	outside = writeFile(t, filepath.Join(t.TempDir(), "target"), "untouched")
+	writeFile(t, filepath.Join(host, "a.txt"), "old a")
+	writeFile(t, filepath.Join(host, "stale.txt"), "stale")
+	writeFile(t, filepath.Join(host, "keep.log"), "log")
+	writeFile(t, filepath.Join(host, ".hidden.txt"), "hidden")
+	writeFile(t, filepath.Join(host, "sub", "nested.txt"), "nested")
+	if err := os.Mkdir(filepath.Join(host, "dir.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"link.txt", "b.txt"} {
+		if err := os.Symlink(outside, filepath.Join(host, n)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return host, outside
+}
+
+var replaceStream = []entry{
+	{"./", tar.TypeDir, "", 0o755},
+	{"./a.txt", tar.TypeReg, "new a", 0},
+	{"./b.txt", tar.TypeReg, "new b", 0},
+	{"./c.log", tar.TypeReg, "new c", 0},
+}
+
+func TestCopyOutReplace(t *testing.T) {
+	host, outside := replaceHost(t)
+	m, _ := newCopyManager(t, &copyFake{tarOut: makeTar(t, replaceStream...)})
+	paths, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*.txt"}, Replace: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{filepath.Join(host, "a.txt"), filepath.Join(host, "b.txt")}; !reflect.DeepEqual(paths, want) {
+		t.Errorf("paths = %v, want %v", paths, want)
+	}
+	// stale.txt is gone. The hidden file doesn't match *.txt, and the
+	// directories and the symlink not in the new set are kept, while b.txt,
+	// a symlink in the new set, is replaced as a link, not written through.
+	want := map[string]string{
+		"a.txt":       "file:new a",
+		"b.txt":       "file:new b",
+		"keep.log":    "file:log",
+		".hidden.txt": "file:hidden",
+		"sub":         "dir",
+		"dir.txt":     "dir",
+		"link.txt":    "link:" + outside,
+	}
+	if got := hostEntries(t, host); !reflect.DeepEqual(got, want) {
+		t.Errorf("host dir = %v, want %v", got, want)
+	}
+	if got := hostEntries(t, filepath.Join(host, "sub")); !reflect.DeepEqual(got, map[string]string{"nested.txt": "file:nested"}) {
+		t.Errorf("sub = %v", got)
+	}
+	if b, _ := os.ReadFile(outside); string(b) != "untouched" {
+		t.Errorf("symlink target = %q", b)
+	}
+
+	// Several globs remove files matching any of them, and nothing else.
+	host = t.TempDir()
+	writeFile(t, filepath.Join(host, "a.old"), "old")
+	writeFile(t, filepath.Join(host, "x.log"), "x")
+	writeFile(t, filepath.Join(host, "x.txt"), "x")
+	m, _ = newCopyManager(t, &copyFake{tarOut: makeTar(t, replaceStream...)})
+	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"a.*", "*.log"}, Replace: true}); err != nil {
+		t.Fatal(err)
+	}
+	want = map[string]string{"a.txt": "file:new a", "c.log": "file:new c", "x.txt": "file:x"}
+	if got := hostEntries(t, host); !reflect.DeepEqual(got, want) {
+		t.Errorf("host dir = %v, want %v", got, want)
+	}
+
+	// A stream with no matching files removes every matching file.
+	host = t.TempDir()
+	writeFile(t, filepath.Join(host, "a.txt"), "old")
+	writeFile(t, filepath.Join(host, "b.log"), "log")
+	m, _ = newCopyManager(t, &copyFake{tarOut: makeTar(t, entry{"./", tar.TypeDir, "", 0o755})})
+	paths, err = m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*.txt"}, Replace: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != 0 {
+		t.Errorf("paths = %v", paths)
+	}
+	if got := hostEntries(t, host); !reflect.DeepEqual(got, map[string]string{"b.log": "file:log"}) {
+		t.Errorf("host dir = %v", got)
+	}
+
+	// --replace still needs a glob, so it never removes every file.
+	m, _ = newCopyManager(t, &copyFake{tarOut: makeTar(t, replaceStream...)})
+	if _, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Replace: true}); !errors.Is(err, ErrNoGlob) {
+		t.Errorf("err = %v, want ErrNoGlob", err)
+	}
+}
+
+func TestCopyOutReplaceFailureKeepsHost(t *testing.T) {
+	cases := []struct {
+		name   string
+		tar    []byte
+		tarErr error
+		opts   CopyOutOptions
+		want   string
+	}{
+		{"tar failed", makeTar(t, replaceStream...), errors.New("tar: out: Cannot open: No such file or directory"), CopyOutOptions{}, "No such file"},
+		{"truncated", makeTar(t, replaceStream...)[:1026], nil, CopyOutOptions{}, "unexpected EOF"},
+		{"too large", makeTar(t, replaceStream...), nil, CopyOutOptions{MaxSize: 6}, ErrTooLarge.Error()},
+		{"too many", makeTar(t, replaceStream...), nil, CopyOutOptions{MaxFiles: 1}, ErrTooManyFiles.Error()},
+		{"duplicate", makeTar(t, entry{"./a.txt", tar.TypeReg, "1", 0}, entry{"a.txt", tar.TypeReg, "2", 0}), nil, CopyOutOptions{}, "more than once"},
+		{"unsafe name", makeTar(t, entry{"./-a.txt", tar.TypeReg, "1", 0}), nil, CopyOutOptions{}, ErrUnsafeName.Error()},
+		{"directory clash", makeTar(t, entry{"./dir.txt", tar.TypeReg, "1", 0}), nil, CopyOutOptions{}, ErrIsDirectory.Error()},
+	}
+	for _, tc := range cases {
+		host, _ := replaceHost(t)
+		before := hostEntries(t, host)
+		m, _ := newCopyManager(t, &copyFake{tarOut: tc.tar, tarErr: tc.tarErr})
+		tc.opts.Only, tc.opts.Replace = []string{"*.txt"}, true
+		_, err := m.CopyOut(context.Background(), "box", "out", host, tc.opts)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
+		}
+		if got := hostEntries(t, host); !reflect.DeepEqual(got, before) {
+			t.Errorf("%s: host dir = %v, want %v", tc.name, got, before)
+		}
+	}
+}
+
+// TestCopyOutReplaceUndo checks that a move failing after others have
+// happened puts every old file back and removes the new ones.
+func TestCopyOutReplaceUndo(t *testing.T) {
+	for _, failOn := range []string{"stale.txt", "b.txt"} {
+		host, _ := replaceHost(t)
+		before := hostEntries(t, host)
+		orig := renameFile
+		renameFile = func(from, to string) error {
+			// Fail moving the old stale.txt aside, or placing the new b.txt.
+			if (failOn == "stale.txt" && from == filepath.Join(host, failOn)) ||
+				(failOn == "b.txt" && to == filepath.Join(host, failOn)) {
+				return errors.New("injected failure")
+			}
+			return orig(from, to)
+		}
+		m, _ := newCopyManager(t, &copyFake{tarOut: makeTar(t, replaceStream...)})
+		_, err := m.CopyOut(context.Background(), "box", "out", host, CopyOutOptions{Only: []string{"*.txt"}, Replace: true})
+		renameFile = orig
+		if err == nil || !strings.Contains(err.Error(), "injected failure") {
+			t.Errorf("%s: err = %v", failOn, err)
+		}
+		if got := hostEntries(t, host); !reflect.DeepEqual(got, before) {
+			t.Errorf("%s: host dir = %v, want %v", failOn, got, before)
+		}
+	}
+}
+
 func TestCopyOutMaxFiles(t *testing.T) {
 	// Empty files are free against --max-size, so only the count limits them.
 	var entries []entry
