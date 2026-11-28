@@ -28,23 +28,39 @@ exec "$@"
 // of its stdin: the command gets docker's stdin through a fifo that a
 // holder keeps open after copying it, as the hang in #167 looked from
 // inside the container. It returns once the command exits, as docker does.
+//
+// The holder closes the fifo only after 30 seconds, leaving a mark just
+// before, so a command that waited for EOF ends then and the run fails
+// with holdingClosed. A hang is told by what ended the command's stdin
+// rather than by how long the run took, so a slow run on a loaded
+// machine isn't taken for one. Killing the holder stops its sleep too.
 const holdingDocker = `#!/bin/sh
 shift
 while :; do case $1 in -i|-d) shift ;; --user|--workdir) shift 2 ;; *) break ;; esac; done
 shift
-fifo="$(mktemp -d)/stdin"
+dir="$(mktemp -d)"
+fifo="$dir/stdin"
 mkfifo "$fifo"
 # A background job's stdin is /dev/null, and dash keeps it so even with
 # <&0, so the holder gets docker's stdin through a saved descriptor.
 exec 3<&0
-sh -c 'cat; exec sleep 30' <&3 3<&- >"$fifo" 2>/dev/null &
+sh -c 'trap "kill \$! 2>/dev/null; exit" TERM; cat; sleep 30 & wait; : >"$0"' "$dir/closed" <&3 3<&- >"$fifo" 2>/dev/null &
 exec 3<&-
 holder=$!
 "$@" <"$fifo"
 s=$?
 kill "$holder" 2>/dev/null
+if [ -e "$dir/closed" ]; then
+	echo "` + holdingClosed + `" >&2
+	s=125
+fi
+rm -rf "$dir"
 exit "$s"
 `
+
+// holdingClosed is holdingDocker's error when the command's stdin ended
+// only because the holder closed it.
+const holdingClosed = "stdin ended only when the holder closed it, so the command waited for EOF"
 
 func fakeClient(t *testing.T, script string) *docker.Client {
 	t.Helper()
@@ -79,17 +95,16 @@ func TestExecClosesStdin(t *testing.T) {
 
 func TestExecInputEndsWithoutClose(t *testing.T) {
 	c := fakeClient(t, holdingDocker)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// A command that waits for EOF fails once the holder closes its stdin,
+	// so the context is only a backstop and outlasts the holder.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	// Trailing newlines, quotes, and format verbs come through unchanged.
 	in := "export A='x\\ny'\nexport B='%s'\n\n"
-	start := time.Now()
 	out, err := c.Exec(ctx, "safeclaw-a", docker.ExecOptions{Input: in, User: "root"}, "cat")
 	if err != nil || string(out) != in {
-		t.Errorf("Input: %q, %v, want %q", out, err, in)
-	}
-	if d := time.Since(start); d > 5*time.Second {
-		t.Errorf("Input took %s, so cat waited for EOF", d)
+		// The rest would wait for the holder too.
+		t.Fatalf("Input: %q, %v, want %q", out, err, in)
 	}
 	// A command that doesn't read its input still succeeds, and its exit
 	// status is the run's.
