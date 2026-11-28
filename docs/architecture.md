@@ -535,6 +535,10 @@ A one-off sandbox lives for exactly one job, so callers sharing the host need no
 
 `safeclaw sandbox ls` marks them in a ONE-OFF column, and `safeclaw ls` lists their type as `sandbox (one-off)`.
 
+### Stopping and removing
+
+`safeclaw sandbox stop` and `safeclaw sandbox rm` take one name and, without `--missing-ok`, fail for a name with no container. Cleanup that runs whether or not a sandbox survived, for example after Docker restarted, can pass `--missing-ok` instead of checking `sandbox status` first: `stop` then exits 0 without running `docker stop` when there is no container by that name or it is already stopped, and `rm` exits 0 when there is no container by that name. Either prints which case applied (`Sandbox "NAME" is missing, nothing to stop`, `... is already stopped, nothing to stop`, or `... is missing, nothing to remove`) on stderr, so stdout stays empty. A one-off sandbox that docker removes between the lookup and the `docker stop` or `docker rm`, which docker reports as no such container or a removal already in progress, counts as missing too (recent docker's `rm -f` doesn't fail for a container that is gone, so `rm -f` then exits 0 without saying so). Any other docker error still fails. A name that belongs to an interactive session is still refused, with or without the flag, so the flag never hides a mistake about which container was meant. `--missing-ok` doesn't stand in for `-f`: `rm --missing-ok` still refuses a running sandbox, and `rm -f --missing-ok` removes it whether it is running or stopped and exits 0 when it is gone.
+
 ## Offline sessions
 
 `safeclaw net off NAME` takes an interactive session off the network while it handles something untrusted, and `safeclaw net on NAME` brings it back. Taking a session offline disconnects it from every network it is attached to, which also takes down its ttyd web terminal, since the published port belongs to the container's network. Claude Code keeps running but can't reach the API until the session is back.
