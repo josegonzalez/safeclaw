@@ -33,9 +33,11 @@ const (
 // safeclaw-expand or safeclaw-totext.
 var ErrNoHelpers = errors.New("lacks the helpers `sandbox open` runs")
 
-// openProbeScript prints each of its arguments that isn't a command on
-// the sandbox user's PATH, and always exits 0.
-const openProbeScript = `for p do command -v "$p" >/dev/null 2>&1 || printf '%s\n' "$p"; done`
+// openProbeScript prints each of its arguments that is missing, and
+// always exits 0: an absolute path that doesn't exist, as a link or
+// anything else, or a name that isn't a command on the sandbox user's
+// PATH.
+const openProbeScript = `for p do case $p in /*) [ -e "$p" ] || [ -L "$p" ] || printf '%s\n' "$p";; *) command -v "$p" >/dev/null 2>&1 || printf '%s\n' "$p";; esac; done`
 
 // OpenOptions configures `sandbox open`.
 type OpenOptions struct {
@@ -61,7 +63,9 @@ type OpenOptions struct {
 type OpenRun struct {
 	// Name is the sandbox's session name.
 	Name string
-	// Expand runs safeclaw-expand on OpenInDir into OpenTreeDir.
+	// Expand runs safeclaw-expand on OpenInDir into OpenTreeDir, or with
+	// OpenOptions.Plan plans from both. It is nil for a plan with nothing
+	// to plan from, when neither OpenInDir nor OpenTreeDir exists.
 	Expand []string
 	// Totext, set with OpenOptions.Text, runs safeclaw-totext on
 	// OpenTreeDir into OpenOutDir.
@@ -77,6 +81,11 @@ func (o OpenOptions) validate() error {
 	}
 	if o.Plan && o.Text {
 		return errors.New("--plan can't be given with --text: a plan opens nothing to convert")
+	}
+	for _, a := range o.ExpandArgs {
+		if name, v, _ := strings.Cut(a, "="); o.Plan && (name == "--release" || name == "--release-all" && v != "false") {
+			return errors.New("--plan can't be given with --release or --release-all: a plan opens nothing")
+		}
 	}
 	if o.Timeout <= 0 {
 		return fmt.Errorf("invalid timeout %s: must be more than 0", o.Timeout)
@@ -95,13 +104,24 @@ func (o OpenOptions) validate() error {
 // OpenArgv returns the docker argv of each helper run for the named
 // sandbox. Every path and flag value is one argument of its own, after
 // the flag's = so none can be read as another flag, and the fixed paths
-// follow a --.
+// follow a --. A plan plans from OpenInDir and OpenTreeDir, so it lists
+// the inputs not opened yet as well as what is left packed in the tree.
 func OpenArgv(name string, o OpenOptions) OpenRun {
+	return openArgv(name, o, true)
+}
+
+// openArgv is OpenArgv, but a plan gives safeclaw-expand OpenInDir only
+// when planIn is set.
+func openArgv(name string, o OpenOptions, planIn bool) OpenRun {
 	name = config.SessionName(name)
 	expand := []string{ExpandHelper}
 	expand = append(expand, o.ExpandArgs...)
 	if o.Plan {
-		expand = append(expand, "--plan", "--", OpenTreeDir)
+		expand = append(expand, "--plan", "--")
+		if planIn {
+			expand = append(expand, OpenInDir)
+		}
+		expand = append(expand, OpenTreeDir)
 	} else {
 		for _, p := range o.Skip {
 			expand = append(expand, "--skip="+p)
@@ -138,24 +158,38 @@ func (m *Manager) PrepareOpen(ctx context.Context, name string, o OpenOptions) (
 	if o.Text {
 		helpers = append(helpers, TotextHelper)
 	}
+	// A plan also looks for what it plans from.
+	look := helpers
+	if o.Plan {
+		look = slices.Concat(helpers, []string{OpenInDir, OpenTreeDir})
+	}
 	probe := docker.ExecOptions{User: config.SandboxUser, Workdir: config.SandboxDir, MaxOutput: 256}
-	out, err := m.Docker.Exec(ctx, c.ShortName(), probe, slices.Concat([]string{"/bin/sh", "-c", openProbeScript, "sh"}, helpers)...)
+	out, err := m.Docker.Exec(ctx, c.ShortName(), probe, slices.Concat([]string{"/bin/sh", "-c", openProbeScript, "sh"}, look)...)
 	if err != nil {
-		return OpenRun{}, fmt.Errorf("could not look for %s in sandbox %q: %w", strings.Join(helpers, " and "), name, err)
+		return OpenRun{}, fmt.Errorf("could not look for %s in sandbox %q: %w", strings.Join(look, " and "), name, err)
 	}
 	var missing []string
+	gone := map[string]bool{}
 	for line := range strings.Lines(string(out)) {
 		line = strings.TrimSuffix(line, "\n")
-		if !slices.Contains(helpers, line) {
-			return OpenRun{}, fmt.Errorf("could not look for %s in sandbox %q: unexpected output %q", strings.Join(helpers, " and "), name, out)
+		if !slices.Contains(look, line) || gone[line] {
+			return OpenRun{}, fmt.Errorf("could not look for %s in sandbox %q: unexpected output %q", strings.Join(look, " and "), name, out)
 		}
-		missing = append(missing, line)
+		gone[line] = true
+		if slices.Contains(helpers, line) {
+			missing = append(missing, line)
+		}
 	}
 	if len(missing) > 0 {
 		return OpenRun{}, fmt.Errorf("sandbox %q %w: its image has no %s. Recreate it with the sandbox image variant: `safeclaw sandbox run -s %s --variant sandbox`",
 			name, ErrNoHelpers, strings.Join(missing, " or "), name)
 	}
-	run := OpenArgv(name, o)
+	// A missing OpenInDir means nothing was copied in, so there are no
+	// new inputs; with no tree either, there is nothing to plan from.
+	run := openArgv(name, o, !gone[OpenInDir])
+	if o.Plan && gone[OpenInDir] && gone[OpenTreeDir] {
+		run.Expand = nil
+	}
 	run.KeepInputs = c.Label(config.LabelKeepInputs)
 	return run, nil
 }

@@ -35,7 +35,7 @@ const (
 )
 
 const openHelp = `Exit codes:
-  0    every container was opened, and with --text every file was converted
+  0    every container was opened, and with --text every file was converted; or --plan finished, including with nothing to plan
   1    failed before running a helper: a usage error, NAME is not a running sandbox, its image lacks the helpers, or docker failed;
        or, for a sandbox that keeps its inputs, safeclaw-expand finished but the run could not be recorded, and nothing was converted
   2    safeclaw-expand failed (with --plan too), so the tree is as it was before this run; with --text nothing was converted
@@ -53,7 +53,10 @@ func newSandboxOpenCommand() *cobra.Command {
 		Short: "Open the files copied into a sandbox with safeclaw-expand, and convert them to text",
 		Long: "Run safeclaw-expand in a sandbox on everything `sandbox cp-in` copied into " + session.OpenInDir + ", opening it into " + session.OpenTreeDir + ". " +
 			"A rerun resumes the tree, as safeclaw-expand does, so files copied in since are added and containers left packed are tried again. " +
-			"Its container lines are printed, and --plan prints what is not opened yet and what a rerun would open, without opening or changing anything. " +
+			"Its container lines are printed. " +
+			"--plan runs safeclaw-expand --plan on " + session.OpenInDir + " and " + session.OpenTreeDir + ", so it prints the files copied in that the tree doesn't have yet, flagged NEW, " +
+			"and what is left packed in the tree, with what a rerun would open, without opening or changing anything. It works before the first open too. " +
+			"When there is nothing to list, because no archive or email is new and none is left packed, or nothing has been copied in or opened yet, it prints nothing and says so on stderr. " +
 			"--skip and --unskip take paths as the lines write them, and are kept in the tree's manifest.\n\n" +
 			"--password-env NAME reads the archive password from NAME in safeclaw's environment and passes it to safeclaw-expand " +
 			"through a pipe, never in an argument, as `sandbox exec --env-if-set` does. NAME unset, or set to an empty value, means no password. " +
@@ -64,7 +67,7 @@ func newSandboxOpenCommand() *cobra.Command {
 			"since the files around them are worth reading, and the exit code says so; when safeclaw-expand fails or times out nothing is converted.\n\n" +
 			"The policy flags (--depth, --max-size, --no-mail, --hold, --release, and --release-all for safeclaw-expand, and --max-pages, --ocr-threshold, --ocr-dpi, --ocr-lang, " +
 			"--max-files, and --max-output for safeclaw-totext, which need --text) are passed to the helper when given, and otherwise the helper's own defaults apply. " +
-			"As with safeclaw-expand, a rerun must give the tree's --depth, --no-mail, and --hold.\n\n" +
+			"As with safeclaw-expand, a rerun or a --plan must give the tree's --depth, --no-mail, and --hold, and --plan can't be given with --release or --release-all.\n\n" +
 			"The helpers' output is escaped as `sandbox exec --escape-controls` escapes it, so control characters from untrusted files never reach the terminal, " +
 			"and each helper run gets --timeout as `sandbox exec --timeout` does. " +
 			"The sandbox must be running, and its image must have the helpers, which the sandbox image variant links; an interactive session is refused.\n\n" +
@@ -103,7 +106,7 @@ func newSandboxOpenCommand() *cobra.Command {
 			return runOpen(cmd, m, run, o, env)
 		},
 	}
-	cmd.Flags().BoolVar(&o.Plan, "plan", false, "print the containers not opened yet, with their entries or parts, without opening or changing anything")
+	cmd.Flags().BoolVar(&o.Plan, "plan", false, "print the inputs not in the tree yet and the containers not opened yet, with their entries or parts, without opening or changing anything")
 	cmd.Flags().StringArrayVar(&o.Skip, "skip", nil, "leave the container at this path in the tree packed, flagged SKIPPED, on this run and later ones (repeatable)")
 	cmd.Flags().StringArrayVar(&o.Unskip, "unskip", nil, "take a path off the skip list, so this run opens it (repeatable)")
 	cmd.Flags().StringVar(&passwordEnv, "password-env", "", "read the archive password from this variable in safeclaw's environment, if it is set")
@@ -159,6 +162,10 @@ func runOpen(cmd *cobra.Command, m *session.Manager, run session.OpenRun, o sess
 	if o.Text {
 		notConverted = ", so " + session.OpenOutDir + " was not rebuilt"
 	}
+	if run.Expand == nil {
+		_, _ = fmt.Fprintln(stderr, "Nothing to plan: nothing has been copied into "+session.OpenInDir+", and "+session.OpenTreeDir+" has not been opened")
+		return nil
+	}
 	var packed packedLines
 	code, err := runOpenHelper(cmd, m, run.Name, run.Expand, o.Timeout, &packed, env)
 	if err != nil {
@@ -175,6 +182,9 @@ func runOpen(cmd *cobra.Command, m *session.Manager, run session.OpenRun, o sess
 		return exitCodeError{openExpandFailed}
 	}
 	if o.Plan {
+		if !packed.wrote {
+			_, _ = fmt.Fprintln(stderr, "Nothing to open: no archive or email in "+session.OpenInDir+" is new, and none is left packed in "+session.OpenTreeDir)
+		}
 		return nil
 	}
 	if run.KeepInputs != "" {
@@ -256,6 +266,8 @@ func runOpenHelper(cmd *cobra.Command, m *session.Manager, name string, argv []s
 // needs of each line, however long the line is.
 type packedLines struct {
 	found bool
+	// wrote is set once anything was written.
+	wrote bool
 	// head is the start of the current line, to tell entry lines apart.
 	head []byte
 	// last is the start of the current line's last field.
@@ -264,6 +276,7 @@ type packedLines struct {
 }
 
 func (p *packedLines) Write(b []byte) (int, error) {
+	p.wrote = p.wrote || len(b) > 0
 	for _, c := range b {
 		switch c {
 		case '\n':
