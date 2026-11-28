@@ -66,6 +66,18 @@ type SandboxInfo struct {
 	Mounts []SandboxMount `json:"mounts"`
 	// Labels are the container's safeclaw.* labels.
 	Labels map[string]string `json:"labels"`
+	// Profile is the sandbox profile it was created with, null for none.
+	Profile *SandboxProfile `json:"profile"`
+}
+
+// SandboxProfile is the sandbox profile a sandbox was created with.
+type SandboxProfile struct {
+	// Ref is its NAME, or the absolute path of its FILE, as --profile
+	// takes it.
+	Ref string `json:"ref"`
+	// SHA256 is the hex SHA-256 of its contents when the sandbox was
+	// created.
+	SHA256 string `json:"sha256"`
 }
 
 // SandboxLimits are a sandbox's resource limits, 0 for none.
@@ -193,6 +205,9 @@ func sandboxInfo(name string, c docker.Container) SandboxInfo {
 		if strings.HasPrefix(k, config.LabelPrefix) {
 			info.Labels[k] = v
 		}
+	}
+	if ref := c.Label(config.LabelProfile); ref != "" {
+		info.Profile = &SandboxProfile{Ref: ref, SHA256: c.Label(config.LabelProfileSHA256)}
 	}
 	return info
 }

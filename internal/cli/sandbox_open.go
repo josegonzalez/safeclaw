@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
+	"github.com/josegonzalez/safeclaw/internal/profile"
 	"github.com/josegonzalez/safeclaw/internal/session"
 )
 
@@ -110,6 +111,7 @@ func newSandboxOpenCommand() *cobra.Command {
 	cmd.Flags().DurationVar(&o.Timeout, "timeout", session.DefaultOpenTimeout, "stop each helper run after this long, such as 30s or 2h, and exit 124")
 	addPassThrough(cmd.Flags(), newExpandCommand(expandProgram).Flags(), openExpandFlags, expandProgram)
 	addPassThrough(cmd.Flags(), newTotextCommand(totextProgram).Flags(), openTotextFlags, totextProgram+", with --text")
+	useProfile(cmd, profile.Open)
 	return cmd
 }
 

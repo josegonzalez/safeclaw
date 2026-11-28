@@ -19,25 +19,25 @@ func TestSandboxFlagsOptions(t *testing.T) {
 	none := func(string) bool { return false }
 	// Unset limits are left for the defaults, or a recreated sandbox's own.
 	want := session.SandboxOptions{Name: "box", Volumes: []string{"/in:/in", "/tools:/tools"}, Variant: "base"}
-	if got := f.options(none); !reflect.DeepEqual(got, want) {
+	if got := f.options(none, none); !reflect.DeepEqual(got, want) {
 		t.Errorf("options = %+v, want %+v", got, want)
 	}
 	all := func(string) bool { return true }
 	want = session.SandboxOptions{Name: "box", Volumes: []string{"/in:/in", "/tools:/tools"}, Variant: "base", Memory: "2g", PidsLimit: 64, CPUs: "0.5", Disk: "4g", Recreate: true}
-	if got := f.options(all); !reflect.DeepEqual(got, want) {
+	if got := f.options(all, all); !reflect.DeepEqual(got, want) {
 		t.Errorf("options = %+v, want %+v", got, want)
 	}
 	for _, flag := range limitFlags {
-		got := f.options(func(name string) bool { return name == flag })
+		got := f.options(all, func(name string) bool { return name == flag })
 		if !got.Recreate {
 			t.Errorf("setting --%s should recreate", flag)
 		}
 	}
-	if f.options(func(name string) bool { return name == "volume" }).Recreate {
+	if f.options(all, func(name string) bool { return name == "volume" }).Recreate {
 		t.Error("--volume recreates through Volumes, not Recreate")
 	}
 	f.remove = true
-	if !f.options(none).Remove {
+	if !f.options(none, none).Remove {
 		t.Error("--rm should set Remove")
 	}
 }

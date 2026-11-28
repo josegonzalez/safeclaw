@@ -285,6 +285,42 @@ name=$(safeclaw sandbox run --rm --name-prefix triage --restore-from ~/triage/jo
 # prints: safeclaw sandbox open triage-... --skip=1-1-report.eml.unpacked/1-dump.tar.gz
 ```
 
+### Sandbox profiles
+
+A script that runs sandboxes the same way every time can keep its flags in a profile instead of repeating them on every command. A profile is YAML like `config.yaml`, with a section for each of `sandbox run`, `exec`, `cp-out`, and `open` whose keys are that command's flag names, and an optional `require` with the minimum safeclaw version:
+
+```yaml
+# ~/.config/safeclaw/profiles/triage.yaml
+require: 0.6.0
+run:
+  rm: true
+  verify: true
+  disk: 1g
+  memory: 2g
+exec:
+  escape-controls: true
+  timeout: 30m
+cp-out:
+  only: ["*.txt"]
+  replace: true
+  max-files: 20000
+open:
+  depth: 3
+  max-size: 200m
+  password-env: TRIAGE_PASSWORD
+  max-pages: 300
+  ocr-threshold: 40
+```
+
+```bash
+name=$(safeclaw sandbox run --profile triage)
+safeclaw sandbox open "$name" --profile triage --text
+safeclaw sandbox exec "$name" --profile triage --timeout 2h -- ./long-job   # the command line wins
+safeclaw sandbox cp-out "$name" /sandbox/out ./text --profile ./triage.yaml --mkdir
+```
+
+`--profile NAME` reads `~/.config/safeclaw/profiles/NAME.yaml` (`$XDG_CONFIG_HOME/safeclaw/profiles`), and a value with a `/` or ending in `.yaml` is a file. A flag given on the command line wins over the profile, and a repeatable one, such as `--only` or `--hold`, replaces the profile's whole list. Unknown keys are errors, and so are settings that would weaken isolation: `verify: false`, `escape-controls: false`, limits of `0`, and keys such as `volume`, `network`, `secrets`, `env`, `no-scan`, `allow-flagged`, and `release`, so a profile can make a sandbox stricter or change its limits, but never turn a safety check off. The file must be yours and not writable by anyone else. `sandbox inspect` shows the profile a sandbox was created with. See [sandbox profiles](docs/architecture.md#sandbox-profiles).
+
 ### Scanning for malware
 
 `cp-out` scans every file it copies with ClamAV before placing any of them, and refuses the whole copy when a file is flagged as infected or could not be scanned (over clamscan's size limits, or an encrypted archive or document), naming each file and the reason, so `HOST_DIR` is left as it was, with `--force` and `--replace` too. `--allow-flagged` copies them anyway, and `--no-scan` skips the scan, for files your own script wrote. Each file's result and the signatures' date go to stderr, and the copied paths to stdout as before. The scan runs in a fresh container of the `sandbox` variant with no network that sees only the copied files and the signatures, never in the sandbox, so nothing the untrusted files left running there can change it.
@@ -467,7 +503,7 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw attach NAME` | Attach to a session's tmux session in this terminal. Clipboard writes, passthrough, hyperlinks to anything but http and https sites off localhost, and other sequences that act on the host terminal are filtered out, and the titles and modes the session leaves set are reset after it detaches ([details](docs/architecture.md#attaching-from-the-host)) |
 | `safeclaw net off NAME` | Save a session's networks and disconnect it from them. `--owner` names the hold and `--reason` says why. |
 | `safeclaw net on NAME` | Release the hold for `--owner` (or the unnamed hold) and reconnect the session once none remain. `--force` releases every hold. |
-| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory recursively read-only and can be repeated, `--variant` picks the image variant, `--memory`, `--pids-limit`, `--cpus`, and `--disk` (the size of `/sandbox`) set limits. `--verify` runs the `sandbox verify` checks once it has started, exiting non-zero and removing it if this run created it and a check fails. |
+| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory recursively read-only and can be repeated, `--variant` picks the image variant, `--memory`, `--pids-limit`, `--cpus`, and `--disk` (the size of `/sandbox`) set limits. `--verify` runs the `sandbox verify` checks once it has started, exiting non-zero and removing it if this run created it and a check fails. `--profile` reads defaults from a [sandbox profile](#sandbox-profiles), as `exec`, `cp-out`, and `open` do. |
 | `safeclaw sandbox run --rm [-s NAME \| --name-prefix PREFIX]` | Create a one-off sandbox that is removed when it stops, and print its name. `--name-prefix` names it `PREFIX-YYYYMMDD-HHMMSS` in UTC, adding `-2` to `-9` when that name is taken. |
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY, `--escape-controls` to escape control characters in its output, `--timeout DUR` to stop it after DUR and exit 124, `-e NAME=VALUE` or `-e NAME` to set an environment variable for the command without putting the value in docker's arguments, `--env-if-set NAME` to pass NAME only when it is set) |
 | `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`, and the same `--timeout` and `-e` as `sandbox exec`. With `--verify`, the command only starts once the sandbox has passed the `sandbox verify` checks, and a sandbox that fails one is removed without running it. |
@@ -477,7 +513,7 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw sandbox update-signatures` | Download the latest ClamAV signatures with freshclam in a short-lived networked container into `~/.cache/safeclaw/clamav`, keeping the old ones if it fails, and print their date and version. |
 | `safeclaw sandbox ls` | List sandboxes |
 | `safeclaw sandbox status NAME` | Print `running`, `stopped`, or `missing`, exiting 0, 3, or 4. A name that is an interactive session exits 5 with an error, and any other error exits 1. |
-| `safeclaw sandbox inspect NAME` | Print a sandbox's status, variant, network, user, capabilities, read-only root, limits including `--disk`, mounts, and safeclaw labels as JSON with a versioned schema. `--field NAME` prints one top-level field, a string as plain text and anything else as JSON. |
+| `safeclaw sandbox inspect NAME` | Print a sandbox's status, variant, network, user, capabilities, read-only root, limits including `--disk`, mounts, safeclaw labels, and the sandbox profile it was created with as JSON with a versioned schema. `--field NAME` prints one top-level field, a string as plain text and anything else as JSON. |
 | `safeclaw sandbox verify NAME` | Check a sandbox's configuration and, when it is running, what the sandbox user sees inside it against the sandbox's isolation guarantees, exiting non-zero and naming the failed checks. The configuration checks are authoritative, and the live checks advisory, since the sandbox can lie to them. `--json` prints the report as JSON. |
 | `safeclaw sandbox stop NAME` | Stop a sandbox, emptying its `/sandbox`. `--missing-ok` exits 0 when it doesn't exist or is already stopped, saying which on stderr; an interactive session is still refused ([details](docs/architecture.md#stopping-and-removing)) |
 | `safeclaw sandbox rm NAME` | Delete a sandbox (`-f` for a running one). `--missing-ok` exits 0 when it doesn't exist, saying so on stderr; an interactive session is still refused |
