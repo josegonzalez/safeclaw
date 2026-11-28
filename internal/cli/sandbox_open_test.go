@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -244,9 +246,110 @@ func TestSandboxOpenPlanNothing(t *testing.T) {
 	if w.read("argv") != "" {
 		t.Errorf("nothing: ran %s", w.read("argv"))
 	}
-	// Without --plan the paths aren't looked for.
-	if _, _, err := runStderr("sandbox", "open", "box"); err == nil || !strings.Contains(err.Error(), "unexpected output") {
-		t.Errorf("open: err = %v", err)
+}
+
+func TestSandboxOpenNoInputs(t *testing.T) {
+	wrap := []string{"docker", "exec", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box",
+		"/bin/sh", "-c", `umask 022; exec "$@"`, "sh", "timeout", "--kill-after=5s", "--", "1800s"}
+	totext := slices.Concat(wrap, []string{"safeclaw-totext", "--recursive", "--replace", "--", "/sandbox/tree", "/sandbox/out"})
+	for _, tc := range []struct {
+		name, missing string
+		args          []string
+		expand        string
+		code          int
+		want          [][]string
+		stderr        string
+	}{
+		// Nothing copied in: the tree is resumed with no new inputs, so
+		// releases, retries, and skips still apply.
+		{name: "release", missing: "/sandbox/in\n", args: []string{"--hold", "mail-archives", "--release", "1-a.eml.unpacked/1-b.zip", "--skip", "2-c.zip"},
+			expand: openedOut, want: [][]string{slices.Concat(wrap, []string{"safeclaw-expand", "--hold=mail-archives", "--release=1-a.eml.unpacked/1-b.zip", "--skip=2-c.zip", "--", "/sandbox/tree"})}},
+		{name: "retry, packed", missing: "/sandbox/in\n", expand: packedOut, code: openLeftPacked,
+			want:   [][]string{slices.Concat(wrap, []string{"safeclaw-expand", "--", "/sandbox/tree"})},
+			stderr: "Some containers were left packed in /sandbox/tree; see the lines above\n"},
+		{name: "text", missing: "/sandbox/in\n", args: []string{"--text"}, expand: openedOut,
+			want: [][]string{slices.Concat(wrap, []string{"safeclaw-expand", "--", "/sandbox/tree"}), totext}},
+		// Nothing copied in or opened: a note, and no helper runs.
+		{name: "nothing", missing: "/sandbox/in\n/sandbox/tree\n", args: []string{"--hold", "mail-archives"},
+			stderr: "Nothing to open: nothing has been copied into /sandbox/in, and /sandbox/tree has not been opened\n"},
+		{name: "nothing, text", missing: "/sandbox/in\n/sandbox/tree\n", args: []string{"--text", "--max-pages", "3"},
+			stderr: "Nothing to open: nothing has been copied into /sandbox/in, and /sandbox/tree has not been opened, so /sandbox/out was not rebuilt\n"},
+		// A container named with nothing to name it in fails in
+		// safeclaw-expand, as on a first run.
+		{name: "nothing, release", missing: "/sandbox/in\n/sandbox/tree\n", args: []string{"--hold", "mail-archives", "--release", "1-a.zip"},
+			expand: "safeclaw-expand: no inputs, and no manifest in the destination to resume from\n", code: openExpandFailed,
+			want:   [][]string{slices.Concat(wrap, []string{"safeclaw-expand", "--hold=mail-archives", "--release=1-a.zip", "--", "/sandbox/tree"})},
+			stderr: "Error: safeclaw-expand failed with exit code 1\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newOpenWorld(t)
+			w.missing = tc.missing
+			code := "0"
+			if tc.code == openExpandFailed {
+				code = "1"
+			}
+			w.helper(t, "expand", tc.expand, code)
+			w.helper(t, "totext", "", "0")
+			_, stderr, err := runStderr(append([]string{"sandbox", "open", "box"}, tc.args...)...)
+			if tc.code == 0 && err != nil || tc.code != 0 && !errors.Is(err, exitCodeError{tc.code}) {
+				t.Errorf("err = %v, want exit %d", err, tc.code)
+			}
+			if got := w.calls(); !slices.EqualFunc(got, tc.want, slices.Equal[[]string]) {
+				t.Errorf("argv =\n%q\nwant\n%q", got, tc.want)
+			}
+			if stderr != tc.stderr {
+				t.Errorf("stderr = %q, want %q", stderr, tc.stderr)
+			}
+		})
+	}
+}
+
+// A sandbox that keeps its inputs records a run that resumed the tree
+// with no new inputs, as any run whose safeclaw-expand finished, and not
+// one that had nothing to open.
+func TestSandboxOpenNoInputsRecord(t *testing.T) {
+	for _, tc := range []struct {
+		missing string
+		want    string
+	}{
+		{"/sandbox/in\n", `[{"args":["--hold=mail-archives","--release=1-a.zip"]}]`},
+		{"/sandbox/in\n/sandbox/tree\n", `[]`},
+	} {
+		w := newOpenWorld(t)
+		w.missing = tc.missing
+		w.helper(t, "expand", openedOut, "0")
+		dir := filepath.Join(t.TempDir(), "record")
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, session.InputsFile), []byte(`{"schema":1,"verify":false,"files":[],"opens":[]}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		w.containers["safeclaw-box"] = strings.Replace(fakeContainer("safeclaw-box", "sandbox", true),
+			`"safeclaw.type":"sandbox"`, `"safeclaw.type":"sandbox","safeclaw.keep-inputs":"`+dir+`"`, 1)
+		args := []string{"sandbox", "open", "box", "--hold", "mail-archives"}
+		if tc.missing == "/sandbox/in\n" {
+			args = append(args, "--release", "1-a.zip")
+		}
+		if _, stderr, err := runStderr(args...); err != nil {
+			t.Fatalf("%q: err = %v, stderr = %q", tc.missing, err, stderr)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, session.InputsFile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rec struct {
+			Opens json.RawMessage `json:"opens"`
+		}
+		if err := json.Unmarshal(b, &rec); err != nil {
+			t.Fatal(err)
+		}
+		var got, want any
+		_ = json.Unmarshal(rec.Opens, &got)
+		_ = json.Unmarshal([]byte(tc.want), &want)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%q: opens = %s, want %s", tc.missing, rec.Opens, tc.want)
+		}
 	}
 }
 

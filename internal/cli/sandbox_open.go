@@ -35,7 +35,8 @@ const (
 )
 
 const openHelp = `Exit codes:
-  0    every container was opened, and with --text every file was converted; or --plan finished, including with nothing to plan
+  0    every container was opened, and with --text every file was converted; or --plan finished, including with nothing to plan;
+       or nothing has been copied in or opened yet, so there was nothing to open
   1    failed before running a helper: a usage error, NAME is not a running sandbox, its image lacks the helpers, or docker failed;
        or, for a sandbox that keeps its inputs, safeclaw-expand finished but the run could not be recorded, and nothing was converted
   2    safeclaw-expand failed (with --plan too), so the tree is as it was before this run; with --text nothing was converted
@@ -53,6 +54,8 @@ func newSandboxOpenCommand() *cobra.Command {
 		Short: "Open the files copied into a sandbox with safeclaw-expand, and convert them to text",
 		Long: "Run safeclaw-expand in a sandbox on everything `sandbox cp-in` copied into " + session.OpenInDir + ", opening it into " + session.OpenTreeDir + ". " +
 			"A rerun resumes the tree, as safeclaw-expand does, so files copied in since are added and containers left packed are tried again. " +
+			"With nothing copied in, so no " + session.OpenInDir + ", it resumes the tree with no new inputs, so releases, retries, and skips still apply; " +
+			"with no tree either, it says on stderr that there is nothing to open and exits 0, unless --skip, --unskip, --release, or --release-all names a container, which safeclaw-expand refuses with no tree to keep it in. " +
 			"Its container lines are printed. " +
 			"--plan runs safeclaw-expand --plan on " + session.OpenInDir + " and " + session.OpenTreeDir + ", so it prints the files copied in that the tree doesn't have yet, flagged NEW, " +
 			"and what is left packed in the tree, with what a rerun would open, without opening or changing anything. It works before the first open too. " +
@@ -71,7 +74,7 @@ func newSandboxOpenCommand() *cobra.Command {
 			"The helpers' output is escaped as `sandbox exec --escape-controls` escapes it, so control characters from untrusted files never reach the terminal, " +
 			"and each helper run gets --timeout as `sandbox exec --timeout` does. " +
 			"The sandbox must be running, and its image must have the helpers, which the sandbox image variant links; an interactive session is refused.\n\n" +
-			"For a one-off sandbox made with `sandbox run --rm --keep-inputs` or `--restore-from`, each run whose safeclaw-expand finished, --plan aside, is recorded: " +
+			"For a one-off sandbox made with `sandbox run --rm --keep-inputs` or `--restore-from`, each run whose safeclaw-expand finished, --plan aside, is recorded, one with no new inputs included, and one with nothing to open is not: " +
 			"its --skip, --unskip, --hold, --release, --release-all, --depth, --max-size, and --no-mail, never the password, " +
 			"so that a restore can print the runs to make again.\n\n" + openHelp,
 		Example: `  safeclaw sandbox cp-in triage ~/Downloads/report.eml
@@ -163,7 +166,11 @@ func runOpen(cmd *cobra.Command, m *session.Manager, run session.OpenRun, o sess
 		notConverted = ", so " + session.OpenOutDir + " was not rebuilt"
 	}
 	if run.Expand == nil {
-		_, _ = fmt.Fprintln(stderr, "Nothing to plan: nothing has been copied into "+session.OpenInDir+", and "+session.OpenTreeDir+" has not been opened")
+		what := "open"
+		if o.Plan {
+			what = "plan"
+		}
+		_, _ = fmt.Fprintln(stderr, "Nothing to "+what+": nothing has been copied into "+session.OpenInDir+", and "+session.OpenTreeDir+" has not been opened"+notConverted)
 		return nil
 	}
 	var packed packedLines

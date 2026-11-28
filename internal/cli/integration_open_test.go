@@ -60,9 +60,10 @@ func zipCrypto(t *testing.T, name, data, password string) []byte {
 }
 
 // TestIntegrationSandboxOpen runs `sandbox open` on a sandbox of the
-// sandbox variant: it plans with nothing copied in, then copies in an
-// email carrying a password zip and plans it, opens it, which leaves the
-// zip packed, retries with --password-env unset and then set, converts
+// sandbox variant: it plans and opens with nothing copied in, then copies
+// in an email carrying a password zip and plans it, opens it, which leaves
+// the zip packed, retries with /sandbox/in moved away and --password-env
+// unset and then set, converts
 // the tree with --text, copies the text out, and plans a file copied in
 // after that.
 func TestIntegrationSandboxOpen(t *testing.T) {
@@ -114,11 +115,17 @@ func TestIntegrationSandboxOpen(t *testing.T) {
 		}
 	}
 
-	// Before anything is copied in there is nothing to plan, and with an
-	// empty /sandbox/in nothing to open.
+	// Before anything is copied in there is nothing to plan or open, and
+	// with an empty /sandbox/in nothing to open.
 	if out, stderr := openErr(0, "--plan"); out != "" || !strings.Contains(stderr, "Nothing to plan: nothing has been copied into /sandbox/in") {
 		t.Errorf("plan before cp-in: out = %q, stderr = %q", out, stderr)
 	}
+	for _, args := range [][]string{nil, {"--text"}} {
+		if out, stderr := openErr(0, args...); out != "" || !strings.Contains(stderr, "Nothing to open: nothing has been copied into /sandbox/in") {
+			t.Errorf("open %q before cp-in: out = %q, stderr = %q", args, out, stderr)
+		}
+	}
+	sh("test ! -e /sandbox/tree && test ! -e /sandbox/out")
 	sh("mkdir /sandbox/in")
 	if out, stderr := openErr(0, "--plan"); out != "" || !strings.Contains(stderr, "Nothing to open: no archive or email in /sandbox/in is new") {
 		t.Errorf("plan of an empty /sandbox/in: out = %q, stderr = %q", out, stderr)
@@ -141,6 +148,9 @@ func TestIntegrationSandboxOpen(t *testing.T) {
 	if out := open(0, "--plan"); !strings.Contains(out, packed+"entry\tfile\t") {
 		t.Errorf("plan:\n%s", out)
 	}
+	// The retries run with /sandbox/in moved away, so they resume the
+	// tree with no new inputs.
+	sh("mv /sandbox/in /sandbox/in.aside")
 	if out := open(openLeftPacked, "--password-env", "OPEN_TEST_PASSWORD"); !strings.Contains(out, packed) {
 		t.Errorf("open without the variable:\n%s", out)
 	}
@@ -148,6 +158,7 @@ func TestIntegrationSandboxOpen(t *testing.T) {
 	if out := open(0, "--password-env", "OPEN_TEST_PASSWORD"); !strings.Contains(out, "zip\t1-1-report.eml.unpacked/1-files.zip\tUNPACKED\t") {
 		t.Errorf("open with the password:\n%s", out)
 	}
+	sh("mv /sandbox/in.aside /sandbox/in")
 	out := open(0, "--text", "--max-pages", "10")
 	if !strings.HasPrefix(out, "email\t1-1-report.eml\tUNPACKED\t") || !strings.Contains(out, "\ntree\tok\t") {
 		t.Errorf("open --text:\n%s", out)
