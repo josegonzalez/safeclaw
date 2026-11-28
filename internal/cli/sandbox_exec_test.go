@@ -17,12 +17,17 @@ import (
 
 func TestSandboxExecEnvFlag(t *testing.T) {
 	cmd := newSandboxExecCommand()
-	if err := cmd.ParseFlags([]string{"-e", "A=1,2", "--env", "B"}); err != nil {
+	if err := cmd.ParseFlags([]string{"-e", "A=1,2", "--env", "B", "--env-if-set", "C", "--env-if-set", "D,E"}); err != nil {
 		t.Fatal(err)
 	}
 	// StringArray, not StringSlice, so a comma in a value is kept.
 	if got, _ := cmd.Flags().GetStringArray("env"); !slices.Equal(got, []string{"A=1,2", "B"}) {
 		t.Errorf("env = %q", got)
+	}
+	// A comma isn't a separator either, so "D,E" is refused as a name
+	// rather than read as two.
+	if got, _ := cmd.Flags().GetStringArray("env-if-set"); !slices.Equal(got, []string{"C", "D,E"}) {
+		t.Errorf("env-if-set = %q", got)
 	}
 }
 

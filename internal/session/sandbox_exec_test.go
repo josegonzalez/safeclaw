@@ -125,14 +125,14 @@ func TestExecEnv(t *testing.T) {
 		return v, ok
 	}
 
-	got, err := m.ExecEnv([]string{"PASSWORD=p a=s s ", "FROM_CALLER", "EMPTY", "BLANK=", "_x1=été"}, lookup)
+	got, err := m.ExecEnv([]string{"PASSWORD=p a=s s ", "FROM_CALLER", "EMPTY", "BLANK=", "_x1=été"}, nil, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if want := "PASSWORD=p a=s s \nFROM_CALLER=caller value\nEMPTY=\nBLANK=\n_x1=été\n"; got != want {
 		t.Errorf("env = %q, want %q", got, want)
 	}
-	if got, err := m.ExecEnv(nil, lookup); got != "" || err != nil {
+	if got, err := m.ExecEnv(nil, nil, lookup); got != "" || err != nil {
 		t.Errorf("no specs = %q, %v", got, err)
 	}
 
@@ -152,7 +152,7 @@ func TestExecEnv(t *testing.T) {
 		{"GH_TOKEN", "secret"},
 		{"CLAUDE_CODE_OAUTH_TOKEN=x", "secret"},
 	} {
-		_, err := m.ExecEnv([]string{tc.spec}, lookup)
+		_, err := m.ExecEnv([]string{tc.spec}, nil, lookup)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%q: err = %v, want %q", tc.spec, err, tc.want)
 			continue
@@ -162,16 +162,81 @@ func TestExecEnv(t *testing.T) {
 			t.Errorf("%q: error leaks the value: %v", tc.spec, err)
 		}
 	}
-	if _, err := m.ExecEnv([]string{"A=1", "A=2"}, lookup); err == nil {
+	if _, err := m.ExecEnv([]string{"A=1", "A=2"}, nil, lookup); err == nil {
 		t.Error("want an error for a name given twice")
 	}
-	if _, err := m.ExecEnv([]string{"GH_TOKEN=x"}, lookup); !errors.Is(err, ErrSecretEnv) {
+	if _, err := m.ExecEnv([]string{"GH_TOKEN=x"}, nil, lookup); !errors.Is(err, ErrSecretEnv) {
 		t.Errorf("err = %v, want ErrSecretEnv", err)
 	}
 
 	m.Secrets = keysFailStore{m.Secrets}
-	if _, err := m.ExecEnv([]string{"A=1"}, lookup); err == nil || !strings.Contains(err.Error(), "could not list") {
+	if _, err := m.ExecEnv([]string{"A=1"}, nil, lookup); err == nil || !strings.Contains(err.Error(), "could not list") {
 		t.Errorf("err = %v, want the secret listing error", err)
+	}
+	if _, err := m.ExecEnv(nil, []string{"A"}, lookup); err == nil || !strings.Contains(err.Error(), "could not list") {
+		t.Errorf("--env-if-set: err = %v, want the secret listing error", err)
+	}
+}
+
+func TestExecEnvIfSet(t *testing.T) {
+	m, _ := newTestManager(t, &world{})
+	if err := m.Secrets.Set("OPENAI_API_KEY", "sk"); err != nil {
+		t.Fatal(err)
+	}
+	env := map[string]string{"PASSWORD": "p a=s s", "EMPTY": "", "BAD": "hunter2\n", "BIG": strings.Repeat("a", MaxExecEnvBytes)}
+	var looked []string
+	lookup := func(name string) (string, bool) {
+		looked = append(looked, name)
+		v, ok := env[name]
+		return v, ok
+	}
+
+	// A set variable is passed, one set to "" counts as set, and an unset
+	// one is left out without an error, after the -e ones.
+	got, err := m.ExecEnv([]string{"A=1"}, []string{"PASSWORD", "UNSET", "EMPTY"}, lookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "A=1\nPASSWORD=p a=s s\nEMPTY=\n"; got != want {
+		t.Errorf("env = %q, want %q", got, want)
+	}
+	// Only unset ones give an empty env.
+	if got, err := m.ExecEnv(nil, []string{"UNSET", "ALSO_UNSET"}, lookup); got != "" || err != nil {
+		t.Errorf("only unset = %q, %v", got, err)
+	}
+
+	for _, tc := range []struct {
+		specs, ifSet []string
+		want         string
+	}{
+		{nil, []string{"1X"}, "invalid --env-if-set"},
+		{nil, []string{"A=hunter2"}, "NAME only"},
+		{nil, []string{"=hunter2"}, "NAME only"},
+		{nil, []string{""}, "invalid --env-if-set"},
+		{nil, []string{"BAD"}, "newlines"},
+		{nil, []string{"BIG"}, "allowed"},
+		{nil, []string{"PASSWORD", "PASSWORD"}, "more than once"},
+		{[]string{"PASSWORD"}, []string{"PASSWORD"}, "more than once"},
+		{[]string{"PASSWORD=x"}, []string{"PASSWORD"}, "more than once"},
+		// Secret names are refused whether or not they are set.
+		{nil, []string{"OPENAI_API_KEY"}, "secret"},
+		{nil, []string{"GH_TOKEN"}, "secret"},
+		{nil, []string{"CLAUDE_CODE_OAUTH_TOKEN"}, "secret"},
+	} {
+		looked = nil
+		_, err := m.ExecEnv(tc.specs, tc.ifSet, lookup)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%q %q: err = %v, want %q", tc.specs, tc.ifSet, err, tc.want)
+			continue
+		}
+		if strings.Contains(err.Error(), "hunter2") {
+			t.Errorf("%q: error leaks the value: %v", tc.ifSet, err)
+		}
+	}
+	// A refused name is never looked up.
+	looked = nil
+	if _, err := m.ExecEnv(nil, []string{"GH_TOKEN"}, lookup); !errors.Is(err, ErrSecretEnv) || len(looked) != 0 {
+		t.Errorf("err = %v, looked up %q, want ErrSecretEnv without a lookup", err, looked)
 	}
 }
 

@@ -302,9 +302,60 @@ func TestIntegrationSandbox(t *testing.T) {
 		t.Errorf("verify = %+v, %v", report, err)
 	}
 
+	// -e and --env-if-set reach a command in a named sandbox.
+	argv := SandboxExecArgv(name, ExecOptions{EnvFile: "/dev/fd/3"}, envIfSetCmd)
+	if out, err := outputWithEnvFile(t, argv, execEnvIfSet(t, m)); err != nil || out != envIfSetWant {
+		t.Errorf("exec env = %q, %v, want %q", out, err, envIfSetWant)
+	}
+
 	if err := m.Delete(ctx, name, true); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// envIfSetCmd is a command that prints the variables
+// checkExecEnvIfSet passes, with an unset one shown as "unset".
+var envIfSetCmd = []string{"sh", "-c", `echo "$FROM_E|$ITEST_SET|${ITEST_EMPTY-unset}|${ITEST_UNSET-unset}"`}
+
+// envIfSetWant is what envIfSetCmd prints for checkExecEnvIfSet's env:
+// -e and a set --env-if-set are passed, one set to "" counts as set,
+// and an unset one is left out.
+const envIfSetWant = "e|p a ss||unset"
+
+// execEnvIfSet returns the env file for `sandbox exec -e FROM_E=e
+// --env-if-set ITEST_SET --env-if-set ITEST_EMPTY --env-if-set ITEST_UNSET`
+// with only the first two set.
+func execEnvIfSet(t *testing.T, m *Manager) string {
+	t.Helper()
+	caller := map[string]string{"ITEST_SET": "p a ss", "ITEST_EMPTY": ""}
+	env, err := m.ExecEnv([]string{"FROM_E=e"}, []string{"ITEST_SET", "ITEST_EMPTY", "ITEST_UNSET"}, func(name string) (string, bool) {
+		v, ok := caller[name]
+		return v, ok
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return env
+}
+
+// outputWithEnvFile runs a `docker exec` or `docker run` argv whose
+// ExecOptions.EnvFile is /dev/fd/3, with env on a pipe there, as the CLI
+// does.
+func outputWithEnvFile(t *testing.T, argv []string, env string) (string, error) {
+	t.Helper()
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rd.Close()
+	if _, err := io.WriteString(wr, env); err != nil {
+		t.Fatal(err)
+	}
+	_ = wr.Close()
+	c := exec.Command(argv[0], argv[1:]...)
+	c.ExtraFiles = []*os.File{rd}
+	out, err := c.Output()
+	return strings.TrimSpace(string(out)), err
 }
 
 // waitGone polls until a container no longer exists.
@@ -385,7 +436,7 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(in, "doc.txt"), []byte("untrusted\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m := &Manager{Docker: d}
+	m := &Manager{Docker: d, Secrets: secrets.FileStore{Dir: filepath.Join(dir, ".secrets")}}
 	run := func(opts SandboxOptions, stdin string, cmd ...string) (string, error) {
 		t.Helper()
 		if opts.Variant == "" {
@@ -436,6 +487,18 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 		t.Errorf("two mounts = %q, %v", out, err)
 	}
 
+	// -e and --env-if-set reach a one-off command too.
+	argv, ename, err := m.PrepareEphemeral(ctx, SandboxOptions{Variant: config.BaseVariant}, ExecOptions{EnvFile: "/dev/fd/3"}, envIfSetCmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envContainer := config.ContainerName(ename)
+	t.Cleanup(func() { _ = d.Remove(ctx, envContainer, true) })
+	if out, err := outputWithEnvFile(t, argv, execEnvIfSet(t, m)); err != nil || out != envIfSetWant {
+		t.Errorf("ephemeral env = %q, %v, want %q", out, err, envIfSetWant)
+	}
+	waitGone(t, d, envContainer)
+
 	// The command's environment comes from an env file on an inherited
 	// fd, and a timeout ends it with coreutils timeout's 124.
 	rd, wr, err := os.Pipe()
@@ -447,7 +510,7 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 	}
 	_ = wr.Close()
 	defer rd.Close()
-	argv, ename, err := m.PrepareEphemeral(ctx, SandboxOptions{Variant: config.BaseVariant}, ExecOptions{EnvFile: "/dev/fd/3", Timeout: time.Second}, []string{"sh", "-c", `echo "$PASSWORD"; sleep 30`})
+	argv, ename, err = m.PrepareEphemeral(ctx, SandboxOptions{Variant: config.BaseVariant}, ExecOptions{EnvFile: "/dev/fd/3", Timeout: time.Second}, []string{"sh", "-c", `echo "$PASSWORD"; sleep 30`})
 	if err != nil {
 		t.Fatal(err)
 	}

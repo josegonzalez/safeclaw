@@ -174,10 +174,10 @@ func sandboxExecArgs(cmd *cobra.Command, args []string) error {
 func newSandboxExecCommand() *cobra.Command {
 	var interactive, tty, ephemeral, escape bool
 	var timeout time.Duration
-	var envSpecs []string
+	var envSpecs, envIfSet []string
 	var f sandboxFlags
 	cmd := &cobra.Command{
-		Use:   "exec {NAME | --ephemeral [-s NAME]} [-i] [-t | --escape-controls] [--timeout DUR] [-e NAME[=VALUE]]... -- COMMAND [ARG...]",
+		Use:   "exec {NAME | --ephemeral [-s NAME]} [-i] [-t | --escape-controls] [--timeout DUR] [-e NAME[=VALUE]]... [--env-if-set NAME]... -- COMMAND [ARG...]",
 		Short: "Run a command in a sandbox as the sandbox user",
 		Long: "Run a command in a sandbox as the sandbox user.\n\n" +
 			"With --ephemeral, no NAME is given: the command runs in a new one-off sandbox that is removed when it exits, " +
@@ -193,8 +193,11 @@ func newSandboxExecCommand() *cobra.Command {
 			"With --timeout, the command gets SIGTERM once it has run for DUR (such as 30s or 5m) and SIGKILL 5 seconds later, " +
 			"and safeclaw exits 124 with an error saying it timed out.\n\n" +
 			"-e sets an environment variable for the command only, NAME=VALUE or NAME to take the value from safeclaw's environment. " +
+			"-e NAME for a variable that isn't set is an error. " +
+			"--env-if-set NAME passes NAME from safeclaw's environment like -e NAME when it is set, even to an empty value, and leaves it out when it isn't. " +
+			"A name can be given only once across -e and --env-if-set. " +
 			"Values reach docker through a pipe rather than its arguments, so they don't show in ps. " +
-			"The names of stored secrets, CLAUDE_CODE_OAUTH_TOKEN, and GH_TOKEN are refused.",
+			"The names of stored secrets, CLAUDE_CODE_OAUTH_TOKEN, and GH_TOKEN are refused, for --env-if-set whether or not they are set.",
 		Args: sandboxExecArgs,
 		ValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			if ephemeral {
@@ -204,7 +207,7 @@ func newSandboxExecCommand() *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			m := newManager()
-			env, err := m.ExecEnv(envSpecs, os.LookupEnv)
+			env, err := m.ExecEnv(envSpecs, envIfSet, os.LookupEnv)
 			if err != nil {
 				return err
 			}
@@ -267,6 +270,7 @@ func newSandboxExecCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&escape, "escape-controls", false, "escape control characters in the command's output before they reach the terminal")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "stop the command after this long, such as 30s or 5m, and exit 124")
 	cmd.Flags().StringArrayVarP(&envSpecs, "env", "e", nil, "set NAME=VALUE, or NAME from safeclaw's environment, for the command (repeatable)")
+	cmd.Flags().StringArrayVar(&envIfSet, "env-if-set", nil, "pass NAME from safeclaw's environment to the command when it is set, and leave it out when it isn't (repeatable)")
 	cmd.Flags().BoolVar(&ephemeral, "ephemeral", false, "run the command in a new one-off sandbox that is removed when it exits")
 	f.register(cmd, "name for the --ephemeral sandbox (random by default)", " (with --ephemeral)")
 	cmd.Flags().BoolVar(&f.verify, "verify", false, "run the sandbox verify checks on the --ephemeral sandbox before the command, and remove it without running the command if a check fails")
