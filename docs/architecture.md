@@ -326,6 +326,37 @@ Exit codes:
 
 1, 3, and 5 mean what they do for `safeclaw-unpack` (failed, needs a password, not a file it handles), and 2 and 4, its rejected and too large, are unused. On every exit but 0 and 6, OUTDIR is emptied without following links, while the report still says what was skipped and why; on 6 it keeps what was written.
 
+#### Converting a folder
+
+`safeclaw-totext --recursive SRC OUTDIR` converts every regular file under the directory SRC, so a caller with a whole extracted report doesn't have to walk it, run the tool once per file, rename the results, and write its own manifest. A link to SRC is followed, but no link under it is. The tree is walked in lexical order, each directory's entries sorted by name, and each regular file is converted exactly as a single file is, with the same flags and its own `--timeout` for each tool run. OUTDIR has the single-file rules (missing or an empty directory, and not a symbolic link) and also can't be SRC or inside it, so the outputs are never walked; SRC must not change during the run.
+
+The results are written flat into OUTDIR, so `sandbox cp-out --only '*.txt'` copies them all: `NNN-NAME.pNNN.txt` for each PDF page, `NNN-NAME.ocr.txt` for an image, and `NNN-NAME.text.txt` for a text file. `NNN` is the file's index among the entries, zero-padded to at least three digits, and `NAME` is its path in SRC made safe with the same function `safeclaw-mail` uses for attachment names, so `a/b.txt` becomes `a_b.txt`. The index makes every name unique even when two paths make the same safe name. Files are created with `O_EXCL` and `O_NOFOLLOW`. A file whose conversion ends in anything but ok or partial leaves nothing in OUTDIR, as in single-file mode, and the run goes on.
+
+`--max-files` (default `10000`) limits how many files are converted, and `--max-output` (default `512m`) the total size of the text files written, the manifest not included. A file past `--max-files` is skipped with the reason `file-limit`. A write that would pass `--max-output` stops the tool writing it at once rather than at its timeout, and the page being written is dropped: a PDF keeps its pages before it and skips the rest as `output-limit`, an image or text file is skipped, and every file after it is skipped as `output-limit` too.
+
+Every file gets an entry, whether it was converted or not: a link is skipped as `link` and a FIFO, socket, or device as `special`, and a directory that can't be read gets a failed entry. The manifest is written to `OUTDIR/manifest.txt` and printed, as tab-separated lines with paths, errors, and details escaped as `safeclaw-unpack list` escapes paths. Every line after the first names its entry by the zero-padded index its outputs start with:
+
+| Line | Fields |
+|---|---|
+| `tree` | the status, the number of entries, the bytes of text written, the expand manifest (`folded`, `none`, or `invalid`), and why it was invalid, or `-` |
+| `file` | the index, the path in SRC, the status (`ok`, `partial`, `encrypted`, `unsupported`, `failed`, `timed-out`, or `skipped`), the type, the size, the page count, and flags: `ENCRYPTED`, `EXPAND-OUTPUT`, or `-` |
+| `error` | the index and what went wrong, when something did |
+| `container` | the index, then from `safeclaw-expand`'s manifest the kind, depth, outcome, flags, parent (or `-`), and error (or `-`) |
+| `page` | the index, the page, its characters, the output file in OUTDIR, and `OCR` or `-` |
+| `skipped` | the index, the first and last page (`0` and `0` for the whole file), the reason, the tool or `-`, and the detail or `-` |
+
+A skipped entry's reason is `link`, `special`, `file-limit`, `output-limit`, `unpacked`, `expand-manifest`, or `missing`; the rest are a single file's reasons. `--json` prints one JSON object instead, `{"schema", "status", "code", "error", "expand", "expand_error", "output_size", "entries"}`, each entry being `{"index", "path", "size", "status", "error", "type", "pages", "encrypted", "files", "ocr_pages", "skipped", "expand_output", "container"}` with the single-file fields as above, `expand_output` the container whose `safeclaw-expand` output it is, and `container` that container's record from the expand manifest as it is there. It follows the same schema rules, and its lists are never `null`.
+
+When SRC holds a `manifest.json` that `safeclaw-expand`'s own reader accepts (a regular file, not a link, of its schema, naming only clean paths inside SRC), it is folded in, so one manifest says what happened to everything. Its paths are only matched against the files the walk found; nothing is ever opened by a path the manifest names. Each email and archive's entry carries its record. One that was opened, whose directory is in SRC, is skipped as `unpacked`, since its files are converted instead and converting the raw `.eml` would repeat its text with the MIME encoding left in. One left packed, or with an outcome this version doesn't know, which the expand schema says to treat as left packed, is converted like any other file, so a rejected archive's entry shows both its outcome and `unsupported`. `manifest.json` itself is skipped as `expand-manifest`. An email's `body.txt` and `parts.txt`, which the helper wrote, are converted rather than skipped, since `body.txt` holds the email's text and is often the only text a report has, and flagged `EXPAND-OUTPUT`. A container the manifest lists that isn't in SRC gets an entry after the others, skipped as `missing`. A `manifest.json` that the reader refuses is reported on stderr and in the `tree` line, and SRC is converted as a plain folder, `manifest.json` included; this is safe, since nothing in SRC is treated differently.
+
+Exit codes for `--recursive` are for the whole run:
+
+| Code | Meaning |
+|------|---------|
+| 0 | ok: every file was converted, or skipped only as an opened container or the expand manifest |
+| 1 | failed: a usage or I/O error, SRC isn't a directory, OUTDIR is not a missing or empty directory or is inside SRC, or the run was interrupted; OUTDIR is emptied without following links and no manifest is written |
+| 6 | partial: something wasn't converted in full: a file that was partial, encrypted, unsupported, timed out, or failed, a link or special file, a file past `--max-files` or `--max-output`, a container `safeclaw-expand` left packed, or one missing from SRC |
+
 ### Reading emails
 
 The `sandbox` image variant also links `/usr/local/bin/safeclaw-mail` to the image's `safeclaw` binary, which runs as `safeclaw mail` when called by that name, so callers share one tested way of opening untrusted emails instead of each writing its own decoder. Like `safeclaw-unpack`, it needs no config directory, and it should run inside a sandbox. It is written in Go with the standard library's `net/mail` and `mime` packages and `golang.org/x/net/html`, and runs no other program.
@@ -424,6 +455,8 @@ Exit codes:
 | 1 | failed: a usage or I/O error, an input that is missing or not a regular file, DEST is not a missing or empty directory, or the run was interrupted |
 
 Codes 2 to 5 are not used for the run. A finished run exits 0 however many containers were left packed, as `safeclaw-unpack extract --nested keep-going` does, since everything kept is safe and the manifest says what wasn't, and that holds for the inputs too: an input left packed is a container like any other. Each container's own failure keeps its `safeclaw-unpack` or `safeclaw-mail` code in the manifest's `code`, so a caller that wants to treat a packed container as a failure checks the flags or the codes.
+
+To turn an opened tree into text, run `safeclaw-totext --recursive DEST OUTDIR`, which folds this manifest into its own; see [converting a folder](#converting-a-folder).
 
 ### Inspecting and verifying
 

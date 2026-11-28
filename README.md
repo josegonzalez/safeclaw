@@ -109,6 +109,13 @@ safeclaw sandbox exec triage -- safeclaw-totext --json --max-pages 20 --ocr-lang
 
 `safeclaw-totext` exits 0 when every page was converted, 1 when it failed (a tool failed on the whole file, or the file is corrupt), 3 when the PDF is encrypted, 5 when the file is not a supported type, 6 when it wrote text but skipped something (pages over `--max-pages`, default `100`, or a page whose extraction or OCR timed out or failed), and 7 when a tool timed out before anything was written. `--ocr-threshold` (default `10`) is the number of characters below which a PDF page is OCR'd, `--ocr-dpi` (default `300`) and `--ocr-lang` (default `eng`) set how, and `--timeout` (default `1m`) limits each tool run.
 
+With `--recursive`, it converts every regular file under a folder, without following links, into one flat OUTDIR, named `NNN-<safe path>.p001.txt`, `.ocr.txt`, or `.text.txt` so names never collide and `cp-out --only '*.txt'` gets them all, and writes `manifest.txt` there mapping each output to its original with its type, size, pages, characters per page, OCR pages, and anything skipped, including files that were unsupported, encrypted, failed, or links. When the folder was opened by `safeclaw-expand`, its manifest is folded in, listing each email and archive with its outcome and flags. `--max-files` (default `10000`) and `--max-output` (default `512m`) limit the whole run. It exits 0 when everything converted, 6 when anything wasn't converted in full (a file that was partial, unsupported, encrypted, or failed, a link, a file past a limit, or a container `safeclaw-expand` left packed), and 1 when the run failed. See [converting a folder](docs/architecture.md#converting-a-folder).
+
+```bash
+# Open an email and its attachments, then turn everything in it into text with one manifest
+safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- sh -c 'safeclaw-expand /in/report.eml /sandbox/tree && safeclaw-totext --recursive /sandbox/tree /sandbox/out/text'
+```
+
 The `sandbox` variant also has `safeclaw-mail`, which opens untrusted emails (`.eml` files) without a decoder of your own: it writes the headers and the text of every body part, forwarded messages included, to `body.txt`, preferring `text/plain` in a `multipart/alternative` and otherwise turning HTML into text without its scripts or styles, and writes each attachment under a safe, numbered name. It decodes transfer encodings, charsets, and encoded words, strips control characters from everything it prints, and limits the number of parts, their nesting, the size of headers, and the size of what it writes. See [reading emails](docs/architecture.md#reading-emails).
 
 ```bash

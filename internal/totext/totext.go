@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -95,6 +96,8 @@ const (
 	ReasonTimedOut    = "timed-out"
 	ReasonUnsupported = "unsupported"
 	ReasonFailed      = "failed"
+	// ReasonOutputLimit is what a tree's --max-output left unconverted.
+	ReasonOutputLimit = "output-limit"
 )
 
 // Options configures Convert. Zero values take the defaults, except
@@ -274,6 +277,90 @@ type converter struct {
 	r    *Report
 	// tmp holds rendered pages.
 	tmp string
+	// prefix starts the name of every file written, "" for one file's
+	// OUTDIR, and NNN-NAME. in a tree's.
+	prefix string
+	// budget limits what a tree's files write; nil for no limit.
+	budget *budget
+	// created are the files created in root.
+	created []string
+	// limited is whether the budget ran out during the conversion.
+	limited bool
+}
+
+// errOutputLimit is a write that would take a tree's output past its
+// limit.
+var errOutputLimit = errors.New("over the output limit")
+
+// budget is what a tree's text files may still write.
+type budget struct {
+	max, used int64
+}
+
+// counted writes to w, counting what it writes against b when b is set.
+type counted struct {
+	w io.Writer
+	b *budget
+	n int64
+}
+
+func (w *counted) Write(p []byte) (int, error) {
+	if w.b != nil {
+		if w.b.used+int64(len(p)) > w.b.max {
+			return 0, errOutputLimit
+		}
+		w.b.used += int64(len(p))
+	}
+	n, err := w.w.Write(p)
+	w.n += int64(n)
+	if w.b != nil {
+		w.b.used -= int64(len(p) - n)
+	}
+	return n, err
+}
+
+// output counts what is written to f against the budget.
+func (c *converter) output(f io.Writer) *counted {
+	return &counted{w: f, b: c.budget}
+}
+
+// release gives n bytes back to the budget, for a file removed or
+// replaced.
+func (c *converter) release(n int64) {
+	if c.budget != nil {
+		c.budget.used -= n
+	}
+}
+
+// drop removes the file name and gives its n bytes back.
+func (c *converter) drop(name string, n int64) error {
+	c.release(n)
+	return os.Remove(filepath.Join(c.root, name))
+}
+
+// limit records that the budget ran out, skipping pages first to last
+// when there are any.
+func (c *converter) limit(first, last int, tool string) {
+	c.limited = true
+	if first <= last {
+		c.skip(Skip{FirstPage: first, LastPage: last, Reason: ReasonOutputLimit, Tool: tool, Detail: fmt.Sprintf("over the %d byte output limit", c.budget.max)})
+	}
+}
+
+// stopOnError passes writes to w, and stops the tool with the error when
+// one fails, so a tool whose output can't be written isn't left waiting
+// for its timeout.
+type stopOnError struct {
+	w    io.Writer
+	stop context.CancelCauseFunc
+}
+
+func (s stopOnError) Write(p []byte) (int, error) {
+	n, err := s.w.Write(p)
+	if err != nil {
+		s.stop(err)
+	}
+	return n, err
 }
 
 // errTimedOut is a tool that ran past its timeout.
@@ -312,13 +399,19 @@ func (c *converter) done() (Kind, error) {
 }
 
 // tool runs a tool under its timeout. It returns errTimedOut when the
-// timeout ended it, and ctx's error when ctx ended it.
+// timeout ended it, ctx's error when ctx ended it, and the error writing
+// its output when that ended it.
 func (c *converter) tool(ctx context.Context, stdout io.Writer, name string, args ...string) error {
-	tctx, cancel := context.WithTimeout(ctx, c.o.Timeout)
+	wctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	tctx, cancel := context.WithTimeout(wctx, c.o.Timeout)
 	defer cancel()
-	err := c.o.Runner.Run(tctx, stdout, name, args...)
+	err := c.o.Runner.Run(tctx, stopOnError{w: stdout, stop: stop}, name, args...)
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if cause := context.Cause(wctx); cause != nil {
+		return cause
 	}
 	if err != nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
 		return errTimedOut{name}
@@ -353,7 +446,23 @@ var passwordRe = regexp.MustCompile(`(?i)incorrect password`)
 // create makes a new file in the output directory, refusing to follow or
 // replace anything already there.
 func (c *converter) create(name string) (*os.File, error) {
-	return os.OpenFile(filepath.Join(c.root, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	f, err := os.OpenFile(filepath.Join(c.root, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
+	if err == nil {
+		c.created = append(c.created, name)
+	}
+	return f, err
+}
+
+// removeCreated removes every file the conversion created, for one that
+// didn't end OK or Partial in a tree.
+func (c *converter) removeCreated() error {
+	var errs []error
+	for _, name := range c.created {
+		if err := os.Remove(filepath.Join(c.root, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func (c *converter) add(f File) {
@@ -388,7 +497,20 @@ func (c *converter) pdf(ctx context.Context) (Kind, error) {
 	n := min(info.pages, c.o.MaxPages)
 	width := max(3, len(strconv.Itoa(n)))
 	for p := 1; p <= n; p++ {
-		if err := c.page(ctx, info, p, fmt.Sprintf("p%0*d.txt", width, p)); err != nil {
+		err := c.page(ctx, info, p, fmt.Sprintf("%sp%0*d.txt", c.prefix, width, p))
+		if errors.Is(err, errOutputLimit) {
+			// The pages after the one the output ran out on are skipped,
+			// and that one too unless it has a file or a skip already.
+			first := p
+			if k := len(c.r.Files); k > 0 && c.r.Files[k-1].Page == p {
+				first = p + 1
+			} else if k := len(c.r.Skipped); k > 0 && c.r.Skipped[k-1].LastPage == p {
+				first = p + 1
+			}
+			c.limit(first, n, "")
+			break
+		}
+		if err != nil {
 			if needsPassword(err) {
 				c.skip(Skip{Reason: ReasonEncrypted, Tool: "pdftotext", Detail: "the PDF's permissions don't allow extracting its text"})
 				return Encrypted, errors.New("the PDF is encrypted and doesn't allow extracting its text")
@@ -404,13 +526,15 @@ func (c *converter) pdf(ctx context.Context) (Kind, error) {
 
 // page extracts page p into name. A tool timing out or failing on the
 // page is recorded as a Skip; the error is for anything that ends the
-// conversion.
+// conversion, or errOutputLimit when a tree's output ran out, with the
+// page's text kept when it was written in full.
 func (c *converter) page(ctx context.Context, info *pdfInfo, p int, name string) error {
 	f, err := c.create(name)
 	if err != nil {
 		return err
 	}
-	cw := newCleaner(f)
+	out := c.output(f)
+	cw := newCleaner(out)
 	pg := strconv.Itoa(p)
 	err = c.tool(ctx, cw, "pdftotext", "-layout", "-enc", "UTF-8", "-f", pg, "-l", pg, "--", c.src, "-")
 	if cerr := cw.Close(); err == nil {
@@ -418,6 +542,9 @@ func (c *converter) page(ctx context.Context, info *pdfInfo, p int, name string)
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
+	}
+	if errors.Is(err, errOutputLimit) {
+		return errors.Join(err, c.drop(name, out.n))
 	}
 	textOK := err == nil
 	chars := cw.Chars()
@@ -433,26 +560,30 @@ func (c *converter) page(ctx context.Context, info *pdfInfo, p int, name string)
 		chars = 0
 	}
 	ocr := false
+	var limited error
 	if c.o.OCRThreshold > 0 && chars < c.o.OCRThreshold {
-		n, used, err := c.ocrPage(ctx, info, p, name, chars, !textOK)
-		if err != nil {
+		n, used, err := c.ocrPage(ctx, info, p, name, chars, !textOK, out.n)
+		switch {
+		case errors.Is(err, errOutputLimit):
+			limited = err
+		case err != nil:
 			return err
-		}
-		if used {
+		case used:
 			ocr, chars, textOK = true, n, true
 		}
 	}
 	if !textOK {
-		return os.Remove(filepath.Join(c.root, name))
+		return errors.Join(limited, c.drop(name, out.n))
 	}
 	c.add(File{Page: p, Path: name, Chars: chars, OCR: ocr})
-	return nil
+	return limited
 }
 
 // ocrPage renders page p and OCRs it. When the OCR text has at least
-// textChars characters, or replace is set, it replaces the page's file
-// and used is true.
-func (c *converter) ocrPage(ctx context.Context, info *pdfInfo, p int, name string, textChars int, replace bool) (chars int, used bool, err error) {
+// textChars characters, or replace is set, it replaces the page's file,
+// which held textSize bytes, and used is true. It returns errOutputLimit,
+// with the page skipped, when a tree's output ran out.
+func (c *converter) ocrPage(ctx context.Context, info *pdfInfo, p int, name string, textChars int, replace bool, textSize int64) (chars int, used bool, err error) {
 	if c.tmp == "" {
 		if c.tmp, err = os.MkdirTemp("", "safeclaw-totext-*"); err != nil {
 			return 0, false, err
@@ -479,7 +610,8 @@ func (c *converter) ocrPage(ctx context.Context, info *pdfInfo, p int, name stri
 	}
 	tmpPath := filepath.Join(c.root, tmpName)
 	defer os.Remove(tmpPath)
-	cw := newCleaner(f)
+	out := c.output(f)
+	cw := newCleaner(out)
 	err = c.tool(ctx, cw, "tesseract", img, "stdout", "-l", c.o.OCRLang, "--dpi", strconv.Itoa(dpi))
 	if cerr := cw.Close(); err == nil {
 		err = cerr
@@ -487,7 +619,13 @@ func (c *converter) ocrPage(ctx context.Context, info *pdfInfo, p int, name stri
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	if errors.Is(err, errOutputLimit) {
+		c.release(out.n)
+		c.limit(p, p, "tesseract")
+		return 0, false, err
+	}
 	if err != nil {
+		c.release(out.n)
 		s, ok := toolSkip(err, "tesseract", p, p)
 		if !ok {
 			return 0, false, err
@@ -496,11 +634,14 @@ func (c *converter) ocrPage(ctx context.Context, info *pdfInfo, p int, name stri
 		return 0, false, nil
 	}
 	if !replace && cw.Chars() < textChars {
+		c.release(out.n)
 		return 0, false, nil
 	}
 	if err := os.Rename(tmpPath, filepath.Join(c.root, name)); err != nil {
+		c.release(out.n)
 		return 0, false, err
 	}
+	c.release(textSize)
 	return cw.Chars(), true, nil
 }
 
@@ -525,17 +666,26 @@ func (c *converter) dpi(info *pdfInfo, p int) int {
 
 func (c *converter) image(ctx context.Context) (Kind, error) {
 	c.r.Pages = 1
-	f, err := c.create(ImageOutput)
+	name := c.prefix + ImageOutput
+	f, err := c.create(name)
 	if err != nil {
 		return Failed, err
 	}
-	cw := newCleaner(f)
+	out := c.output(f)
+	cw := newCleaner(out)
 	err = c.tool(ctx, cw, "tesseract", c.src, "stdout", "-l", c.o.OCRLang)
 	if cerr := cw.Close(); err == nil {
 		err = cerr
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
+	}
+	if errors.Is(err, errOutputLimit) {
+		if err := c.drop(name, out.n); err != nil {
+			return Failed, err
+		}
+		c.limit(0, 0, "tesseract")
+		return c.done()
 	}
 	if err != nil {
 		var to errTimedOut
@@ -545,7 +695,7 @@ func (c *converter) image(ctx context.Context) (Kind, error) {
 		}
 		return Failed, err
 	}
-	c.add(File{Page: 1, Path: ImageOutput, Chars: cw.Chars(), OCR: true})
+	c.add(File{Page: 1, Path: name, Chars: cw.Chars(), OCR: true})
 	return c.done()
 }
 
@@ -556,11 +706,13 @@ func (c *converter) text() (Kind, error) {
 		return Failed, err
 	}
 	defer in.Close()
-	f, err := c.create(TextOutput)
+	name := c.prefix + TextOutput
+	f, err := c.create(name)
 	if err != nil {
 		return Failed, err
 	}
-	cw := newCleaner(f)
+	out := c.output(f)
+	cw := newCleaner(out)
 	_, err = io.Copy(cw, in)
 	if cerr := cw.Close(); err == nil {
 		err = cerr
@@ -568,10 +720,17 @@ func (c *converter) text() (Kind, error) {
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	if errors.Is(err, errOutputLimit) {
+		if err := c.drop(name, out.n); err != nil {
+			return Failed, err
+		}
+		c.limit(0, 0, "")
+		return c.done()
+	}
 	if err != nil {
 		return Failed, err
 	}
-	c.add(File{Page: 1, Path: TextOutput, Chars: cw.Chars()})
+	c.add(File{Page: 1, Path: name, Chars: cw.Chars()})
 	return c.done()
 }
 

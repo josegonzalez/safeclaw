@@ -131,3 +131,61 @@ func TestTotextProgramName(t *testing.T) {
 		t.Errorf("--help exit = %d", code)
 	}
 }
+
+// TestTotextRecursive converts a folder of text files, which need no
+// tools, through the command.
+func TestTotextRecursive(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	if err := os.MkdirAll(filepath.Join(src, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{"a/one.txt": "one", "two.txt": "two \x1b[2J"} {
+		if err := os.WriteFile(filepath.Join(src, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, err := run(t, newTotextCommand("totext"), "--recursive", src, filepath.Join(dir, "a"))
+	want := "tree\tok\t2\t10\tnone\t-\n" +
+		"file\t001\ta/one.txt\tok\ttext\t3\t1\t-\n" +
+		"page\t001\t1\t3\t001-a_one.txt.text.txt\t-\n" +
+		"file\t002\ttwo.txt\tok\ttext\t8\t1\t-\n" +
+		"page\t002\t1\t6\t002-two.txt.text.txt\t-\n"
+	if err != nil || out != want {
+		t.Errorf("got %q, %v, want %q", out, err, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "a", totext.ManifestText)); err != nil || string(b) != want {
+		t.Errorf("manifest.txt = %q, %v", b, err)
+	}
+
+	out, err = run(t, newTotextCommand("totext"), "--recursive", "--json", "--max-files", "1", src, filepath.Join(dir, "b"))
+	var r totext.TreeReport
+	if !errors.Is(err, exitCodeError{6}) || json.Unmarshal([]byte(out), &r) != nil || r.Status != "partial" || r.Code != 6 || len(r.Entries) != 2 ||
+		r.Entries[1].Status != totext.StatusSkipped || r.Entries[1].Skipped[0].Reason != totext.ReasonFileLimit {
+		t.Errorf("--max-files = %q, %v", out, err)
+	}
+	if _, err := run(t, newTotextCommand("totext"), "--recursive", "--max-output", "4", src, filepath.Join(dir, "c")); !errors.Is(err, exitCodeError{6}) {
+		t.Errorf("--max-output: %v", err)
+	}
+
+	for _, args := range [][]string{
+		{"--recursive", src, filepath.Join(src, "out")},
+		{"--recursive", "--max-output", "0", src, filepath.Join(dir, "d")},
+		{"--recursive", "--max-output", "lots", src, filepath.Join(dir, "d")},
+		{"--recursive", "--max-files", "0", src, filepath.Join(dir, "d")},
+		{"--max-files", "5", filepath.Join(src, "two.txt"), filepath.Join(dir, "d")},
+		{"--max-output", "5m", filepath.Join(src, "two.txt"), filepath.Join(dir, "d")},
+		{"--recursive", filepath.Join(src, "two.txt"), filepath.Join(dir, "d")},
+	} {
+		if _, err := run(t, newTotextCommand("totext"), args...); !errors.Is(err, exitCodeError{1}) {
+			t.Errorf("%q: %v", args, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "d")); err == nil {
+		t.Error("a usage error created OUTDIR")
+	}
+	out, err = run(t, newTotextCommand("totext"), "--recursive", "--json", "--max-output", "x", src, filepath.Join(dir, "e"))
+	if !errors.Is(err, exitCodeError{1}) || json.Unmarshal([]byte(out), &r) != nil || r.Status != "failed" || r.Error == "" || r.Entries == nil {
+		t.Errorf("--json failure = %q, %v", out, err)
+	}
+}
