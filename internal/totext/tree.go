@@ -71,6 +71,9 @@ type TreeOptions struct {
 	// write would pass it, the rest is skipped. The manifest doesn't
 	// count.
 	MaxOutput int64
+	// Replace lets OUTDIR hold an earlier run's results, which are
+	// replaced once the run succeeds.
+	Replace bool
 }
 
 // DefaultTreeOptions returns the defaults, with the real tools.
@@ -101,6 +104,9 @@ type TreeReport struct {
 	Code   int    `json:"code"`
 	// Error says why the run failed.
 	Error string `json:"error,omitempty"`
+	// Warning says what went wrong after the run succeeded: earlier
+	// results that TreeOptions.Replace swapped out but couldn't remove.
+	Warning string `json:"warning,omitempty"`
 	// Expand is ExpandNone, ExpandFolded, or ExpandInvalid, and
 	// ExpandError why a manifest was invalid.
 	Expand      string `json:"expand"`
@@ -179,6 +185,9 @@ type tree struct {
 	width   int
 	budget  *budget
 	limited bool
+	// prev is the earlier run's results being replaced, and dest then a
+	// new directory beside them.
+	prev *previous
 }
 
 // ConvertTree converts every regular file under src into outdir, flat,
@@ -205,6 +214,14 @@ type tree struct {
 // and not a symbolic link, and it can't be inside src. A file that fails
 // leaves nothing in outdir. The run fails, emptying outdir without
 // following links, for a usage or I/O error or ctx ending.
+//
+// With o.Replace, outdir may also hold an earlier run's results: a
+// ManifestText that is exactly what WriteText writes for a run that ended
+// ok or partial, and only the regular files it lists as outputs. The run
+// then writes into a new directory beside outdir, which takes outdir's
+// place once the run succeeds, in one step where the filesystem can swap
+// directories; the earlier results are then removed without following
+// links. A failed run leaves them as they were.
 func ConvertTree(ctx context.Context, src, outdir string, o TreeOptions) *TreeReport {
 	r := &TreeReport{Schema: Schema, Expand: ExpandNone, Entries: []Entry{}}
 	t := &tree{o: o, r: r, dirs: map[string]bool{}}
@@ -212,7 +229,14 @@ func ConvertTree(ctx context.Context, src, outdir string, o TreeOptions) *TreeRe
 		if ctx.Err() != nil {
 			err = fmt.Errorf("interrupted: %w", err)
 		}
-		if t.dest != "" {
+		switch {
+		case t.prev != nil && t.dest != "":
+			// replace may have given it OUTDIR's permissions.
+			_ = os.Chmod(t.dest, 0o700)
+			if cerr := os.RemoveAll(t.dest); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("removing %s: %w", t.dest, cerr))
+			}
+		case t.dest != "":
 			if cerr := emptyDir(t.dest); cerr != nil {
 				err = errors.Join(err, fmt.Errorf("emptying %s: %w", outdir, cerr))
 			}
@@ -246,12 +270,22 @@ func (t *tree) run(ctx context.Context, src, outdir string) error {
 	} else if within(root, out) {
 		return fmt.Errorf("%s is inside %s", outdir, src)
 	}
+	if t.o.Replace {
+		if t.prev, err = checkPrevious(outdir); err != nil {
+			return err
+		}
+	}
 	if err := t.walk(ctx); err != nil {
 		return err
 	}
 	m := t.readManifest()
 	t.entries(m)
-	if t.dest, err = prepareDest(outdir); err != nil {
+	if t.prev != nil {
+		err = t.prepareReplace()
+	} else {
+		t.dest, err = prepareDest(outdir)
+	}
+	if err != nil {
 		return err
 	}
 	if within(root, t.dest) {
@@ -287,7 +321,57 @@ func (t *tree) run(ctx context.Context, src, outdir string) error {
 		}
 	}
 	t.r.Status, t.r.Code = kind.String(), int(kind)
-	return t.writeManifest()
+	if err := t.writeManifest(); err != nil {
+		return err
+	}
+	if t.prev != nil {
+		return t.replace(ctx, outdir)
+	}
+	return nil
+}
+
+// prepareReplace makes the directory the run writes into in place of the
+// earlier results: beside them, so it can take their place in one rename
+// on the same filesystem.
+func (t *tree) prepareReplace() error {
+	dest, err := os.MkdirTemp(filepath.Dir(t.prev.path), "."+filepath.Base(t.prev.path)+".totext-*")
+	if err != nil {
+		return err
+	}
+	t.dest = dest
+	return nil
+}
+
+// replace puts the run's results in place of the earlier ones, checking
+// first that outdir is still the directory checked at the start and still
+// holds only earlier results, and then removes those. The new directory
+// gets OUTDIR's permissions. Once they are swapped, nothing fails the run.
+func (t *tree) replace(ctx context.Context, outdir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.Chmod(t.dest, t.prev.info.Mode().Perm()); err != nil {
+		return err
+	}
+	if fi, err := os.Lstat(t.prev.path); err != nil {
+		return err
+	} else if !os.SameFile(fi, t.prev.info) {
+		return fmt.Errorf("%s changed during the run", outdir)
+	}
+	if err := checkResults(t.prev.path); err != nil {
+		return fmt.Errorf("%s changed during the run: %w", outdir, err)
+	}
+	old, err := replaceDir(t.dest, t.prev)
+	if err != nil {
+		return fmt.Errorf("replacing %s: %w", outdir, err)
+	}
+	t.dest = t.prev.path
+	// OUTDIR's permissions may not let its files be removed.
+	_ = os.Chmod(old, 0o700)
+	if err := os.RemoveAll(old); err != nil {
+		t.r.Warning = fmt.Sprintf("the earlier results couldn't all be removed from %s: %v", old, err)
+	}
+	return nil
 }
 
 // resolveOut returns outdir's absolute path with the links in it

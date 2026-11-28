@@ -175,6 +175,8 @@ func TestTotextRecursive(t *testing.T) {
 		{"--recursive", "--max-files", "0", src, filepath.Join(dir, "d")},
 		{"--max-files", "5", filepath.Join(src, "two.txt"), filepath.Join(dir, "d")},
 		{"--max-output", "5m", filepath.Join(src, "two.txt"), filepath.Join(dir, "d")},
+		{"--replace", filepath.Join(src, "two.txt"), filepath.Join(dir, "d")},
+		{"--recursive", src, filepath.Join(dir, "a")},
 		{"--recursive", filepath.Join(src, "two.txt"), filepath.Join(dir, "d")},
 	} {
 		if _, err := run(t, newTotextCommand("totext"), args...); !errors.Is(err, exitCodeError{1}) {
@@ -184,6 +186,21 @@ func TestTotextRecursive(t *testing.T) {
 	if _, err := os.Lstat(filepath.Join(dir, "d")); err == nil {
 		t.Error("a usage error created OUTDIR")
 	}
+	// --replace rebuilds an earlier run's OUTDIR from the current tree.
+	if err := os.Remove(filepath.Join(src, "two.txt")); err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(t, newTotextCommand("totext"), "--recursive", "--replace", src, filepath.Join(dir, "a"))
+	want = "tree\tok\t1\t3\tnone\t-\n" +
+		"file\t001\ta/one.txt\tok\ttext\t3\t1\t-\n" +
+		"page\t001\t1\t3\t001-a_one.txt.text.txt\t-\n"
+	if err != nil || out != want {
+		t.Errorf("--replace = %q, %v, want %q", out, err, want)
+	}
+	if names, err := os.ReadDir(filepath.Join(dir, "a")); err != nil || len(names) != 2 {
+		t.Errorf("after --replace: %v, %v", names, err)
+	}
+
 	out, err = run(t, newTotextCommand("totext"), "--recursive", "--json", "--max-output", "x", src, filepath.Join(dir, "e"))
 	if !errors.Is(err, exitCodeError{1}) || json.Unmarshal([]byte(out), &r) != nil || r.Status != "failed" || r.Error == "" || r.Entries == nil {
 		t.Errorf("--json failure = %q, %v", out, err)

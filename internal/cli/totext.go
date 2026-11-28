@@ -36,7 +36,7 @@ Output is printed as tab-separated lines. The first is "type", the detected type
 
 With --recursive, SRC is a directory and the exit codes are for the whole run:
   0  ok: every file was converted
-  1  failed: a usage or I/O error, OUTDIR is not a missing or empty directory or is inside SRC, or the run was interrupted; OUTDIR is emptied
+  1  failed: a usage or I/O error, OUTDIR is not a missing or empty directory (or, with --replace, one holding only an earlier run's results) or is inside SRC, or the run was interrupted; OUTDIR is emptied, or with --replace left as it was
   6  partial: something wasn't converted in full: a file that was partial, encrypted, unsupported, timed out, or failed, a link or special file, a file past --max-files or --max-output, or an email or archive safeclaw-expand left packed
 
 The manifest, OUTDIR/` + totext.ManifestText + `, holds the same tab-separated lines that are printed. The first is "tree": the status, the number of entries, the bytes of text written, and the safeclaw-expand manifest (folded, none, or invalid) with why it was invalid, or -. Then, for each entry, its INDEX (zero-padded, as its outputs start with it) on every line: a "file" line with INDEX, the path in SRC, the status (a single file's, or skipped), the type, the size, the page count, and flags (ENCRYPTED, EXPAND-OUTPUT for a file safeclaw-expand wrote, or -); an "error" line with what went wrong, when something did; a "container" line for an email or archive in safeclaw-expand's manifest, with its kind, depth, outcome, flags, parent, and error; "page" lines with the page, characters, output file, and OCR or -; and "skipped" lines as above, a skipped entry's reason being link, special, file-limit, output-limit, unpacked, expand-manifest, or missing. --json prints one JSON object instead.`
@@ -45,7 +45,7 @@ The manifest, OUTDIR/` + totext.ManifestText + `, holds the same tab-separated l
 // safeclaw, or safeclaw-totext when run through that link.
 func newTotextCommand(use string) *cobra.Command {
 	o := totext.DefaultOptions()
-	var asJSON, recursive bool
+	var asJSON, recursive, replace bool
 	var maxFiles int
 	var maxOutput string
 	cmd := &cobra.Command{
@@ -60,12 +60,14 @@ func newTotextCommand(use string) *cobra.Command {
 			"Every tool runs under its own --timeout, in a process group of its own that is killed when the timeout passes, and file names reach the tools as absolute paths in their arguments, never through a shell.\n\n" +
 			"With --recursive, the first argument is a directory, SRC, and every regular file under it is converted, without following links, in lexical order, into OUTDIR, flat: each output is named NNN-NAME.pNNN.txt, NNN-NAME.ocr.txt, or NNN-NAME.text.txt, NNN being the file's index and NAME its path made safe as safeclaw-mail makes attachment names safe, so names never collide and match cp-out --only '*.txt'. OUTDIR can't be inside SRC. " +
 			"Every file gets an entry in the manifest, " + totext.ManifestText + " in OUTDIR, whether it was converted or not; a file that fails leaves nothing in OUTDIR. --max-files limits how many files are converted, and --max-output the total size of the text written; what is past either is skipped. " +
-			"When SRC holds a safeclaw-expand manifest.json, each email and archive in it is listed with its outcome and flags, one that was opened is skipped since its files are converted, manifest.json is skipped, and body.txt and parts.txt are converted and flagged EXPAND-OUTPUT. A manifest.json that isn't a valid safeclaw-expand manifest is reported and converted as a plain file.\n\n" +
+			"When SRC holds a safeclaw-expand manifest.json, each email and archive in it is listed with its outcome and flags, one that was opened is skipped since its files are converted, manifest.json is skipped, and body.txt and parts.txt are converted and flagged EXPAND-OUTPUT. A manifest.json that isn't a valid safeclaw-expand manifest is reported and converted as a plain file. " +
+			"With --replace, OUTDIR may also hold an earlier --recursive run's results, so a rerun rebuilds it from the current tree: its " + totext.ManifestText + " must be exactly as this command writes it for a run that ended ok or partial, and everything else in it a regular file that manifest lists as an output, or it is refused. The run writes into a new directory beside OUTDIR, which takes OUTDIR's place once the run succeeds, and the earlier results are then removed without following links; a run that fails leaves them as they were.\n\n" +
 			totextHelp,
 		Example: `  safeclaw sandbox exec --ephemeral -v ~/Downloads:/in -- safeclaw-totext /in/report.pdf /sandbox/out/report
   safeclaw-totext --json --max-pages 20 --ocr-lang eng+deu /sandbox/in/1-scan.pdf /sandbox/out/scan
   safeclaw-totext --ocr-threshold 0 --timeout 30s statement.pdf out
-  safeclaw-expand /sandbox/in/1-report.eml /sandbox/tree && safeclaw-totext --recursive /sandbox/tree /sandbox/out/text`,
+  safeclaw-expand /sandbox/in/1-report.eml /sandbox/tree && safeclaw-totext --recursive /sandbox/tree /sandbox/out/text
+  safeclaw-totext --recursive --replace /sandbox/tree /sandbox/out/text`,
 		Args:          cobra.ExactArgs(2),
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -75,9 +77,9 @@ func newTotextCommand(use string) *cobra.Command {
 				if err != nil || n <= 0 {
 					return totextTreeFailure(cmd, asJSON, fmt.Errorf("--max-output: invalid size %q: want a positive number of bytes with an optional k, m, g, or t suffix", maxOutput))
 				}
-				return runTotextTree(cmd, asJSON, args[0], args[1], totext.TreeOptions{Options: o, MaxFiles: maxFiles, MaxOutput: n})
+				return runTotextTree(cmd, asJSON, args[0], args[1], totext.TreeOptions{Options: o, MaxFiles: maxFiles, MaxOutput: n, Replace: replace})
 			}
-			for _, name := range []string{"max-files", "max-output"} {
+			for _, name := range []string{"max-files", "max-output", "replace"} {
 				if cmd.Flags().Changed(name) {
 					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s: --%s needs --recursive\n", cmd.Root().Name(), name)
 					return exitCodeError{int(totext.Failed)}
@@ -112,6 +114,7 @@ func newTotextCommand(use string) *cobra.Command {
 	cmd.Flags().BoolVar(&recursive, "recursive", false, "convert every regular file under the directory SRC into OUTDIR, flat, with a manifest")
 	cmd.Flags().IntVar(&maxFiles, "max-files", totext.DefaultMaxFiles, "with --recursive, how many files to convert; the rest are skipped")
 	cmd.Flags().StringVar(&maxOutput, "max-output", "512m", "with --recursive, limit on the total size of the text files written (k, m, g, or t suffix)")
+	cmd.Flags().BoolVar(&replace, "replace", false, "with --recursive, let OUTDIR hold an earlier run's results, and replace them once this run succeeds")
 	return cmd
 }
 
@@ -133,6 +136,9 @@ func runTotextTree(cmd *cobra.Command, asJSON bool, src, outdir string, o totext
 		name := cmd.Root().Name()
 		if r.Error != "" {
 			_, _ = fmt.Fprintf(stderr, "%s: %s: %s\n", name, r.Status, termtext.Escape(r.Error))
+		}
+		if r.Warning != "" {
+			_, _ = fmt.Fprintf(stderr, "%s: warning: %s\n", name, termtext.Escape(r.Warning))
 		}
 		if r.ExpandError != "" {
 			_, _ = fmt.Fprintf(stderr, "%s: %s is not a valid safeclaw-expand manifest, so it was converted as a plain file: %s\n", name, expand.ManifestFile, termtext.Escape(r.ExpandError))
