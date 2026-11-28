@@ -149,7 +149,7 @@ safeclaw sandbox cp-in triage ./report.eml
 safeclaw sandbox exec triage -- safeclaw-expand /sandbox/in /sandbox/tree
 ```
 
-Running it again on the same DEST resumes from the manifest, which is checked first so code in the sandbox can't make it trust a path outside DEST. Containers already opened, rejected, skipped, or past `--depth` are kept, the ones left `NEEDS-PASSWORD`, `TOO-LARGE`, or `FAILED` are tried again with the new run's password and `--max-size`, which counts what is already in DEST, and new inputs are opened as usual. `--skip PATH`, with the path as the lines print it, leaves a container packed and flagged `SKIPPED` on that run and later ones, and `--unskip PATH` opens it on a later run. `--plan` prints the containers not opened yet with their entries or parts, and the rejected ones one line each, without opening anything.
+Running it again on the same DEST resumes from the manifest, which is checked first so code in the sandbox can't make it trust a path outside DEST. Containers already opened, rejected, skipped, held, or past `--depth` are kept, the ones left `NEEDS-PASSWORD`, `TOO-LARGE`, or `FAILED` are tried again with the new run's password and `--max-size`, which counts what is already in DEST, and new inputs are opened as usual. `--skip PATH`, with the path as the lines print it, leaves a container packed and flagged `SKIPPED` on that run and later ones, and `--unskip PATH` opens it on a later run. `--plan` prints the containers not opened yet with their entries or parts, and the rejected ones one line each, without opening anything.
 
 ```bash
 # Open what opens, leaving a zip to decide on later
@@ -158,6 +158,18 @@ safeclaw sandbox exec triage -- safeclaw-expand --skip 2-logs.zip /in/report.eml
 # See what is still packed, then try again with the password the email gave
 safeclaw sandbox exec triage -- safeclaw-expand --plan /sandbox/out
 SAFECLAW_UNPACK_PASSWORD=... safeclaw sandbox exec -e SAFECLAW_UNPACK_PASSWORD triage -- safeclaw-expand /sandbox/out
+```
+
+To see every archive's listing before it is opened, including the ones attached to emails, give `--hold mail-archives`. Emails are opened as usual, but every archive that came out of one, including one attached to a message forwarded in it, is left packed and flagged `HELD`, so `--plan` lists its entries. A rerun opens a held archive only with `--release PATH` (repeatable) or `--release-all`, and `--skip PATH` keeps one packed for good; anything not released stays held. Archives inside a released archive are opened as usual, and so are emails inside it, but the archives in those emails came out of an email, so they are held again. Like `--depth` and `--no-mail`, `--hold` is DEST's, set by its first run, so every rerun gives it too.
+
+```bash
+# Open the emails, holding the archives they carry, and see what is in them
+safeclaw sandbox exec triage -- safeclaw-expand --hold mail-archives /sandbox/in /sandbox/tree
+safeclaw sandbox exec triage -- safeclaw-expand --plan --hold mail-archives /sandbox/tree
+
+# Open one of them, or all of them but one
+safeclaw sandbox exec triage -- safeclaw-expand --hold mail-archives --release 1-1-report.eml.unpacked/1-logs.zip /sandbox/tree
+safeclaw sandbox exec triage -- safeclaw-expand --hold mail-archives --release-all --skip 1-1-report.eml.unpacked/2-tools.zip /sandbox/tree
 ```
 
 `safeclaw-expand` exits 0 when the run finished, even with containers left packed, since the manifest and the flags say what was; and 1 when the run itself failed: a usage or I/O error, an input that is missing or not a regular file or a directory, an input directory that is DEST, holds it, or is inside it, a DEST that isn't missing or empty and has no manifest, a manifest that was refused, or an interrupt. A first run that fails empties DEST, and a rerun that fails leaves it as it was.

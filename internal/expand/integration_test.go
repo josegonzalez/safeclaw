@@ -216,3 +216,53 @@ func TestIntegrationResume(t *testing.T) {
 		t.Errorf("unskipped = %+v", c)
 	}
 }
+
+// TestIntegrationHold runs the real 7z with --hold mail-archives on an
+// email carrying a zip that holds another zip, and a message forwarding an
+// email that carries a zip: both zips that came out of emails are held,
+// listed by the plan, and opened only once released, the zip in the
+// released one as usual. A file that only starts like a zip isn't held.
+func TestIntegrationHold(t *testing.T) {
+	z := sevenZip(t)
+	inner := makeZip(t, zipFile{name: "deep.txt", body: "deep\n"})
+	files := makeZip(t, zipFile{name: "inner.zip", body: inner}, zipFile{name: "notes.txt", body: "notes\n"})
+	fwd := forwarding(email("inner", "the inner one", "fwd.zip", makeZip(t, zipFile{name: "f.txt", body: "f\n"})))
+	in := writeInputs(t, "report.eml", email("report", "see attached", "files.zip", files, "fake.zip", zipHead+"not really"), "fwd.eml", fwd)
+	o := Options{Runner: z, MaxSize: 1 << 20, Depth: 3, Hold: []string{HoldMailArchives}}
+	dest, m := run(t, nil, o, in...)
+	checkSummary(t, m, []string{
+		"1-report.eml email 0 UNPACKED -> 1-report.eml.unpacked",
+		"1-report.eml.unpacked/1-files.zip zip 1 HELD",
+		"2-fwd.eml email 0 UNPACKED -> 2-fwd.eml.unpacked",
+		"2-fwd.eml.unpacked/1-fwd.zip zip 2 HELD",
+	})
+
+	items, err := Plan(t.Context(), nil, dest, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || len(items[0].Entries) != 2 || items[0].Entries[0].Path != "inner.zip" || len(items[1].Entries) != 1 || items[1].Entries[0].Path != "f.txt" {
+		t.Errorf("plan = %+v", items)
+	}
+
+	o.Release = []string{"1-report.eml.unpacked/1-files.zip"}
+	m = rerun(t, nil, dest, o)
+	checkSummary(t, m, []string{
+		"1-report.eml email 0 UNPACKED -> 1-report.eml.unpacked",
+		"1-report.eml.unpacked/1-files.zip zip 1 UNPACKED -> 1-report.eml.unpacked/1-files.zip.unpacked",
+		"2-fwd.eml email 0 UNPACKED -> 2-fwd.eml.unpacked",
+		"2-fwd.eml.unpacked/1-fwd.zip zip 2 HELD",
+		"1-report.eml.unpacked/1-files.zip.unpacked/inner.zip zip 2 UNPACKED -> 1-report.eml.unpacked/1-files.zip.unpacked/inner.zip.unpacked",
+	})
+	if got := readFile(t, filepath.Join(dest, "1-report.eml.unpacked/1-files.zip.unpacked/inner.zip.unpacked/deep.txt")); got != "deep\n" {
+		t.Errorf("deep.txt = %q", got)
+	}
+	o.Release, o.ReleaseAll = nil, true
+	m = rerun(t, nil, dest, o)
+	if c := m.Containers[3]; c.Outcome != OutcomeUnpacked {
+		t.Errorf("released forwarded zip = %+v", c)
+	}
+	if got := readFile(t, filepath.Join(dest, "2-fwd.eml.unpacked/1-fwd.zip.unpacked/f.txt")); got != "f\n" {
+		t.Errorf("f.txt = %q", got)
+	}
+}

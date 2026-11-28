@@ -252,7 +252,7 @@ func TestRunTree(t *testing.T) {
 	if !slices.Equal(m.Inputs, []Input{{Path: "1-report.eml", Size: m.Inputs[0].Size, Kind: KindEmail, SHA256: sha256Of(email("report", "see attached", "files.zip", zipHead))}}) || m.Inputs[0].Size == 0 {
 		t.Errorf("inputs = %+v", m.Inputs)
 	}
-	if m.Schema != SchemaVersion || m.Status != "ok" || m.Code != 0 || m.Options != (ManifestOptions{Depth: 3, MaxSize: DefaultMaxSize, Mail: true}) {
+	if m.Schema != SchemaVersion || m.Status != "ok" || m.Code != 0 || !reflect.DeepEqual(m.Options, ManifestOptions{Depth: 3, MaxSize: DefaultMaxSize, Mail: true}) {
 		t.Errorf("manifest = %+v", m)
 	}
 	size, err := unpack.TreeSize(dest)

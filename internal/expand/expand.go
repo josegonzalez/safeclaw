@@ -60,10 +60,23 @@ const (
 	// OutcomeSkipped is a container left packed because its path is in the
 	// manifest's skip list.
 	OutcomeSkipped = "skipped"
+	// OutcomeHeld is an archive that came out of an email, left packed
+	// because the destination holds those until a run releases them.
+	OutcomeHeld = "held"
 )
 
-// FlagSkipped is OutcomeSkipped's flag.
-const FlagSkipped = "SKIPPED"
+// FlagSkipped is OutcomeSkipped's flag, and FlagHeld OutcomeHeld's.
+const (
+	FlagSkipped = "SKIPPED"
+	FlagHeld    = "HELD"
+)
+
+// HoldMailArchives is the hold kind that holds every archive that came out
+// of an email, including one in a forwarded message in it.
+const HoldMailArchives = "mail-archives"
+
+// HoldKinds are the hold kinds Options.Hold can name.
+var HoldKinds = []string{HoldMailArchives}
 
 // outcomeFlags are the flag each outcome gets, the same as
 // safeclaw-unpack's.
@@ -75,6 +88,7 @@ var outcomeFlags = map[string]string{
 	OutcomeFailed:        unpack.FlagFailed,
 	OutcomeDepthLimit:    unpack.FlagDepthLimit,
 	OutcomeSkipped:       FlagSkipped,
+	OutcomeHeld:          FlagHeld,
 }
 
 // retried reports whether a later run tries a container with outcome
@@ -110,6 +124,13 @@ type Options struct {
 	// Unskip are paths to take off the skip list, so a container skipped
 	// before is opened.
 	Unskip []string
+	// Hold are the hold kinds the destination has, HoldKinds' names. Like
+	// Depth and NoMail, they are the destination's, set by its first run.
+	Hold []string
+	// Release are held containers to open, by path in the destination.
+	Release []string
+	// ReleaseAll opens every held container but the ones skipped.
+	ReleaseAll bool
 	// Ignore, when set, is called with each entry of an input directory
 	// that is left out, a link, a directory, or anything else that isn't a
 	// regular file, and why.
@@ -148,6 +169,13 @@ type Options struct {
 // path on the list is left packed, flagged SKIPPED, unless it is past
 // Options.Depth.
 //
+// With HoldMailArchives in Options.Hold, every archive found in an email,
+// as an attachment of it or of a message forwarded in it, is left packed,
+// flagged HELD, unless it is past Options.Depth or skipped, until a later
+// run releases it with Options.Release or Options.ReleaseAll. An archive in
+// an archive, released or not held, is opened as usual, and an email in it
+// too, but the archives in that email are held again.
+//
 // An input that is missing or not a regular file or a directory (a link to
 // one is followed), or a usage error, fails the run before dest is touched. An
 // I/O error outside a container, or ctx ending, fails it too: a first run
@@ -171,6 +199,9 @@ func Run(ctx context.Context, inputs []string, dest string, o Options) (*Manifes
 		}
 		if len(o.Unskip) > 0 {
 			return nil, fmt.Errorf("%s is not skipped", o.Unskip[0])
+		}
+		if len(o.Release) > 0 {
+			return nil, fmt.Errorf("%s is not held: no container has that path", o.Release[0])
 		}
 		root, err := unpack.PrepareDest(dest)
 		if err != nil {
@@ -212,7 +243,7 @@ func checkOptions(inputs []string, dest string, o Options) ([]source, error) {
 	if o.Depth < 0 {
 		return nil, errors.New("the depth limit can't be negative")
 	}
-	for _, p := range append(slices.Clone(o.Skip), o.Unskip...) {
+	for _, p := range slices.Concat(o.Skip, o.Unskip, o.Release) {
 		if !fs.ValidPath(p) || p == "." {
 			return nil, fmt.Errorf("%q is not a path inside the destination", p)
 		}
@@ -221,6 +252,20 @@ func checkOptions(inputs []string, dest string, o Options) ([]source, error) {
 		if slices.Contains(o.Unskip, p) {
 			return nil, fmt.Errorf("%s is both skipped and unskipped", p)
 		}
+		if slices.Contains(o.Release, p) {
+			return nil, fmt.Errorf("%s is both skipped and released", p)
+		}
+	}
+	for _, h := range o.Hold {
+		if !slices.Contains(HoldKinds, h) {
+			return nil, fmt.Errorf("unknown hold kind %q: the kinds are %s", h, strings.Join(HoldKinds, ", "))
+		}
+	}
+	switch {
+	case o.ReleaseAll && len(o.Release) > 0:
+		return nil, errors.New("--release-all can't be given with --release")
+	case (o.ReleaseAll || len(o.Release) > 0) && len(o.Hold) == 0:
+		return nil, errors.New("nothing is held without --hold, so there is nothing to release")
 	}
 	return resolveInputs(inputs, dest, o.Ignore)
 }
@@ -234,6 +279,12 @@ type expander struct {
 	resume bool
 	// skip is the skip list.
 	skip map[string]bool
+	// holdMail is set when archives that came out of emails are held.
+	holdMail bool
+	// release are the held containers the run opens.
+	release map[string]bool
+	// kinds are the kind of every container recorded, by path.
+	kinds map[string]string
 	// reopen are the indexes of the containers already recorded that the
 	// run opens again.
 	reopen []int
@@ -252,9 +303,12 @@ func (x *expander) prepare() error {
 			return err
 		}
 	}
+	x.holdMail = slices.Contains(x.o.Hold, HoldMailArchives)
 	byPath := map[string]*Container{}
+	x.kinds = map[string]string{}
 	for i := range m.Containers {
 		byPath[m.Containers[i].Path] = &m.Containers[i]
+		x.kinds[m.Containers[i].Path] = m.Containers[i].Kind
 	}
 	x.skip = map[string]bool{}
 	for _, p := range m.Skip {
@@ -277,12 +331,34 @@ func (x *expander) prepare() error {
 		m.Skip = append(m.Skip, p)
 	}
 	sort.Strings(m.Skip)
-	m.Options = ManifestOptions{Depth: x.o.Depth, MaxSize: x.o.MaxSize, Mail: !x.o.NoMail, Password: x.o.Password != nil}
+	m.Options = ManifestOptions{Depth: x.o.Depth, MaxSize: x.o.MaxSize, Mail: !x.o.NoMail, Password: x.o.Password != nil, Hold: holdKinds(x.o.Hold)}
+	// A skipped container taken off the skip list is held, rather than
+	// opened, when the hold applies to it, unless it is released too.
+	for i, c := range m.Containers {
+		if c.Outcome == OutcomeSkipped && !x.skip[c.Path] && x.holds(c.Kind, c.Parent) {
+			x.set(i, Container{Path: c.Path, Kind: c.Kind, Depth: c.Depth, Parent: c.Parent}, OutcomeHeld)
+		}
+	}
+	x.release = map[string]bool{}
+	for _, p := range x.o.Release {
+		switch c := byPath[p]; {
+		case c == nil:
+			return fmt.Errorf("%s is not held: no container has that path", p)
+		case c.Outcome != OutcomeHeld:
+			return fmt.Errorf("%s is not held, it is %s", p, c.Flags[0])
+		}
+		x.release[p] = true
+	}
+	for _, c := range m.Containers {
+		if x.o.ReleaseAll && c.Outcome == OutcomeHeld && !x.skip[c.Path] {
+			x.release[c.Path] = true
+		}
+	}
 	for i, c := range m.Containers {
 		switch {
-		case c.Outcome == OutcomeSkipped && !x.skip[c.Path], retried(c.Outcome) && !x.skip[c.Path]:
+		case c.Outcome == OutcomeSkipped && !x.skip[c.Path], retried(c.Outcome) && !x.skip[c.Path], x.release[c.Path]:
 			x.reopen = append(x.reopen, i)
-		case retried(c.Outcome):
+		case retried(c.Outcome), c.Outcome == OutcomeHeld && x.skip[c.Path]:
 			m.Containers[i] = Container{Path: c.Path, Kind: c.Kind, Depth: c.Depth, Parent: c.Parent}
 			x.set(i, m.Containers[i], OutcomeSkipped)
 		}
@@ -290,8 +366,34 @@ func (x *expander) prepare() error {
 	return nil
 }
 
+// holds reports whether the run holds a container of kind found in the
+// container at parent: an archive that came out of an email, when the
+// destination holds those.
+func (x *expander) holds(kind, parent string) bool {
+	return x.holdMail && kind != KindEmail && parent != "" && x.kinds[parent] == KindEmail
+}
+
+// holdKinds returns hold sorted, without duplicates, nil for none.
+func holdKinds(hold []string) []string {
+	if len(hold) == 0 {
+		return nil
+	}
+	out := slices.Clone(hold)
+	slices.Sort(out)
+	return slices.Compact(out)
+}
+
+// holdFlags spells hold as the flags that give it.
+func holdFlags(hold []string) string {
+	var out []string
+	for _, h := range hold {
+		out = append(out, "--hold "+h)
+	}
+	return strings.Join(out, " ")
+}
+
 // checkPolicy refuses a run on a destination with options rec whose depth
-// limit, or whether it opens emails, isn't the destination's.
+// limit, whether it opens emails, or what it holds isn't the destination's.
 func checkPolicy(rec ManifestOptions, o Options) error {
 	if o.Depth != rec.Depth {
 		return fmt.Errorf("the destination was opened with a depth limit of %d, not %d, and a later run keeps it (--depth %d)", rec.Depth, o.Depth, rec.Depth)
@@ -301,6 +403,12 @@ func checkPolicy(rec ManifestOptions, o Options) error {
 			return errors.New("the destination was opened with emails opened, and a later run keeps that (no --no-mail)")
 		}
 		return errors.New("the destination was opened with emails left as plain files, and a later run keeps that (--no-mail)")
+	}
+	if hold := holdKinds(o.Hold); !slices.Equal(hold, rec.Hold) {
+		if len(rec.Hold) == 0 {
+			return errors.New("the destination was opened holding nothing, and a later run keeps that (no --hold)")
+		}
+		return fmt.Errorf("the destination was opened holding %s, and a later run keeps it (%s)", strings.Join(rec.Hold, ", "), holdFlags(rec.Hold))
 	}
 	return nil
 }
@@ -433,6 +541,21 @@ func (x *expander) open(p, kind string, level int, parent string, idx int) error
 	}
 	if x.skip[c.Path] {
 		x.set(idx, c, OutcomeSkipped)
+		return nil
+	}
+	if idx < 0 && x.holds(kind, parent) {
+		// Only an archive 7z can open is held, as only one is opened.
+		if x.o.Runner != nil {
+			if _, err := unpack.List(x.ctx, x.o.Runner, p, x.o.Password); err != nil {
+				if cerr := x.ctx.Err(); cerr != nil {
+					return cerr
+				}
+				if notContainer(err) {
+					return nil
+				}
+			}
+		}
+		x.set(idx, c, OutcomeHeld)
 		return nil
 	}
 	used := x.m.Size
@@ -586,6 +709,7 @@ func (x *expander) openArchive(p, dir string, level int, left int64) ([]child, e
 func (x *expander) set(idx int, c Container, outcome string, flags ...string) {
 	c.Outcome = outcome
 	c.Flags = append([]string{outcomeFlags[outcome]}, flags...)
+	x.kinds[c.Path] = c.Kind
 	if idx < 0 {
 		x.m.Containers = append(x.m.Containers, c)
 		return

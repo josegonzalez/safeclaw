@@ -13,15 +13,16 @@ package expand
 // run with nothing changed.
 //
 // A resumed run keeps the containers that were opened, rejected, skipped,
-// or past the depth limit as they are, and opens again, in their order,
-// the ones that needed a password, were too large, or failed, with its own
-// password and size limit, and those taken off the skip list. Then it
-// copies in and opens its new inputs. The size limit counts what is
-// already in the destination: everything but the input copies and the
-// manifest, measured on disk. The depth limit and whether emails are
-// opened are the destination's, from its first run: a run with others is
-// refused. A resumed run that fails removes what it added and leaves the
-// manifest as it was.
+// held, or past the depth limit as they are, and opens again, in their
+// order, the ones that needed a password, were too large, or failed, with
+// its own password and size limit, the held ones it releases, and those
+// taken off the skip list, unless the hold applies to them, which holds
+// them instead. Then it copies in and opens its new inputs. The size limit
+// counts what is already in the destination: everything but the input
+// copies and the manifest, measured on disk. The depth limit, whether
+// emails are opened, and what is held are the destination's, from its
+// first run: a run with others is refused. A resumed run that fails
+// removes what it added and leaves the manifest as it was.
 
 import (
 	"errors"
@@ -189,6 +190,15 @@ func checkState(root string, m *Manifest) error {
 	if m.Options.Depth < 0 || m.Options.MaxSize <= 0 {
 		return fmt.Errorf("bad options %+v", m.Options)
 	}
+	for i, h := range m.Options.Hold {
+		switch {
+		case !slices.Contains(HoldKinds, h):
+			return fmt.Errorf("unknown hold kind %q", h)
+		case i > 0 && h <= m.Options.Hold[i-1]:
+			return fmt.Errorf("hold kinds %q aren't sorted without duplicates", m.Options.Hold)
+		}
+	}
+	holdMail := slices.Contains(m.Options.Hold, HoldMailArchives)
 	inputs := map[string]bool{}
 	for _, in := range m.Inputs {
 		switch {
@@ -212,7 +222,7 @@ func checkState(root string, m *Manifest) error {
 	}
 	byPath := map[string]Container{}
 	for _, c := range m.Containers {
-		if err := checkContainer(c, byPath, inputs, skip); err != nil {
+		if err := checkContainer(c, byPath, inputs, skip, holdMail); err != nil {
 			return fmt.Errorf("container %q: %w", c.Path, err)
 		}
 		byPath[c.Path] = c
@@ -226,8 +236,9 @@ func checkState(root string, m *Manifest) error {
 	return nil
 }
 
-// checkContainer checks c's record against the ones before it.
-func checkContainer(c Container, before map[string]Container, inputs, skip map[string]bool) error {
+// checkContainer checks c's record against the ones before it. holdMail
+// is whether the destination holds archives that came out of emails.
+func checkContainer(c Container, before map[string]Container, inputs, skip map[string]bool, holdMail bool) error {
 	flag, ok := outcomeFlags[c.Outcome]
 	if !ok {
 		return fmt.Errorf("unknown outcome %q", c.Outcome)
@@ -259,6 +270,18 @@ func checkContainer(c Container, before map[string]Container, inputs, skip map[s
 			return fmt.Errorf("not inside its parent's directory %q", p.Unpacked)
 		case c.Depth <= p.Depth:
 			return fmt.Errorf("depth %d, not below its parent's %d", c.Depth, p.Depth)
+		}
+	}
+	if c.Outcome == OutcomeHeld {
+		switch {
+		case !holdMail:
+			return errors.New("held, but the destination holds nothing")
+		case c.Kind == KindEmail || c.Parent == "" || before[c.Parent].Kind != KindEmail:
+			return errors.New("held, but not an archive that came out of an email")
+		case skip[c.Path]:
+			return errors.New("held, but on the skip list")
+		case c.Code != 0 || c.Error != "" || len(c.Rejected) > 0:
+			return errors.New("held, but with a failure recorded")
 		}
 	}
 	if (c.Outcome == OutcomeUnpacked) != (c.Unpacked != "") {
