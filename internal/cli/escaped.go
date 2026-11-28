@@ -48,6 +48,8 @@ type childOptions struct {
 	// running that long after it started.
 	deadline   time.Duration
 	onDeadline func(*os.Process)
+	// started, when set, is called once the command has started.
+	started func(*os.Process)
 }
 
 // runChild runs argv as a child and returns its exit code: 128 plus the
@@ -82,6 +84,9 @@ func runChild(argv []string, o childOptions) (int, error) {
 
 	if err := c.Start(); err != nil {
 		return 0, err
+	}
+	if o.started != nil {
+		o.started(c.Process)
 	}
 	var expired <-chan time.Time
 	if o.deadline > 0 {

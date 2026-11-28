@@ -68,6 +68,10 @@ type ExecOptions struct {
 	// the container: SIGTERM after Timeout, then SIGKILL TimeoutKillAfter
 	// later.
 	Timeout time.Duration
+
+	// gate makes a one-off sandbox's command wait for VerifyEphemeral to
+	// let it through (see gateScript).
+	gate bool
 }
 
 // flags returns the docker exec or run flags for o.
@@ -97,6 +101,9 @@ func (o ExecOptions) command(cmd []string) []string {
 			t = append(t, "--foreground")
 		}
 		cmd = append(append(t, "--", seconds(o.Timeout)), cmd...)
+	}
+	if o.gate {
+		return append([]string{"/bin/sh", "-c", gateScript, "sh"}, cmd...)
 	}
 	return SandboxCommand(cmd)
 }
@@ -196,6 +203,12 @@ type SandboxOptions struct {
 	// is optional, a random one is picked without it, and an existing
 	// container with the name is refused.
 	Remove bool
+	// Verify runs the `sandbox verify` checks once the sandbox has
+	// started. When any fails, or the checks can't finish, a sandbox
+	// EnsureSandbox created or recreated is removed, one that existed
+	// before is kept, and a *SandboxVerifyError is returned. For
+	// PrepareEphemeral, the command waits for VerifyEphemeral.
+	Verify bool
 
 	// kept are the bind mounts carried over from a recreated sandbox.
 	kept []string
@@ -340,8 +353,13 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 		}
 		container := config.ContainerName(name)
 		m.printf("Creating one-off sandbox: %s\n", container)
-		if err := m.createSandbox(ctx, container, opts); err != nil {
+		if err := m.newSandbox(ctx, name, container, opts); err != nil {
 			return nil, err
+		}
+		if opts.Verify {
+			if err := m.verifyStarted(ctx, name, true); err != nil {
+				return nil, err
+			}
 		}
 		m.printf("\nSandbox is ready: %s\n", container)
 		m.printf("Run commands with: safeclaw sandbox exec %s -- <command>\n", name)
@@ -375,6 +393,9 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	}
 	opts.Variant, opts.image = want, image
 
+	// created is set when this call makes the container, which a failed
+	// verification removes again.
+	created := false
 	if existing != nil && (len(opts.Volumes) > 0 || opts.Recreate || changed) {
 		m.printf("Recreating sandbox: %s\n", container)
 		opts = opts.keep(*existing)
@@ -394,7 +415,13 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 		}
 	default:
 		m.printf("Creating sandbox: %s\n", container)
-		if err := m.createSandbox(ctx, container, opts); err != nil {
+		created = true
+		if err := m.newSandbox(ctx, name, container, opts); err != nil {
+			return nil, err
+		}
+	}
+	if opts.Verify {
+		if err := m.verifyStarted(ctx, name, created); err != nil {
 			return nil, err
 		}
 	}
@@ -441,7 +468,10 @@ func (m *Manager) pickName(ctx context.Context, name string) (string, error) {
 // sandbox name. The caller runs the argv, so docker removes the container
 // when cmd exits even if the caller is killed. It prints nothing: stdout
 // belongs to cmd. If the name is taken between this check and `docker run`,
-// docker refuses the name itself.
+// docker refuses the name itself. With opts.Verify, cmd waits in the
+// sandbox until VerifyEphemeral lets it through, or exits with
+// gateExitCode after gateTimeout, so a caller killed before then still
+// leaves nothing behind.
 func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, exec ExecOptions, cmd []string) ([]string, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -468,6 +498,7 @@ func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, exe
 	if err != nil {
 		return nil, "", err
 	}
+	exec.gate = opts.Verify
 	args, err := EphemeralRunArgs(config.ContainerName(name), opts, exec, cmd)
 	if err != nil {
 		return nil, "", err
@@ -561,6 +592,15 @@ func sandboxArgs(container string, opts SandboxOptions) ([]string, error) {
 		return nil, errors.New("sandbox has no checked image ID to run")
 	}
 	return append(args, imageArgs(variant.Image(opts.Variant), opts.image)...), nil
+}
+
+// newSandbox creates a sandbox, with createSandboxVerified when it is to
+// be verified.
+func (m *Manager) newSandbox(ctx context.Context, name, container string, opts SandboxOptions) error {
+	if opts.Verify {
+		return m.createSandboxVerified(ctx, name, container, opts)
+	}
+	return m.createSandbox(ctx, container, opts)
 }
 
 func (m *Manager) createSandbox(ctx context.Context, container string, opts SandboxOptions) error {

@@ -145,22 +145,19 @@ func newSandboxVerifyCommand() *cobra.Command {
 // verifyError returns the error verify exits with, naming the failed
 // checks, or nil when every check passed.
 func verifyError(r session.SandboxReport) error {
-	if r.OK {
-		return nil
-	}
-	failed, skipped := r.Failed(), r.Skipped()
-	msg := fmt.Sprintf("sandbox %q failed %d %s: %s", r.Name, len(failed), plural(len(failed), "check"), strings.Join(failed, ", "))
-	if len(skipped) > 0 {
-		msg += fmt.Sprintf(" (%d %s skipped)", len(skipped), plural(len(skipped), "check"))
-	}
-	return errors.New(msg)
+	return r.Err()
 }
 
-func plural(n int, word string) string {
-	if n == 1 {
-		return word
+// verifyReport writes the report of a sandbox that failed --verify to
+// stderr, and returns err.
+func verifyReport(stderr io.Writer, err error) error {
+	var ve *session.SandboxVerifyError
+	if errors.As(err, &ve) && ve.Report != nil {
+		if werr := writeChecks(stderr, ve.Report.Checks); werr != nil {
+			return errors.Join(err, werr)
+		}
 	}
-	return word + "s"
+	return err
 }
 
 func writeJSON(out io.Writer, v any) error {
