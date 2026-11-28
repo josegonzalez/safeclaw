@@ -174,6 +174,34 @@ func asSclaw(o docker.ExecOptions) docker.ExecOptions {
 	return o
 }
 
+// DefaultInputTimeout is how long an exec fed input on stdin may take.
+// They take well under a second, so one still running after this is stuck.
+const DefaultInputTimeout = 30 * time.Second
+
+// ErrInputTimeout is returned when an exec fed input on stdin outlives
+// Manager.InputTimeout.
+var ErrInputTimeout = errors.New("timed out")
+
+// execInput runs cmd in container with opts, which carry its input, for
+// at most m.InputTimeout. Errors name step, such as "writing the env
+// file".
+func (m *Manager) execInput(ctx context.Context, step, container string, opts docker.ExecOptions, cmd ...string) ([]byte, error) {
+	timeout := m.InputTimeout
+	if timeout <= 0 {
+		timeout = DefaultInputTimeout
+	}
+	tctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	out, err := m.Docker.Exec(tctx, container, opts, cmd...)
+	switch {
+	case err == nil:
+		return out, nil
+	case ctx.Err() == nil && errors.Is(tctx.Err(), context.DeadlineExceeded):
+		return nil, fmt.Errorf("%s in %s: %w after %s", step, container, ErrInputTimeout, timeout)
+	}
+	return nil, fmt.Errorf("%s in %s: %w", step, container, err)
+}
+
 // checkImageLabels refuses an image carrying any safeclaw label except the
 // safeclaw.variant label naming its own variant. Docker copies an image's
 // labels onto every container made from it, so without this an image could
@@ -352,6 +380,9 @@ type Manager struct {
 	OpenBrowser func(url string) error
 	// PromptTimeout bounds how long a query waits for Claude Code's prompt.
 	PromptTimeout time.Duration
+	// InputTimeout bounds each exec fed input on stdin, such as the env
+	// file write. Defaults to DefaultInputTimeout.
+	InputTimeout time.Duration
 	// LoadVariants returns the known image variants. It is called whenever
 	// a variant is resolved, so config file edits apply without a restart.
 	// Defaults to the built-in variants alone.
@@ -485,11 +516,8 @@ func (m *Manager) writeMemorySetting(ctx context.Context, container string, noMe
 	if noMemory {
 		settings, script = memoryOffSettings, writeMemoryOffScript
 	}
-	_, err := m.Docker.Exec(ctx, container, docker.ExecOptions{User: "root", Stdin: strings.NewReader(settings)}, append(slices.Clone(rootShell), script)...)
-	if err != nil {
-		return fmt.Errorf("writing the auto memory setting in %s: %w", container, err)
-	}
-	return nil
+	_, err := m.execInput(ctx, "writing the auto memory setting", container, docker.ExecOptions{User: "root", Input: settings}, append(slices.Clone(rootShell), script)...)
+	return err
 }
 
 // hardenArgs are the `docker run` flags that take every capability from a
@@ -1339,12 +1367,12 @@ func (m *Manager) writeEnv(ctx context.Context, container string, set SecretSet)
 	if err != nil {
 		return nil, false, err
 	}
-	in := asSclaw(docker.ExecOptions{Stdin: strings.NewReader(secrets.RenderEnv(selected))})
+	in := asSclaw(docker.ExecOptions{Input: secrets.RenderEnv(selected)})
 	if rootOwned {
 		in.User = "root"
-		_, err = m.Docker.Exec(ctx, container, in, append(slices.Clone(rootShell), writeEnvScript)...)
+		_, err = m.execInput(ctx, "writing the env file", container, in, append(slices.Clone(rootShell), writeEnvScript)...)
 	} else {
-		_, err = m.Docker.Exec(ctx, container, in, "sh", "-c", legacyWriteEnvScript)
+		_, err = m.execInput(ctx, "writing the env file", container, in, "sh", "-c", legacyWriteEnvScript)
 	}
 	return selected, rootOwned, err
 }

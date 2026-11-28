@@ -988,7 +988,7 @@ func TestIntegrationTTYDCredentialNotInArgv(t *testing.T) {
 	t.Cleanup(func() { _ = d.Remove(context.Background(), id, true) })
 
 	cred := Credential{User: config.TTYDUser, Password: "integration-dummy-password"}
-	if _, err := d.Exec(ctx, id, docker.ExecOptions{Stdin: strings.NewReader(cred.String())}, "sh", "-c", writeCredentialScript); err != nil {
+	if _, err := d.Exec(ctx, id, docker.ExecOptions{Input: cred.String()}, "sh", "-c", writeCredentialScript); err != nil {
 		t.Fatal(err)
 	}
 	const log = "/tmp/ttyd-itest.log"
@@ -1047,7 +1047,7 @@ func TestIntegrationTTYDRestart(t *testing.T) {
 
 	start := func(c Credential) {
 		t.Helper()
-		if _, err := d.Exec(ctx, id, docker.ExecOptions{Stdin: strings.NewReader(c.String())}, "sh", "-c", writeCredentialScript); err != nil {
+		if _, err := d.Exec(ctx, id, docker.ExecOptions{Input: c.String()}, "sh", "-c", writeCredentialScript); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := d.Exec(ctx, id, docker.ExecOptions{Detach: true}, "sh", "-c", startTTYDScript, "ttyd", "-W", "-O", "-p", strconv.Itoa(config.TTYDPort), "sleep", "infinity"); err != nil {

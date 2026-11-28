@@ -317,7 +317,7 @@ func (m *Manager) startTTYD(ctx context.Context, name, variant, container string
 	if err != nil {
 		return Credential{}, err
 	}
-	if _, err := m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{Stdin: strings.NewReader(cred.String())}), "sh", "-c", writeCredentialScript); err != nil {
+	if _, err := m.execInput(ctx, "writing the ttyd credential", container, asSclaw(docker.ExecOptions{Input: cred.String()}), "sh", "-c", writeCredentialScript); err != nil {
 		return Credential{}, err
 	}
 	args := []string{"sh", "-c", startTTYDScript, "ttyd", "-W", "-O", "-t", "titleFixed=SafeClaw - " + name, "-p", strconv.Itoa(config.TTYDPort)}
@@ -388,7 +388,7 @@ func (m *Manager) stopTTYD(ctx context.Context, name, container string) error {
 			return fmt.Errorf("session %q: %w: stopping the old ttyd failed: %w", name, ErrTTYDRestart, err)
 		}
 		var err error
-		why, err = m.pollTTYD(ctx, container, ttydGoneScript, nil, ttydStopPolls, nil)
+		why, err = m.pollTTYD(ctx, container, ttydGoneScript, "", ttydStopPolls, nil)
 		if err != nil {
 			return fmt.Errorf("session %q: %w: checking that the old ttyd stopped failed: %w", name, ErrTTYDRestart, err)
 		}
@@ -403,8 +403,7 @@ func (m *Manager) stopTTYD(ctx context.Context, name, container string) error {
 // a request carrying cred. A refusal means another ttyd, with another
 // credential, holds the port, and is an error right away.
 func (m *Manager) checkTTYDAnswers(ctx context.Context, name, container string, cred Credential) error {
-	stdin := func() io.Reader { return strings.NewReader(`user = "` + cred.String() + "\"\n") }
-	status, err := m.pollTTYD(ctx, container, ttydAnswersScript, stdin, ttydStartPolls, func(out string) bool { return out == "401" })
+	status, err := m.pollTTYD(ctx, container, ttydAnswersScript, `user = "`+cred.String()+"\"\n", ttydStartPolls, func(out string) bool { return out == "401" })
 	switch {
 	case err != nil:
 		return fmt.Errorf("session %q: %w: checking that the new ttyd answers failed: %w", name, ErrTTYDRestart, err)
@@ -418,8 +417,8 @@ func (m *Manager) checkTTYDAnswers(ctx context.Context, name, container string, 
 
 // pollTTYD runs script in container up to polls times, ttydPoll apart,
 // until it prints nothing or prints what final accepts, and returns its
-// last output. stdin, when set, gives each run its stdin.
-func (m *Manager) pollTTYD(ctx context.Context, container, script string, stdin func() io.Reader, polls int, final func(string) bool) (string, error) {
+// last output. input, when set, is each run's stdin.
+func (m *Manager) pollTTYD(ctx context.Context, container, script, input string, polls int, final func(string) bool) (string, error) {
 	out := ""
 	for i := range polls {
 		if i > 0 {
@@ -428,11 +427,13 @@ func (m *Manager) pollTTYD(ctx context.Context, container, script string, stdin 
 		if err := ctx.Err(); err != nil {
 			return "", err
 		}
-		opts := asSclaw(docker.ExecOptions{})
-		if stdin != nil {
-			opts.Stdin = stdin()
+		var b []byte
+		var err error
+		if input != "" {
+			b, err = m.execInput(ctx, "sending ttyd the credential", container, asSclaw(docker.ExecOptions{Input: input}), "sh", "-c", script)
+		} else {
+			b, err = m.Docker.Exec(ctx, container, asSclaw(docker.ExecOptions{}), "sh", "-c", script)
 		}
-		b, err := m.Docker.Exec(ctx, container, opts, "sh", "-c", script)
 		if err != nil {
 			return "", err
 		}

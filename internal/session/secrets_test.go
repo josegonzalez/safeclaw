@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
 	"github.com/josegonzalez/safeclaw/internal/docker/dockertest"
 	"github.com/josegonzalez/safeclaw/internal/secrets"
@@ -94,11 +95,20 @@ func TestSecretsLabel(t *testing.T) {
 
 func envCall(t *testing.T, r *dockertest.Runner, container string) string {
 	t.Helper()
-	c, ok := r.Find("exec -i --user sclaw " + container + " sh -c umask 077")
-	if !ok {
-		t.Fatalf("env not written: %v", r.Commands())
+	for _, c := range r.Calls {
+		s := c.String()
+		if strings.HasPrefix(s, "exec ") && strings.Contains(s, " "+container+" ") &&
+			(strings.Contains(s, "cat > "+config.EnvFile) || strings.Contains(s, "cat > "+config.LegacyEnvFile)) {
+			// Empty input runs without -i, so stdin is empty without
+			// waiting for docker to close it.
+			if c.Input == (c.Stdin == "") {
+				t.Errorf("env written with Input %v and stdin %q", c.Input, c.Stdin)
+			}
+			return c.Stdin
+		}
 	}
-	return c.Stdin
+	t.Fatalf("env not written: %v", r.Commands())
+	return ""
 }
 
 func TestEnsureLimitedSecrets(t *testing.T) {
