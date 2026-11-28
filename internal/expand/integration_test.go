@@ -148,3 +148,71 @@ func TestIntegrationTree(t *testing.T) {
 		t.Errorf("secret.txt = %q", got)
 	}
 }
+
+// TestIntegrationResume runs the real 7z over three runs on one
+// destination: an email carrying a password zip, a 7z archive with
+// encrypted headers, and a zip to skip, planned, opened without the
+// password, and opened again with it.
+func TestIntegrationResume(t *testing.T) {
+	z := sevenZip(t)
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(secret, []byte("s3cret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	encZip, enc7z := filepath.Join(dir, "enc.zip"), filepath.Join(dir, "enc.7z")
+	// The test's own password, for archives it made, is fine in argv.
+	for _, args := range [][]string{{"a", "-bd", "-tzip", "-ppw", encZip, secret}, {"a", "-bd", "-t7z", "-ppw", "-mhe=on", enc7z, secret}} {
+		if out, err := exec.Command(z.Path, args...).CombinedOutput(); err != nil {
+			t.Fatalf("7z %v: %v\n%s", args, err, out)
+		}
+	}
+	report := email("report", "the password is pw", "enc.zip", readFile(t, encZip))
+	in := writeInputs(t, "report.eml", report, "enc.7z", readFile(t, enc7z), "skip.zip", makeZip(t, zipFile{name: "x.txt", body: "x"}))
+	o := Options{Runner: z, MaxSize: 1 << 20, Depth: 3, Skip: []string{"3-skip.zip"}}
+	dest, m := run(t, nil, o, in...)
+	checkSummary(t, m, []string{
+		"1-report.eml email 0 UNPACKED -> 1-report.eml.unpacked",
+		"1-report.eml.unpacked/1-enc.zip zip 1 NEEDS-PASSWORD",
+		"2-enc.7z 7z 0 NEEDS-PASSWORD",
+		"3-skip.zip zip 0 SKIPPED",
+	})
+
+	// The plan lists the zip's entries, encrypted, and the skipped zip's,
+	// and can't list the 7z without the password.
+	o.Skip = nil
+	items, err := Plan(t.Context(), nil, dest, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 || len(items[0].Entries) != 1 || !items[0].Entries[0].Encrypted || items[1].ListError == "" || len(items[2].Entries) != 1 || items[2].Entries[0].Path != "x.txt" {
+		t.Errorf("plan = %+v", items)
+	}
+	pw := "pw"
+	o.Password = &pw
+	if items, err := Plan(t.Context(), nil, dest, o); err != nil || items[1].ListError != "" || len(items[1].Entries) != 1 {
+		t.Errorf("plan with the password = %+v, %v", items, err)
+	}
+
+	// The password opens both, and the skipped zip stays packed.
+	m = rerun(t, nil, dest, o, in...)
+	checkSummary(t, m, []string{
+		"1-report.eml email 0 UNPACKED -> 1-report.eml.unpacked",
+		"1-report.eml.unpacked/1-enc.zip zip 1 UNPACKED -> 1-report.eml.unpacked/1-enc.zip.unpacked",
+		"2-enc.7z 7z 0 UNPACKED -> 2-enc.7z.unpacked",
+		"3-skip.zip zip 0 SKIPPED",
+	})
+	for _, p := range []string{"1-report.eml.unpacked/1-enc.zip.unpacked/secret.txt", "2-enc.7z.unpacked/secret.txt"} {
+		if got := readFile(t, filepath.Join(dest, p)); got != "s3cret\n" {
+			t.Errorf("%s = %q", p, got)
+		}
+	}
+	if len(m.Inputs) != 3 {
+		t.Errorf("inputs = %+v", m.Inputs)
+	}
+	o.Unskip = []string{"3-skip.zip"}
+	m = rerun(t, nil, dest, o)
+	if c := m.Containers[3]; c.Outcome != OutcomeUnpacked {
+		t.Errorf("unskipped = %+v", c)
+	}
+}

@@ -73,7 +73,10 @@ cat /sandbox/out/1-report.eml.unpacked/1-files.zip.unpacked/fwd.eml.unpacked/1-i
 test -e /sandbox/out/2-links.zip.unpacked && echo leftover
 test -e /sandbox/out/1-report.eml.unpacked/body.txt.unpacked && echo body-opened
 grep -c '"path"' /sandbox/out/manifest.json
-safeclaw-expand --json /in/report.eml /sandbox/out; echo "notempty=$?"
+safeclaw-expand /in/report.eml /sandbox/out >/dev/null; echo "rerun=$?"
+test -e /sandbox/out/3-report.eml && echo copied-again
+mkdir /sandbox/full && touch /sandbox/full/x
+safeclaw-expand --json /in/report.eml /sandbox/full; echo "notempty=$?"
 safeclaw-expand --json --no-mail /in/report.eml /sandbox/nomail; echo "nomail=$?"
 readlink /usr/local/bin/safeclaw-expand
 `})
@@ -95,6 +98,7 @@ readlink /usr/local/bin/safeclaw-expand
 		"zip\t1-report.eml.unpacked/1-files.zip.unpacked/fwd.eml.unpacked/1-inner.zip\tUNPACKED\t",
 		"zip\t2-links.zip\tREJECTED\t-\nentry\tsymlink\tlink\tLINK\n",
 		"expand=0\ndeep\n",
+		"rerun=0\n",
 		`"status":"failed","code":1`,
 		"notempty=1\n",
 		`"mail":false`,
@@ -106,9 +110,81 @@ readlink /usr/local/bin/safeclaw-expand
 			t.Errorf("output lacks %q:\n%s", want, got)
 		}
 	}
-	for _, bad := range []string{"leftover", "body-opened"} {
+	for _, bad := range []string{"leftover", "body-opened", "copied-again"} {
 		if strings.Contains(got, bad) {
 			t.Errorf("output has %q:\n%s", bad, got)
+		}
+	}
+}
+
+// TestIntegrationSandboxExpandResume runs safeclaw-expand in a sandbox of
+// the sandbox variant over two exec calls: the first leaves a password zip
+// it generates packed, and plans, and the second opens it with the
+// password. A manifest changed to name a path outside DEST is then
+// refused.
+func TestIntegrationSandboxExpandResume(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, variant.Image(variant.Sandbox)); err != nil || id == "" {
+		t.Skip("sandbox variant not built; run `safeclaw build --variant sandbox` first")
+	}
+	var b bytes.Buffer
+	w := zip.NewWriter(&b)
+	h := &zip.FileHeader{Name: "link"}
+	h.SetMode(fs.ModeSymlink | 0o777)
+	if fw, err := w.CreateHeader(h); err != nil {
+		t.Fatal(err)
+	} else if _, err := fw.Write([]byte("/etc/passwd")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	in := t.TempDir()
+	if err := os.WriteFile(filepath.Join(in, "links.zip"), b.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &Manager{Docker: d}
+	name := "itest-expand-resume"
+	container := config.ContainerName(name)
+	_ = d.Remove(ctx, container, true)
+	t.Cleanup(func() { _ = d.Remove(context.Background(), container, true) })
+	if _, err := m.EnsureSandbox(ctx, SandboxOptions{Name: name, Volumes: []string{in + ":/in"}}); err != nil {
+		t.Fatal(err)
+	}
+	run := func(script string) string {
+		t.Helper()
+		out, err := d.Exec(ctx, container, copyExec, SandboxCommand([]string{"sh", "-c", script})...)
+		if err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		return string(out)
+	}
+	// The test's own password, for an archive it made, is fine in argv.
+	first := run(`
+printf 's3cret\n' > secret.txt && 7z a -bd -tzip -ppw enc.zip secret.txt >/dev/null || exit
+safeclaw-expand /sandbox/enc.zip /in/links.zip /sandbox/out; echo "first=$?"
+echo ---
+safeclaw-expand --plan /sandbox/out; echo "plan=$?"
+`)
+	second := run(`
+SAFECLAW_UNPACK_PASSWORD=pw safeclaw-expand /sandbox/enc.zip /sandbox/out; echo "second=$?"
+cat /sandbox/out/1-enc.zip.unpacked/secret.txt
+grep -c '"path": "1-enc.zip"' /sandbox/out/manifest.json
+sed -i 's/"path": "2-links.zip"/"path": "..\/x"/' /sandbox/out/manifest.json
+cp /sandbox/out/manifest.json /sandbox/before.json
+SAFECLAW_UNPACK_PASSWORD=pw safeclaw-expand /sandbox/out; echo "tampered=$?"
+cmp -s /sandbox/out/manifest.json /sandbox/before.json && echo unchanged
+`)
+	for _, c := range []struct{ out, want string }{
+		{first, "zip\t1-enc.zip\tNEEDS-PASSWORD\t-\nzip\t2-links.zip\tREJECTED\t-\nentry\tsymlink\tlink\tLINK\nfirst=0\n---\n"},
+		{first, "---\nzip\t1-enc.zip\tNEEDS-PASSWORD\t-\nentry\tfile\t7\tsecret.txt\tENCRYPTED\nzip\t2-links.zip\tREJECTED\t-\nplan=0\n"},
+		{second, "zip\t1-enc.zip\tUNPACKED\t1-enc.zip.unpacked\nzip\t2-links.zip\tREJECTED\t-\nentry\tsymlink\tlink\tLINK\nsecond=0\ns3cret\n2\n"},
+		{second, "tampered=1\nunchanged\n"},
+	} {
+		if !strings.Contains(c.out, c.want) {
+			t.Errorf("output lacks %q:\n%s", c.want, c.out)
 		}
 	}
 }

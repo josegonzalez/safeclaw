@@ -4,6 +4,7 @@ package termtext
 import (
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -118,4 +119,61 @@ func incompleteTail(b []byte) int {
 func EscapeField(s string) string {
 	s = Escape(strings.ReplaceAll(s, `\`, `\\`))
 	return strings.NewReplacer("\t", `\t`, "\n", `\n`).Replace(s)
+}
+
+// UnescapeField reverses EscapeField. It refuses s when it isn't exactly
+// what EscapeField writes for some string, such as an unknown escape, a
+// raw control character, or a character written as an escape that
+// EscapeField would have kept, so each string has one written form.
+func UnescapeField(s string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] != '\\' {
+			b.WriteByte(s[i])
+			i++
+			continue
+		}
+		if i+1 >= len(s) {
+			return "", fmt.Errorf("%q ends in a backslash", s)
+		}
+		n := 0
+		switch s[i+1] {
+		case '\\':
+			b.WriteByte('\\')
+		case 't':
+			b.WriteByte('\t')
+		case 'n':
+			b.WriteByte('\n')
+		case 'x':
+			n = 2
+		case 'u':
+			n = 4
+		case 'U':
+			n = 8
+		default:
+			return "", fmt.Errorf("%q has an unknown escape \\%c", s, s[i+1])
+		}
+		if n == 0 {
+			i += 2
+			continue
+		}
+		if i+2+n > len(s) {
+			return "", fmt.Errorf("%q has a short escape", s)
+		}
+		v, err := strconv.ParseUint(s[i+2:i+2+n], 16, 32)
+		if err != nil {
+			return "", fmt.Errorf("%q has a bad escape: %w", s, err)
+		}
+		if n == 2 {
+			b.WriteByte(byte(v))
+		} else {
+			b.WriteRune(rune(v))
+		}
+		i += 2 + n
+	}
+	out := b.String()
+	if EscapeField(out) != s {
+		return "", fmt.Errorf("%q is not written as EscapeField writes it", s)
+	}
+	return out, nil
 }
