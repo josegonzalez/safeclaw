@@ -64,11 +64,12 @@ type OpenRun struct {
 	// Name is the sandbox's session name.
 	Name string
 	// Expand runs safeclaw-expand on OpenInDir into OpenTreeDir, or with
-	// OpenOptions.Plan plans from both. It is nil for a plan with nothing
-	// to plan from, when neither OpenInDir nor OpenTreeDir exists.
+	// OpenOptions.Plan plans from both. Without OpenInDir nothing was
+	// copied in, so it resumes or plans OpenTreeDir alone. It is nil when
+	// there is nothing to open or plan from (see PrepareOpen).
 	Expand []string
 	// Totext, set with OpenOptions.Text, runs safeclaw-totext on
-	// OpenTreeDir into OpenOutDir.
+	// OpenTreeDir into OpenOutDir. It is nil when Expand is.
 	Totext []string
 	// KeepInputs is the directory of the sandbox's input record, when it
 	// keeps one, which RecordOpen appends this run to.
@@ -101,6 +102,20 @@ func (o OpenOptions) validate() error {
 	return nil
 }
 
+// namesContainers reports whether the run names containers in the tree,
+// with --skip, --unskip, --release, or --release-all.
+func (o OpenOptions) namesContainers() bool {
+	if len(o.Skip) > 0 || len(o.Unskip) > 0 {
+		return true
+	}
+	for _, a := range o.ExpandArgs {
+		if name, v, _ := strings.Cut(a, "="); name == "--release" || name == "--release-all" && v != "false" {
+			return true
+		}
+	}
+	return false
+}
+
 // OpenArgv returns the docker argv of each helper run for the named
 // sandbox. Every path and flag value is one argument of its own, after
 // the flag's = so none can be read as another flag, and the fixed paths
@@ -110,18 +125,15 @@ func OpenArgv(name string, o OpenOptions) OpenRun {
 	return openArgv(name, o, true)
 }
 
-// openArgv is OpenArgv, but a plan gives safeclaw-expand OpenInDir only
-// when planIn is set.
-func openArgv(name string, o OpenOptions, planIn bool) OpenRun {
+// openArgv is OpenArgv, but safeclaw-expand gets OpenInDir only when in
+// is set, and otherwise OpenTreeDir alone, which it resumes or plans with
+// no new inputs.
+func openArgv(name string, o OpenOptions, in bool) OpenRun {
 	name = config.SessionName(name)
 	expand := []string{ExpandHelper}
 	expand = append(expand, o.ExpandArgs...)
 	if o.Plan {
-		expand = append(expand, "--plan", "--")
-		if planIn {
-			expand = append(expand, OpenInDir)
-		}
-		expand = append(expand, OpenTreeDir)
+		expand = append(expand, "--plan")
 	} else {
 		for _, p := range o.Skip {
 			expand = append(expand, "--skip="+p)
@@ -129,8 +141,12 @@ func openArgv(name string, o OpenOptions, planIn bool) OpenRun {
 		for _, p := range o.Unskip {
 			expand = append(expand, "--unskip="+p)
 		}
-		expand = append(expand, "--", OpenInDir, OpenTreeDir)
 	}
+	expand = append(expand, "--")
+	if in {
+		expand = append(expand, OpenInDir)
+	}
+	expand = append(expand, OpenTreeDir)
 	run := OpenRun{
 		Name:   name,
 		Expand: SandboxExecArgv(name, ExecOptions{EnvFile: o.EnvFile, Timeout: o.Timeout}, expand),
@@ -158,11 +174,8 @@ func (m *Manager) PrepareOpen(ctx context.Context, name string, o OpenOptions) (
 	if o.Text {
 		helpers = append(helpers, TotextHelper)
 	}
-	// A plan also looks for what it plans from.
-	look := helpers
-	if o.Plan {
-		look = slices.Concat(helpers, []string{OpenInDir, OpenTreeDir})
-	}
+	// It also looks for what it opens or plans from.
+	look := slices.Concat(helpers, []string{OpenInDir, OpenTreeDir})
 	probe := docker.ExecOptions{User: config.SandboxUser, Workdir: config.SandboxDir, MaxOutput: 256}
 	out, err := m.Docker.Exec(ctx, c.ShortName(), probe, slices.Concat([]string{"/bin/sh", "-c", openProbeScript, "sh"}, look)...)
 	if err != nil {
@@ -185,10 +198,14 @@ func (m *Manager) PrepareOpen(ctx context.Context, name string, o OpenOptions) (
 			name, ErrNoHelpers, strings.Join(missing, " or "), name)
 	}
 	// A missing OpenInDir means nothing was copied in, so there are no
-	// new inputs; with no tree either, there is nothing to plan from.
+	// new inputs, and the tree is resumed or planned on its own. With no
+	// tree either, there is nothing to open or plan from, unless the run
+	// names containers to skip, unskip, or release, which then fails in
+	// safeclaw-expand as it would on a first run, rather than being
+	// dropped.
 	run := openArgv(name, o, !gone[OpenInDir])
-	if o.Plan && gone[OpenInDir] && gone[OpenTreeDir] {
-		run.Expand = nil
+	if gone[OpenInDir] && gone[OpenTreeDir] && !o.namesContainers() {
+		run.Expand, run.Totext = nil, nil
 	}
 	run.KeepInputs = c.Label(config.LabelKeepInputs)
 	return run, nil

@@ -96,7 +96,7 @@ func TestPrepareOpen(t *testing.T) {
 		t.Errorf("run = %+v", run)
 	}
 	probe, ok := r.Find("exec --user sandbox --workdir /sandbox safeclaw-box /bin/sh -c")
-	if !ok || !slices.Equal(probe.Args[len(probe.Args)-3:], []string{"sh", "safeclaw-expand", "safeclaw-totext"}) {
+	if !ok || !slices.Equal(probe.Args[len(probe.Args)-5:], []string{"sh", "safeclaw-expand", "safeclaw-totext", "/sandbox/in", "/sandbox/tree"}) {
 		t.Errorf("probe = %q in %v", probe.Args, r.Commands())
 	}
 
@@ -105,7 +105,7 @@ func TestPrepareOpen(t *testing.T) {
 	if _, err := m.PrepareOpen(ctx, "box", OpenOptions{Timeout: time.Minute}); err != nil {
 		t.Fatal(err)
 	}
-	if probe, _ := r.Find("exec "); probe.Args[len(probe.Args)-1] != "safeclaw-expand" {
+	if probe, _ := r.Find("exec "); !slices.Equal(probe.Args[len(probe.Args)-4:], []string{"sh", "safeclaw-expand", "/sandbox/in", "/sandbox/tree"}) {
 		t.Errorf("probe = %q", probe.Args)
 	}
 
@@ -124,8 +124,8 @@ func TestPrepareOpen(t *testing.T) {
 	if _, err := m.PrepareOpen(ctx, "box", o); err == nil || errors.Is(err, ErrNoHelpers) || !strings.Contains(err.Error(), `unexpected output "\x1b[2J`) {
 		t.Errorf("err = %v", err)
 	}
-	// Only a plan looks for its paths, and nothing is printed twice.
-	for _, missing := range []string{"/sandbox/in\n", "safeclaw-expand\nsafeclaw-expand\n"} {
+	// Only what was looked for may be printed, and nothing twice.
+	for _, missing := range []string{"/sandbox/out\n", "safeclaw-expand\nsafeclaw-expand\n", "/sandbox/in\n/sandbox/in\n"} {
 		m, _ = newOpenManager(t, missing)
 		if _, err := m.PrepareOpen(ctx, "box", OpenOptions{Timeout: time.Minute}); err == nil || !strings.Contains(err.Error(), "unexpected output") {
 			t.Errorf("%q: err = %v", missing, err)
@@ -169,6 +169,50 @@ func TestPrepareOpenPlan(t *testing.T) {
 		m, _ := newOpenManager(t, missing)
 		if _, err := m.PrepareOpen(ctx, "box", o); err == nil || !strings.Contains(err.Error(), "unexpected output") {
 			t.Errorf("%q: err = %v", missing, err)
+		}
+	}
+}
+
+// A run without OpenInDir resumes the tree with no new inputs, and with
+// no tree either there is nothing to open, unless it names containers.
+func TestPrepareOpenNoInputs(t *testing.T) {
+	ctx := context.Background()
+	wrap := []string{"docker", "exec", "--user", "sandbox", "--workdir", "/sandbox", "safeclaw-box",
+		"/bin/sh", "-c", `umask 022; exec "$@"`, "sh", "timeout", "--kill-after=5s", "--", "60s"}
+	expand := func(args ...string) []string { return slices.Concat(wrap, []string{"safeclaw-expand"}, args) }
+	totext := slices.Concat(wrap, []string{"safeclaw-totext", "--recursive", "--replace", "--", "/sandbox/tree", "/sandbox/out"})
+	for _, tc := range []struct {
+		name, missing  string
+		o              OpenOptions
+		expand, totext []string
+	}{
+		{name: "both", o: OpenOptions{}, expand: expand("--", "/sandbox/in", "/sandbox/tree")},
+		// Before the first open the inputs make the tree.
+		{name: "no tree", missing: "/sandbox/tree\n", o: OpenOptions{}, expand: expand("--", "/sandbox/in", "/sandbox/tree")},
+		{name: "tree only", missing: "/sandbox/in\n", o: OpenOptions{}, expand: expand("--", "/sandbox/tree")},
+		{name: "tree only, release and skip", missing: "/sandbox/in\n",
+			o:      OpenOptions{Skip: []string{"1-a.zip"}, Unskip: []string{"2-b.zip"}, ExpandArgs: []string{"--hold=mail-archives", "--release=1-c.eml.unpacked/1-d.zip"}},
+			expand: expand("--hold=mail-archives", "--release=1-c.eml.unpacked/1-d.zip", "--skip=1-a.zip", "--unskip=2-b.zip", "--", "/sandbox/tree")},
+		{name: "tree only, text", missing: "/sandbox/in\n", o: OpenOptions{Text: true}, expand: expand("--", "/sandbox/tree"), totext: totext},
+		{name: "neither", missing: "/sandbox/in\n/sandbox/tree\n", o: OpenOptions{ExpandArgs: []string{"--hold=mail-archives", "--release-all=false"}}},
+		{name: "neither, text", missing: "/sandbox/in\n/sandbox/tree\n", o: OpenOptions{Text: true}},
+		// Containers named with nothing to name them in fail in
+		// safeclaw-expand, as on a first run, rather than being dropped.
+		{name: "neither, skip", missing: "/sandbox/tree\n/sandbox/in\n", o: OpenOptions{Skip: []string{"1-a.zip"}}, expand: expand("--skip=1-a.zip", "--", "/sandbox/tree")},
+		{name: "neither, unskip", missing: "/sandbox/in\n/sandbox/tree\n", o: OpenOptions{Unskip: []string{"1-a.zip"}}, expand: expand("--unskip=1-a.zip", "--", "/sandbox/tree")},
+		{name: "neither, release", missing: "/sandbox/in\n/sandbox/tree\n", o: OpenOptions{ExpandArgs: []string{"--hold=mail-archives", "--release=1-a.zip"}},
+			expand: expand("--hold=mail-archives", "--release=1-a.zip", "--", "/sandbox/tree")},
+		{name: "neither, release all", missing: "/sandbox/in\n/sandbox/tree\n", o: OpenOptions{ExpandArgs: []string{"--hold=mail-archives", "--release-all=true"}},
+			expand: expand("--hold=mail-archives", "--release-all=true", "--", "/sandbox/tree")},
+	} {
+		tc.o.Timeout = time.Minute
+		m, _ := newOpenManager(t, tc.missing)
+		run, err := m.PrepareOpen(ctx, "box", tc.o)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if !slices.Equal(run.Expand, tc.expand) || !slices.Equal(run.Totext, tc.totext) || (run.Expand == nil) != (tc.expand == nil) {
+			t.Errorf("%s:\nexpand = %q\nwant     %q\ntotext = %q\nwant     %q", tc.name, run.Expand, tc.expand, run.Totext, tc.totext)
 		}
 	}
 }
