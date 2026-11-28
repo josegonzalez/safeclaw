@@ -80,14 +80,45 @@ func NewRootCommand() *cobra.Command {
 }
 
 func newVersionCommand() *cobra.Command {
-	return &cobra.Command{
+	var (
+		asJSON  bool
+		require string
+	)
+	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print version information",
-		Args:  cobra.NoArgs,
-		Run: func(cmd *cobra.Command, _ []string) {
-			fmt.Fprintf(cmd.OutOrStdout(), "safeclaw %s\n", version.String())
+		Long: "Print this build's version, commit, and build time.\n\n" +
+			"With --json they are printed as JSON, as {\"schema\", \"version\", \"commit\", \"built\"}. The schema field is the version of the output: " +
+			"fields may be added within a version, but are never renamed, removed, or given a new meaning without a new version.\n\n" +
+			"With --require VERSION it also exits non-zero, naming the installed and required versions, when the installed version is older " +
+			"than VERSION, given as MAJOR.MINOR.PATCH with or without a leading v. A development build, which has no release version, " +
+			"fails any --require, since its version is unknown.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var required version.Release
+			if cmd.Flags().Changed("require") {
+				r, err := version.ParseRelease(require)
+				if err != nil {
+					return fmt.Errorf("--require: %w", err)
+				}
+				required = r
+			}
+			if asJSON {
+				if err := writeJSON(cmd.OutOrStdout(), version.Get()); err != nil {
+					return err
+				}
+			} else if _, err := fmt.Fprintf(cmd.OutOrStdout(), "safeclaw %s\n", version.String()); err != nil {
+				return err
+			}
+			if cmd.Flags().Changed("require") {
+				return version.Require(version.Version, required)
+			}
+			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print the version information as JSON")
+	cmd.Flags().StringVar(&require, "require", "", "exit non-zero unless this build is at least `VERSION`")
+	return cmd
 }
 
 // completeSessions completes interactive session names for commands taking
