@@ -79,6 +79,9 @@ Sandboxes run the `sandbox` [image variant](#image-variants) by default, which a
 The `sandbox` variant also has `safeclaw-unpack`, which lists and extracts untrusted archives with `7z` more safely than running `7z x` or `unzip` yourself: it refuses archives with links, special files, or unsafe paths (absolute, a drive letter, a `..` segment, or control characters), checks a size limit before, during, and after extracting, deletes any link 7z made and checks every extracted path stays inside the destination, and unpacks nested archives up to a depth limit. See [unpacking archives](docs/architecture.md#unpacking-archives).
 
 ```bash
+# Print the archive format a file starts like (zip, 7z, rar, tar, gzip, bzip2, xz, or zstd), or none
+safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- safeclaw-unpack detect /in/report.zip
+
 # One entry per line: type, size, escaped path, and flags such as ENCRYPTED, LINK, and UNSAFE-PATH
 safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- safeclaw-unpack list /in/report.zip
 
@@ -89,7 +92,7 @@ safeclaw sandbox exec triage -- safeclaw-unpack extract /in/report.zip /sandbox/
 SAFECLAW_UNPACK_PASSWORD=... safeclaw sandbox exec -e SAFECLAW_UNPACK_PASSWORD triage -- safeclaw-unpack extract --drop-bad /in/sample.7z /sandbox/out/sample
 ```
 
-`safeclaw-unpack` exits 0 on success, 1 when it failed (7z failed, or the archive is corrupt or not an archive), 2 when the archive was rejected for links or unsafe paths, 3 when it needs a password (none or the wrong one was given), and 4 when it is over `--max-size` (default `512m`). The password comes from `SAFECLAW_UNPACK_PASSWORD`, or the variable `--password-env` names, and reaches 7z on its stdin rather than its arguments. `--depth` (default `3`) limits how many levels of nested archives are unpacked, each into `NAME.unpacked` next to it.
+`safeclaw-unpack` exits 0 on success, 1 when it failed (7z failed, or the archive is corrupt), 2 when the archive was rejected for links or unsafe paths, 3 when it needs a password (none or the wrong one was given), 4 when it is over `--max-size` (default `512m`), and 5 when the file is not an archive: `detect` found no archive format, or 7z can't open it for `list` or `extract` and it doesn't start like an archive `detect` knows. `detect` uses the same check `extract` uses to find nested archives, so callers can ask it instead of keeping their own list of archive types. The password comes from `SAFECLAW_UNPACK_PASSWORD`, or the variable `--password-env` names, and reaches 7z on its stdin rather than its arguments. `--depth` (default `3`) limits how many levels of nested archives are unpacked, each into `NAME.unpacked` next to it.
 
 ```bash
 # Create a sandbox, mounting host directories read-only (-v repeats)

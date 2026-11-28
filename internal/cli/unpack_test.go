@@ -61,6 +61,7 @@ func TestUnpackFailure(t *testing.T) {
 		{&unpack.Error{Kind: unpack.Rejected, Msg: "1 entry", Bad: bad}, 2},
 		{&unpack.Error{Kind: unpack.NeedsPassword, Msg: "no password"}, 3},
 		{&unpack.Error{Kind: unpack.TooLarge, Msg: "big"}, 4},
+		{&unpack.Error{Kind: unpack.NotArchive, Msg: "text"}, 5},
 		{&unpack.Error{Kind: unpack.Failed, Msg: "7z"}, 1},
 		{errors.New("other"), 1},
 	} {
@@ -117,7 +118,7 @@ func TestUnpackFlags(t *testing.T) {
 		}
 	}
 	for _, help := range []string{newUnpackCommand("unpack").Long, cmd.Long, newUnpackListCommand().Long} {
-		for _, s := range []string{"Exit codes:", "2  rejected", "3  needs password", "4  too large", unpackPasswordEnv} {
+		for _, s := range []string{"Exit codes:", "2  rejected", "3  needs password", "4  too large", "5  not an archive", unpackPasswordEnv} {
 			if !strings.Contains(help, s) {
 				t.Errorf("help lacks %q", s)
 			}
@@ -173,6 +174,65 @@ func TestUnpackCommand(t *testing.T) {
 	}
 	if _, err := run(t, newUnpackCommand("unpack"), "extract", archive, dest); !errors.Is(err, exitCodeError{1}) {
 		t.Errorf("extract into a non-empty dest: %v", err)
+	}
+
+	// A file that isn't an archive exits 5, and a corrupt one 1.
+	text := filepath.Join(dir, "notes.txt")
+	corrupt := filepath.Join(dir, "bad.zip")
+	if err := os.WriteFile(text, []byte("just text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(corrupt, b.Bytes()[:20], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for file, code := range map[string]int{text: 5, corrupt: 1} {
+		if _, err := run(t, newUnpackCommand("unpack"), "list", file); !errors.Is(err, exitCodeError{code}) {
+			t.Errorf("list %s: %v, want exit %d", filepath.Base(file), err, code)
+		}
+		out, err := run(t, newUnpackCommand("unpack"), "extract", "--json", file, filepath.Join(dir, filepath.Base(file)+".out"))
+		var v unpackJSON
+		if !errors.Is(err, exitCodeError{code}) || json.Unmarshal([]byte(out), &v) != nil || v.Code != code {
+			t.Errorf("extract %s = %q, %v; want exit %d", filepath.Base(file), out, err, code)
+		}
+	}
+}
+
+func TestUnpackDetect(t *testing.T) {
+	dir := t.TempDir()
+	zipFile, text := filepath.Join(dir, "a.zip"), filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(zipFile, []byte("PK\x03\x04rest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(text, []byte("just text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		args []string
+		out  string
+		code int
+	}{
+		{[]string{zipFile}, "zip\n", 0},
+		{[]string{text}, "none\n", 5},
+		{[]string{"--json", zipFile}, `{"status":"ok","code":0,"type":"zip"}` + "\n", 0},
+		{[]string{"--json", text}, `{"status":"not an archive","code":5,"type":"none"}` + "\n", 5},
+		{[]string{"--json", filepath.Join(dir, "missing")}, "", 1},
+		{[]string{dir}, "", 1},
+	} {
+		out, err := run(t, newUnpackCommand("unpack"), append([]string{"detect"}, c.args...)...)
+		switch {
+		case c.code == 0 && err != nil, c.code != 0 && !errors.Is(err, exitCodeError{c.code}):
+			t.Errorf("detect %v: err = %v, want exit %d", c.args, err, c.code)
+		case c.out != "" && out != c.out:
+			t.Errorf("detect %v = %q, want %q", c.args, out, c.out)
+		}
+	}
+	out, _ := run(t, newUnpackCommand("unpack"), "detect", "--json", filepath.Join(dir, "missing"))
+	var v unpackJSON
+	if err := json.Unmarshal([]byte(out), &v); err != nil || v.Status != "failed" || v.Code != 1 || v.Error == "" || v.Type != "" {
+		t.Errorf("detect --json of a missing file = %q, %v", out, err)
+	}
+	if code := executeUnpack(t.Context(), []string{"detect", text}); code != 5 {
+		t.Errorf("detect of a text file exit = %d", code)
 	}
 }
 
