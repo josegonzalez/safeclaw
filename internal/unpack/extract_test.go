@@ -39,7 +39,7 @@ func (f *fakeRunner) List(_ context.Context, archive string, pw *string) (*Listi
 	f.pws = append(f.pws, pw)
 	a, ok := f.archives[filepath.Base(archive)]
 	if !ok {
-		return nil, errNotArchive
+		return nil, ErrNotArchive
 	}
 	if a.listErr != nil {
 		return nil, a.listErr
@@ -439,7 +439,7 @@ func TestEmptyDirNoFollow(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
 		t.Fatal(err)
 	}
-	if err := emptyDir(root); err != nil {
+	if err := EmptyDir(root); err != nil {
 		t.Fatal(err)
 	}
 	wantEmpty(t, root)
@@ -531,7 +531,14 @@ func TestNotArchive(t *testing.T) {
 		if e := wantKind(t, err, kind); e.Archive != "" {
 			t.Errorf("%s: archive = %q", name, e.Archive)
 		}
+		// Either way the error says 7z couldn't open it.
+		if !errors.Is(err, ErrNotArchive) {
+			t.Errorf("%s: %v doesn't wrap ErrNotArchive", name, err)
+		}
 		wantEmpty(t, dest)
+	}
+	if err := (&Error{Kind: Failed, Msg: "7z: data error"}); errors.Is(err, ErrNotArchive) {
+		t.Error("a plain failure wraps ErrNotArchive")
 	}
 	if NotArchive.String() != "not an archive" || int(NotArchive) != 5 {
 		t.Errorf("NotArchive = %d %q", NotArchive, NotArchive)

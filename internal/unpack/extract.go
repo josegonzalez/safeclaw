@@ -106,29 +106,29 @@ func Extract(ctx context.Context, archive, dest string, o Options) (*Result, err
 	} else if !fi.Mode().IsRegular() {
 		return nil, &Error{Kind: Failed, Msg: fmt.Sprintf("%s is not a regular file", archive)}
 	}
-	root, err := prepareDest(dest)
+	root, err := PrepareDest(dest)
 	if err != nil {
 		return nil, &Error{Kind: Failed, Msg: err.Error()}
 	}
 	x := &extractor{o: o, root: root, flags: map[string][]string{}, unpacked: map[string]string{}}
 	if err := x.unpack(ctx, src, root, "", 0); err != nil {
-		if cerr := emptyDir(root); cerr != nil {
+		if cerr := EmptyDir(root); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("emptying %s: %w", dest, cerr))
 		}
 		return &Result{Dropped: x.dropped}, err
 	}
 	entries, err := x.entries()
 	if err != nil {
-		_ = emptyDir(root)
+		_ = EmptyDir(root)
 		return nil, &Error{Kind: Failed, Msg: err.Error()}
 	}
 	return &Result{Entries: entries, Dropped: x.dropped, Failed: x.failed}, nil
 }
 
-// prepareDest makes dest if it is missing and returns its absolute path
+// PrepareDest makes dest if it is missing and returns its absolute path
 // with links resolved. An existing dest must be an empty directory and not
 // a symbolic link.
-func prepareDest(dest string) (string, error) {
+func PrepareDest(dest string) (string, error) {
 	abs, err := filepath.Abs(dest)
 	if err != nil {
 		return "", err
@@ -188,7 +188,7 @@ func (x *extractor) unpack(ctx context.Context, archive, dir, rel string, depth 
 
 	l, err := x.o.Runner.List(ctx, archive, x.o.Password)
 	if err != nil {
-		if errors.Is(err, errNotArchive) {
+		if errors.Is(err, ErrNotArchive) {
 			if depth > 0 {
 				return err
 			}
@@ -218,7 +218,7 @@ func (x *extractor) unpack(ctx context.Context, archive, dir, rel string, depth 
 			listed += e.Size
 		}
 	}
-	used, err := treeSize(x.root)
+	used, err := TreeSize(x.root)
 	if err != nil {
 		return fail(err)
 	}
@@ -268,7 +268,7 @@ func (x *extractor) unpack(ctx context.Context, archive, dir, rel string, depth 
 		}
 		x.dropped = append(x.dropped, withFlag(removed, FlagDropped)...)
 	}
-	if used, err = treeSize(x.root); err != nil {
+	if used, err = TreeSize(x.root); err != nil {
 		return fail(err)
 	}
 	if used > x.o.MaxSize {
@@ -285,13 +285,13 @@ func (x *extractor) unpack(ctx context.Context, archive, dir, rel string, depth 
 			x.flags[prel] = append(x.flags[prel], FlagDepthLimit)
 			continue
 		}
-		sub, err := uniqueDir(p + UnpackedSuffix)
+		sub, err := UniqueDir(p + UnpackedSuffix)
 		if err != nil {
 			return fail(err)
 		}
 		before := x.mark()
 		err = x.unpack(ctx, p, sub, relTo(x.root, sub), depth+1)
-		if errors.Is(err, errNotArchive) {
+		if errors.Is(err, ErrNotArchive) {
 			// It only starts like an archive.
 			if err := os.RemoveAll(sub); err != nil {
 				return fail(err)
@@ -328,7 +328,7 @@ func (x *extractor) mark() mark {
 // leavePacked removes sub, a nested archive's directory, without following
 // links, and forgets what was recorded for it since m.
 func (x *extractor) leavePacked(sub string, m mark) error {
-	if err := emptyDir(sub); err != nil {
+	if err := EmptyDir(sub); err != nil {
 		return err
 	}
 	if err := os.Remove(sub); err != nil {
@@ -380,7 +380,7 @@ func (x *extractor) extractWatched(ctx context.Context, archive, dir string, inc
 			case <-t.C:
 				// Files come and go while 7z runs, so a failed walk just
 				// counts what it saw.
-				if n, _ := treeSize(x.root); n > x.o.MaxSize {
+				if n, _ := TreeSize(x.root); n > x.o.MaxSize {
 					over.Store(true)
 					cancel()
 					return
@@ -488,9 +488,9 @@ func sanitize(root, dir string) ([]Entry, error) {
 	return removed, err
 }
 
-// emptyDir removes everything in dir without following links. Directories
+// EmptyDir removes everything in dir without following links. Directories
 // are made writable first, since 7z can make them without permissions.
-func emptyDir(dir string) error {
+func EmptyDir(dir string) error {
 	_ = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err == nil && d.IsDir() {
 			_ = os.Chmod(p, 0o700)
@@ -508,8 +508,8 @@ func emptyDir(dir string) error {
 	return errors.Join(errs...)
 }
 
-// treeSize adds up the sizes of the regular files under dir.
-func treeSize(dir string) (int64, error) {
+// TreeSize adds up the sizes of the regular files under dir.
+func TreeSize(dir string) (int64, error) {
 	var n int64
 	err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -555,10 +555,10 @@ func mkdirNoFollow(base, p string) error {
 	return nil
 }
 
-// uniqueDir makes a new directory named p, or p-2, p-3, and so on when
+// UniqueDir makes a new directory named p, or p-2, p-3, and so on when
 // that name is taken, so a nested archive is never unpacked into something
 // the archive already had.
-func uniqueDir(p string) (string, error) {
+func UniqueDir(p string) (string, error) {
 	for i := 1; i < 1000; i++ {
 		name := p
 		if i > 1 {
@@ -632,7 +632,7 @@ func List(ctx context.Context, r Runner, archive string, pw *string) (*Listing, 
 		return nil, &Error{Kind: Failed, Msg: fmt.Sprintf("%s is not a regular file", archive)}
 	}
 	l, err := r.List(ctx, src, pw)
-	if errors.Is(err, errNotArchive) {
+	if errors.Is(err, ErrNotArchive) {
 		err = notArchive(src)
 	}
 	if err != nil {

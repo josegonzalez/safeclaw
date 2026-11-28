@@ -121,6 +121,18 @@ safeclaw sandbox exec triage -- safeclaw-mail extract /in/invoice.eml /sandbox/o
 
 `safeclaw-mail` uses `safeclaw-unpack`'s exit codes where they mean the same thing: 0 on success, 1 when it failed, 2 when the message was rejected for going over a limit on its structure, 4 when what it would write is over `--max-size` (default `512m`), and 5 when the file is not a message. It never exits 3. `--depth` (default `3`) limits how many levels of nested messages are followed; one past it is written as an attachment.
 
+For a report that mixes the two, such as an email carrying a zip that holds a forwarded `.eml` carrying another zip, the `sandbox` variant also has `safeclaw-expand`, which opens the whole tree in one call. It copies each input into DEST, opens every email and archive it finds into `NAME.unpacked` next to it, the same way `safeclaw-mail extract` and `safeclaw-unpack extract` do, with one `--depth` and one `--max-size` for the whole tree, and writes `manifest.json` into DEST with every container's path, kind, outcome, flags, and the directory it was opened into. A container that fails at any level, the inputs included, is left packed and flagged `REJECTED`, `NEEDS-PASSWORD`, `TOO-LARGE`, `FAILED`, or `DEPTH-LIMIT`, and the rest is kept. See [opening a tree of emails and archives](docs/architecture.md#opening-a-tree-of-emails-and-archives).
+
+```bash
+# One line per container: kind, escaped path, flags, and the directory it was opened into
+safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- safeclaw-expand /in/report.eml /in/logs.zip /sandbox/out
+
+# Print the manifest instead, with a password for every encrypted archive, and leave emails as plain files
+SAFECLAW_UNPACK_PASSWORD=... safeclaw sandbox exec -e SAFECLAW_UNPACK_PASSWORD triage -- safeclaw-expand --json --no-mail /in/dump.tar.gz /sandbox/out
+```
+
+`safeclaw-expand` exits 0 when the run finished, even with containers left packed, since the manifest and the flags say what was; and 1 when the run itself failed: a usage or I/O error, an input that is missing or not a regular file, a DEST that isn't missing or empty, or an interrupt, which empties DEST.
+
 ```bash
 # Create a sandbox, mounting host directories read-only (-v repeats)
 safeclaw sandbox run -s triage -v ~/inbox:/in -v ~/triage-tools:/opt/tools
@@ -268,7 +280,7 @@ safeclaw sandbox exec --ephemeral --variant base -- ls
 - yt-dlp 2026.11.23
 - [DX plugin](https://github.com/ykdojo/claude-code-tips#tip-44-install-the-dx-plugin), [custom status line](https://github.com/ykdojo/claude-code-tips#tip-0-customize-your-status-line), [shell aliases](#aliases)
 - ttyd web terminal + tmux
-- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, file, clamav and clamav-freshclam, `safeclaw-unpack`, `safeclaw-totext`, and `safeclaw-mail`
+- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, file, clamav and clamav-freshclam, `safeclaw-unpack`, `safeclaw-totext`, `safeclaw-mail`, and `safeclaw-expand`
 
 ## Sensible defaults
 

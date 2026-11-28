@@ -79,7 +79,7 @@ func TestIntegrationKeepGoing(t *testing.T) {
 	if rejected == nil || rejected.Kind != Rejected || len(rejected.Bad) != 1 || rejected.Bad[0].Path != "links.zip.unpacked/l" {
 		t.Errorf("links.zip failure = %+v", rejected)
 	}
-	if n, err := treeSize(dest); err != nil || n > 2<<20 {
+	if n, err := TreeSize(dest); err != nil || n > 2<<20 {
 		t.Errorf("tree size = %d, %v", n, err)
 	}
 	noEscape(t, dest, "outer.zip")

@@ -364,6 +364,67 @@ Exit codes, reusing `safeclaw-unpack`'s where they mean the same thing:
 | 4 | too large: what would be written is over `--max-size` |
 | 5 | not a message: the file doesn't start with a message header |
 
+### Opening a tree of emails and archives
+
+Untrusted reports mix the two kinds of container: an email carries a zip, which holds a forwarded `.eml`, which carries another zip. The `sandbox` image variant links `/usr/local/bin/safeclaw-expand` to the image's `safeclaw` binary, which runs as `safeclaw expand` when called by that name, so callers can open such a tree in one call instead of writing their own loop around `safeclaw-unpack` and `safeclaw-mail`. Those two stay as they are for single files. It is built on the same Go packages, so an archive is opened exactly as `safeclaw-unpack extract` opens it and an email as `safeclaw-mail extract` does, and like them it needs no config directory and should run inside a sandbox.
+
+`safeclaw-expand IN... DEST` has `safeclaw-unpack`'s rules for DEST: it must be missing or an empty directory, and not a symbolic link. Every input must be a regular file (a link to one is followed); one that is missing or isn't fails the run before DEST is touched. Each input is copied into DEST as `N-NAME`, `N` counting the inputs from 1 and `NAME` its base name made safe as `safeclaw-mail` makes attachment names safe, so inputs never collide and DEST holds everything the manifest names, whatever the inputs were mounted from.
+
+A container is a regular file that starts like an archive `safeclaw-unpack detect` names a format for, or, unless `--no-mail` is given, one that starts like an email: a header within `safeclaw-mail`'s header limits that parses and has one of the fields a message has, after an mbox `From ` line if there is one. A header over a limit is not detected, so a large file of other text is never taken for a rejected message. Each container is opened into `NAME.unpacked` next to it (`NAME.unpacked-2` and so on when that name is taken, never merging into what was there): an archive is listed, checked, extracted, and sanitized as `safeclaw-unpack extract` does, without unpacking the archives in it, and an email is extracted as `safeclaw-mail extract` does, into `body.txt` and `N-NAME` attachments, with its part listing, the lines `safeclaw-mail extract` prints, written to `parts.txt`. Then every regular file in that directory is looked at in turn, without following links, in sorted order, depth first, so each container is opened before the ones after it are looked at.
+
+The helper's own output is never taken for an email: `body.txt` starts with the message's headers, so it would look like one. Rather than guess from the content, `safeclaw-expand` skips exactly the files it wrote itself, an email's `body.txt` and `parts.txt` at the top of its `NAME.unpacked`, and lists them as the container's `outputs` in the manifest. Everything else is the container's own content and is looked at: attachments are always `N-NAME`, so they can't take those names, and a `body.txt` that came out of an archive is checked like any other file.
+
+`--depth` (default `3`, `0` for only the inputs) limits how many levels of containers are opened below the inputs, emails and archives alike. Inside an email, each forwarded message counts as a level: an attachment is one level below the email, and one more for each forwarded message around it, and the email's forwarded messages are followed only as deep as the tree's limit allows, so one past it is written as an `N-message.eml` attachment and flagged `DEPTH-LIMIT` there. `--max-size` (default `512m`) limits the total size of everything opened across the whole tree, `body.txt` and `parts.txt` included, the input copies not: each container is opened against what is left of it, checked again once it is opened, and the space one that failed took is given back to the containers after it. `--password-env` (default `SAFECLAW_UNPACK_PASSWORD`) is read and removed from the environment as `safeclaw-unpack` reads it, and is given to 7z for every encrypted archive in the tree. Without 7z on PATH, emails are still opened, and every archive is left packed and flagged `FAILED`.
+
+Every level keeps going, the inputs included, as `--nested keep-going` does for nested archives. A container that is rejected (links, special files, or unsafe paths in an archive, or an email over a limit on its structure), needs a password, would take the total past `--max-size`, fails otherwise, or is past `--depth` is left packed, flagged `REJECTED`, `NEEDS-PASSWORD`, `TOO-LARGE`, `FAILED`, or `DEPTH-LIMIT`, and its `NAME.unpacked` is removed without following links, so nothing from it is left behind. Everything else is kept. A nested file that only starts like an archive, which 7z can't open, is left as it is and not recorded, as `safeclaw-unpack` leaves it; an input like that is corrupt, and `FAILED`. The run itself fails, emptying DEST without following links, for an I/O error outside a container or an interrupt.
+
+When the run finishes it writes `DEST/manifest.json`, which doesn't count toward `--max-size`, and prints one tab-separated line per container: its kind (`email`, or the archive format), its path, its flags, and the directory it was opened into (`-` when it was left packed), with the paths escaped as `safeclaw-unpack list` escapes them. Each entry that got an archive rejected follows it on an `entry` line with its type, its path inside the archive, and its flags, and each container left packed for a failure is also reported on stderr with what went wrong. `--json` prints the manifest instead:
+
+```json
+{
+  "schema": 1,
+  "status": "ok",
+  "code": 0,
+  "options": {"depth": 3, "max_size": 536870912, "mail": true, "password": false},
+  "size": 12345,
+  "inputs": [{"path": "1-report.eml", "size": 4567, "kind": "email"}],
+  "containers": [
+    {
+      "path": "1-report.eml",
+      "kind": "email",
+      "depth": 0,
+      "outcome": "unpacked",
+      "flags": ["UNPACKED"],
+      "unpacked": "1-report.eml.unpacked",
+      "outputs": ["1-report.eml.unpacked/body.txt", "1-report.eml.unpacked/parts.txt"],
+      "code": 0
+    },
+    {
+      "path": "1-report.eml.unpacked/1-files.zip",
+      "kind": "zip",
+      "depth": 1,
+      "parent": "1-report.eml",
+      "outcome": "rejected",
+      "flags": ["REJECTED"],
+      "code": 2,
+      "error": "rejected: 1 entry with links, special files, or unsafe paths",
+      "rejected": [{"type": "symlink", "size": null, "path": "link", "flags": ["LINK"], "link": "/etc/passwd"}]
+    }
+  ]
+}
+```
+
+`schema` is the manifest's version: fields, outcomes, and flags may be added within a version, but are never renamed, removed, or given a new meaning without a new one, so a reader should treat an outcome it doesn't know as a container left packed. `options` is the run's policy, with only whether a password was given. `size` is what counts toward `--max-size`. `inputs` are the copies, in the order the inputs were given, with the kind of each that is a container. `containers` has one record per container, in the order they were opened, each before the containers found in it. Its `path` is the record's key: it is unique within a manifest and the same for the same inputs. `kind` is `email` or the archive format, `depth` its level (0 for an input), `parent` the container it was found in, `outcome` one of `unpacked`, `rejected`, `needs-password`, `too-large`, `failed`, or `depth-limit`, and `flags` the outcome's flag, then for an opened email `UNSAFE-NAME`, `BAD-ENCODING`, or `MALFORMED` when its parts had them, the details being in its `parts.txt`. `unpacked` is the directory it was opened into, `outputs` the files in it the helper wrote itself, `code` the exit code `safeclaw-unpack` or `safeclaw-mail` would have given for its own failure (0 when it didn't fail), `error` what went wrong, and `rejected` the entries that got an archive rejected. Every `path`, `parent`, `unpacked`, and `outputs` value is relative to DEST, uses slashes, and has no empty, `.`, or `..` elements, which the manifest is checked for before it is written and when it is read back; the paths under `rejected` are entry names inside the archive as it listed them, which can be unsafe, and are never paths in DEST. A failed run prints `{"schema", "status", "code", "error"}` and writes no manifest.
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | the run finished, including with containers left packed and flagged |
+| 1 | failed: a usage or I/O error, an input that is missing or not a regular file, DEST is not a missing or empty directory, or the run was interrupted |
+
+Codes 2 to 5 are not used for the run. A finished run exits 0 however many containers were left packed, as `safeclaw-unpack extract --nested keep-going` does, since everything kept is safe and the manifest says what wasn't, and that holds for the inputs too: an input left packed is a container like any other. Each container's own failure keeps its `safeclaw-unpack` or `safeclaw-mail` code in the manifest's `code`, so a caller that wants to treat a packed container as a failure checks the flags or the codes.
+
 ### Inspecting and verifying
 
 `safeclaw sandbox inspect NAME` and `safeclaw sandbox verify NAME` let a script confirm that a container really is an isolated sandbox, and whether it is running, without relying on the `safeclaw-` prefix, the labels, or `docker inspect` templates. Neither changes the sandbox. Both refuse interactive sessions and missing names.
@@ -444,7 +505,7 @@ Sessions using host networking, or sharing another container's network, can't be
 
 An image variant is the base `safeclaw` image with extra apt packages or `run` commands, tagged `safeclaw:NAME`. Variants come from two places:
 
-- built in: `sandbox` adds poppler-utils, tesseract-ocr and tesseract-ocr-eng, 7zip, and file, and links `safeclaw-unpack` (see [unpacking archives](#unpacking-archives)), `safeclaw-totext` (see [extracting text](#extracting-text)), and `safeclaw-mail` (see [reading emails](#reading-emails))
+- built in: `sandbox` adds poppler-utils, tesseract-ocr and tesseract-ocr-eng, 7zip, and file, and links `safeclaw-unpack` (see [unpacking archives](#unpacking-archives)), `safeclaw-totext` (see [extracting text](#extracting-text)), `safeclaw-mail` (see [reading emails](#reading-emails)), and `safeclaw-expand` (see [opening a tree of emails and archives](#opening-a-tree-of-emails-and-archives))
 - `~/.config/safeclaw/config.yaml` (honoring `XDG_CONFIG_HOME`), whose `variants` map adds variants or replaces a built-in of the same name, and whose `defaults` pick the variant each session type uses when none is given (`base` for sessions and `sandbox` for sandboxes unless set)
 
 The config file is decoded strictly, so unknown keys are errors. Names are lowercase and may not be `base`, which means the base image, or `latest`. Package names are checked, and `run` commands are one line each and run as root. The file is read whenever a variant is resolved, so the dashboard sees edits without a restart, and commands that don't resolve variants, like `ls`, `stop`, and `rm`, don't read it.

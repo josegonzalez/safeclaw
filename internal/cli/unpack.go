@@ -333,12 +333,10 @@ func writeEntries(w io.Writer, entries []unpack.Entry) error {
 	return err
 }
 
-// escapeField escapes a path for one tab-separated field: backslashes are
-// doubled, then everything termtext.Escape escapes, then tabs and newlines,
-// so the result is unambiguous and has no control characters.
+// escapeField escapes a path for one tab-separated field, as
+// termtext.EscapeField does.
 func escapeField(s string) string {
-	s = termtext.Escape(strings.ReplaceAll(s, `\`, `\\`))
-	return strings.NewReplacer("\t", `\t`, "\n", `\n`).Replace(s)
+	return termtext.EscapeField(s)
 }
 
 // unpackFailure prints err, and the entries that got the archive rejected,

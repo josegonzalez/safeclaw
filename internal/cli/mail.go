@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -201,27 +200,7 @@ func writeMailHeaders(b *strings.Builder, headers []mail.Header) {
 // writeMailParts writes parts as PART, TYPE, SIZE, NAME, FLAGS lines, and
 // FILE with withFile.
 func writeMailParts(b *strings.Builder, parts []mail.Part, withFile bool) {
-	dash := func(s string) string {
-		if s == "" {
-			return "-"
-		}
-		return s
-	}
-	for _, p := range parts {
-		size := "-"
-		if p.Size >= 0 {
-			size = strconv.FormatInt(p.Size, 10)
-		}
-		name := "-"
-		if p.Name != "" {
-			name = escapeField(p.Name)
-		}
-		fmt.Fprintf(b, "%s\t%s\t%s\t%s\t%s", p.ID, escapeField(p.Type), size, name, dash(strings.Join(p.Flags(), ",")))
-		if withFile {
-			fmt.Fprintf(b, "\t%s", dash(escapeField(p.File)))
-		}
-		b.WriteString("\n")
-	}
+	_ = mail.WriteParts(b, parts, withFile)
 }
 
 // mailFailure prints err and returns the exit code for its kind.

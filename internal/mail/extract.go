@@ -121,6 +121,22 @@ func (x *walker) run(f *os.File, sink *textSink) ([]Header, error) {
 	return headers, nil
 }
 
+// Detect reports whether r starts like a message List and Extract would
+// read: with a header, after an mbox "From " line if there is one, that is
+// within the header limits, parses, and has at least one of the fields a
+// message has. It reads no more than the header, plus what its buffer
+// reads ahead. A header over a limit is not detected, though Extract would
+// reject it, so a large file of other text is never taken for a rejected
+// message. The error is one reading r.
+func Detect(r io.Reader) (bool, error) {
+	t := &tagReader{r: r}
+	h, _, err := readHeader(bufio.NewReaderSize(t, readBuffer))
+	if t.err != nil {
+		return false, t.err
+	}
+	return err == nil && isMessage(h), nil
+}
+
 func isMessage(h textproto.MIMEHeader) bool {
 	for _, k := range messageFields {
 		if _, ok := h[k]; ok {
