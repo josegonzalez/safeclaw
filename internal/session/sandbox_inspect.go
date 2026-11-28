@@ -98,7 +98,7 @@ type SandboxMount struct {
 }
 
 // getSandbox returns the named sandbox's inspect data, or an error wrapping
-// ErrNotFound or ErrNotSandbox.
+// ErrNotFound, ErrNotSandbox for an interactive session, or ErrNotManaged.
 func (m *Manager) getSandbox(ctx context.Context, name string) (string, *docker.Container, error) {
 	name = config.SessionName(name)
 	c, err := m.Docker.InspectOne(ctx, config.ContainerName(name))
@@ -108,8 +108,8 @@ func (m *Manager) getSandbox(ctx context.Context, name string) (string, *docker.
 	if c == nil {
 		return "", nil, fmt.Errorf("session %q %w", name, ErrNotFound)
 	}
-	if TypeOf(*c) != config.TypeSandbox {
-		return "", nil, wrongType(name, ErrNotSandbox)
+	if err := requireType(name, *c, config.TypeSandbox); err != nil {
+		return "", nil, err
 	}
 	return name, c, nil
 }

@@ -129,8 +129,10 @@ safeclaw sandbox stop "$name"
 Scripts that drive a sandbox can check it before handing it untrusted files, without relying on container names, labels, or `docker inspect`:
 
 ```bash
-safeclaw sandbox inspect triage   # its isolation settings, limits, and mounts as JSON
-safeclaw sandbox verify triage    # checks each isolation guarantee, exits non-zero naming any that fail
+safeclaw sandbox status triage                    # running, stopped, or missing, exiting 0, 3, or 4 (5 for an interactive session)
+safeclaw sandbox inspect triage                   # its isolation settings, limits, and mounts as JSON
+safeclaw sandbox inspect triage --field running   # one field: strings as plain text, anything else as JSON
+safeclaw sandbox verify triage                    # checks each isolation guarantee, exits non-zero naming any that fail
 ```
 
 Only the checks `verify` makes from the docker configuration are authoritative. Its live checks run inside the sandbox as the sandbox user, so code already running there can make them report anything: treat them as advisory. See [inspecting and verifying](docs/architecture.md#inspecting-and-verifying).
@@ -299,7 +301,8 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw sandbox cp-in NAME FILE...` | Copy regular host files into a running sandbox as `N-name`, owned by the sandbox user, refusing links and other file types. `--to` picks a directory under `/sandbox` (default `/sandbox/in`). |
 | `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, sparse files, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given, `--max-size` (default `1g`) caps the total, and `--max-files` (default `1000`) caps the number of files. |
 | `safeclaw sandbox ls` | List sandboxes |
-| `safeclaw sandbox inspect NAME` | Print a sandbox's status, variant, network, user, capabilities, read-only root, limits including `--disk`, mounts, and safeclaw labels as JSON with a versioned schema |
+| `safeclaw sandbox status NAME` | Print `running`, `stopped`, or `missing`, exiting 0, 3, or 4. A name that is an interactive session exits 5 with an error, and any other error exits 1. |
+| `safeclaw sandbox inspect NAME` | Print a sandbox's status, variant, network, user, capabilities, read-only root, limits including `--disk`, mounts, and safeclaw labels as JSON with a versioned schema. `--field NAME` prints one top-level field, a string as plain text and anything else as JSON. |
 | `safeclaw sandbox verify NAME` | Check a sandbox's configuration and, when it is running, what the sandbox user sees inside it against the sandbox's isolation guarantees, exiting non-zero and naming the failed checks. The configuration checks are authoritative, and the live checks advisory, since the sandbox can lie to them. `--json` prints the report as JSON. |
 | `safeclaw sandbox stop NAME` | Stop a sandbox, emptying its `/sandbox` |
 | `safeclaw sandbox rm NAME` | Delete a sandbox |

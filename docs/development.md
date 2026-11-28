@@ -69,10 +69,14 @@ mkdir -p tmp/out
 safeclaw sandbox cp-out t /sandbox/out tmp/out --only '*.txt'   # only a.txt
 safeclaw sandbox cp-out t /sandbox/out tmp/out --only '*.txt'   # refused: a.txt exists
 safeclaw sandbox inspect t                  # JSON with "network_mode": "none" and "disk_bytes": 1073741824
+safeclaw sandbox inspect t --field limits   # {"memory_bytes":...,"disk_bytes":1073741824}
+safeclaw sandbox status t; echo $?          # running, 0
 safeclaw sandbox verify t                   # every check ok, exit 0
 safeclaw sandbox stop t
 safeclaw sandbox verify t; echo $?          # running fails, live checks skipped, 1
+safeclaw sandbox status t; echo $?          # stopped, 3
 safeclaw sandbox rm -f t
+safeclaw sandbox status t; echo $?          # missing, 4
 safeclaw sandbox exec --ephemeral --disk 8m -- dd if=/dev/zero of=/sandbox/f bs=1M count=16   # No space left on device
 ```
 

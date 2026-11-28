@@ -34,6 +34,7 @@ func newSandboxCommand() *cobra.Command {
 		newSandboxCopyInCommand(),
 		newSandboxCopyOutCommand(),
 		newSandboxListCommand(),
+		newSandboxStatusCommand(),
 		newSandboxInspectCommand(),
 		newSandboxVerifyCommand(),
 		newSandboxStopCommand(),

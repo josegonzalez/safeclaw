@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"slices"
 	"strings"
 	"text/tabwriter"
 
@@ -15,26 +18,88 @@ import (
 )
 
 func newSandboxInspectCommand() *cobra.Command {
-	return &cobra.Command{
+	var field string
+	cmd := &cobra.Command{
 		Use:   "inspect NAME",
 		Short: "Print a sandbox's isolation settings as JSON",
 		Long: "Print a sandbox's name, status, variant, network, user, capabilities, read-only root, limits, tmpfs mounts, " +
 			"bind mounts, and safeclaw labels as JSON, as docker reports them. Nothing in the sandbox is changed or run.\n\n" +
 			"The schema field is the version of the output: fields may be added within a version, but are never renamed, " +
-			"removed, or given a new meaning without a new version. See docs/architecture.md for the fields.",
+			"removed, or given a new meaning without a new version. See docs/architecture.md for the fields.\n\n" +
+			"With --field, only that top-level field is printed: a string as plain text, anything else as JSON.",
+		Example: `  safeclaw sandbox inspect triage
+  safeclaw sandbox inspect triage --field running
+  safeclaw sandbox inspect triage --field limits`,
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completeType(config.TypeSandbox),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if cmd.Flags().Changed("field") && !slices.Contains(inspectFields(), field) {
+				return fmt.Errorf("unknown field %q: want one of %s", field, strings.Join(inspectFields(), ", "))
+			}
 			if err := resolveArg(cmd, args); err != nil {
 				return err
 			}
-			info, err := session.NewManager(nil).InspectSandbox(cmd.Context(), args[0])
+			info, err := newManager().InspectSandbox(cmd.Context(), args[0])
 			if err != nil {
 				return err
+			}
+			if cmd.Flags().Changed("field") {
+				return writeField(cmd.OutOrStdout(), info, field)
 			}
 			return writeJSON(cmd.OutOrStdout(), info)
 		},
 	}
+	cmd.Flags().StringVar(&field, "field", "", "print only this top-level field of the JSON")
+	_ = cmd.RegisterFlagCompletionFunc("field", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+		return inspectFields(), cobra.ShellCompDirectiveNoFileComp
+	})
+	return cmd
+}
+
+// inspectFields returns the top-level fields of `sandbox inspect`'s JSON,
+// sorted.
+func inspectFields() []string {
+	fields, err := jsonFields(session.SandboxInfo{})
+	if err != nil {
+		panic(err)
+	}
+	return slices.Sorted(maps.Keys(fields))
+}
+
+func jsonFields(v any) (map[string]json.RawMessage, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
+
+// writeField writes one top-level field of v's JSON on a line of its own:
+// a string unquoted, anything else as compact JSON.
+func writeField(out io.Writer, v any, name string) error {
+	fields, err := jsonFields(v)
+	if err != nil {
+		return err
+	}
+	raw, ok := fields[name]
+	if !ok {
+		return fmt.Errorf("unknown field %q", name)
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		_, err = fmt.Fprintln(out, s)
+		return err
+	}
+	var b bytes.Buffer
+	if err := json.Compact(&b, raw); err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(out, b.String())
+	return err
 }
 
 func newSandboxVerifyCommand() *cobra.Command {

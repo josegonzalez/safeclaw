@@ -245,7 +245,11 @@ The sandbox side also controls what those commands write to stderr, and part of 
 
 `safeclaw sandbox inspect NAME` and `safeclaw sandbox verify NAME` let a script confirm that a container really is an isolated sandbox, and whether it is running, without relying on the `safeclaw-` prefix, the labels, or `docker inspect` templates. Neither changes the sandbox. Both refuse interactive sessions and missing names.
 
+`safeclaw sandbox status NAME` answers only whether a sandbox is running, for scripts that don't want to parse JSON. It prints `running`, `stopped`, or `missing` and exits 0, 3, or 4. A sandbox counts as running when docker reports it running, the same as `inspect`'s `running`, and as stopped in every other state. A name that belongs to an interactive session prints nothing and exits 5 with an error, so a caller can refuse it instead of mistaking it for a missing sandbox, while a container labeled as neither a session nor a sandbox, an invalid name, or a docker failure exits 1. Like `inspect`, it runs nothing in the sandbox.
+
 `inspect` prints the sandbox's docker configuration as JSON and runs nothing inside it. `schema` is the version of the output: fields may be added within a version, but are never renamed, removed, or given a new meaning without a new one. Lists are never `null`.
+
+`inspect --field NAME` prints only one top-level field from the table below, on a line of its own: a string as plain text without quotes, and a number, boolean, list, or object as compact JSON, so `--field running` prints `true` or `false` and `--field limits` prints the limits object. A name that is not a top-level field, such as `limits.cpus`, is refused with the list of fields before docker is asked about the sandbox.
 
 | Field | Meaning |
 |---|---|
