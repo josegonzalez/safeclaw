@@ -331,6 +331,44 @@ func TestNetworkArgs(t *testing.T) {
 	}
 }
 
+func TestNetworkCreateArgs(t *testing.T) {
+	r := &dockertest.Runner{}
+	c := r.Client()
+	err := c.NetworkCreate(context.Background(), "safeclaw", docker.NetworkCreateOptions{
+		Driver:  "bridge",
+		Options: map[string]string{"z": "1", "com.docker.network.bridge.enable_icc": "false"},
+		Labels:  map[string]string{"safeclaw.network": "sessions", "a": "b"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "network create --driver bridge --opt com.docker.network.bridge.enable_icc=false --opt z=1 --label a=b --label safeclaw.network=sessions safeclaw"
+	if got := r.Commands(); len(got) != 1 || got[0] != want {
+		t.Errorf("network create = %v, want %q", got, want)
+	}
+}
+
+func TestNetworkInspect(t *testing.T) {
+	r := &dockertest.Runner{Handler: func(args []string, _ string) ([]byte, error) {
+		if args[len(args)-1] == "missing" {
+			return nil, &docker.Error{Args: args, Stderr: "Error response from daemon: network missing not found", Err: errors.New("exit 1")}
+		}
+		return []byte(`[{"Name": "safeclaw", "Id": "n1", "Driver": "bridge", "Internal": false, "Options": {"com.docker.network.bridge.enable_icc": "false"}, "Labels": {"safeclaw.network": "sessions"}}]`), nil
+	}}
+	c := r.Client()
+	ctx := context.Background()
+	n, err := c.NetworkInspect(ctx, "safeclaw")
+	if err != nil || n == nil || n.ID != "n1" || n.Driver != "bridge" || n.Options["com.docker.network.bridge.enable_icc"] != "false" || n.Labels["safeclaw.network"] != "sessions" {
+		t.Errorf("inspect = %+v, %v", n, err)
+	}
+	if n, err := c.NetworkInspect(ctx, "missing"); n != nil || err != nil {
+		t.Errorf("missing = %+v, %v, want nil, nil", n, err)
+	}
+	if got := r.Commands()[0]; got != "network inspect safeclaw" {
+		t.Errorf("inspect args = %q", got)
+	}
+}
+
 func TestExecArgs(t *testing.T) {
 	r := &dockertest.Runner{}
 	c := r.Client()
