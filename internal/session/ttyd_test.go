@@ -438,6 +438,18 @@ func TestLegacyPublishOnOldTTYDRefused(t *testing.T) {
 		if s := out.String(); !strings.Contains(s, want) || !strings.Contains(s, "Update the image with "+update+", then run `safeclaw run -s "+name+"` again to recreate it on [::1]") {
 			t.Errorf("%s: output = %s", name, s)
 		}
+
+		// `safeclaw url` gives the same warning, and nothing else.
+		ensured := out.String()
+		out.Reset()
+		term, err := m.Terminal(ctx, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.WarnTerminal(ctx, term)
+		if s := out.String(); s != legacyPublishWarning(name, w.containers["safeclaw-"+name].Labels[config.LabelVariant]) || !strings.Contains(ensured, s) {
+			t.Errorf("%s: url warning = %q, run printed %q", name, s, ensured)
+		}
 	}
 }
 

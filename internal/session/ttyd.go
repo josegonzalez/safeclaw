@@ -18,6 +18,7 @@ import (
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
+	"github.com/josegonzalez/safeclaw/internal/variant"
 )
 
 // PublishHost is the host address session terminals are published on. It
@@ -461,6 +462,12 @@ type Terminal struct {
 	// browserHost is the host its URL names, or "" when it has none; see
 	// containerURLHost.
 	browserHost string
+	// legacyHost says it is published on 127.0.0.1, the dashboard's cookie
+	// host, as sessions created before PublishHost were.
+	legacyHost bool
+	// argvCredential says its ttyd takes its credential on its command
+	// line; see readsCredentialFile.
+	argvCredential bool
 	// name and variant are the session's, for the error URL returns.
 	name, variant string
 }
@@ -531,12 +538,53 @@ func (m *Manager) Terminal(ctx context.Context, name string) (*Terminal, error) 
 	}
 	browserHost, _ := containerURLHost(*c)
 	return &Terminal{
-		Addr:        net.JoinHostPort(publishedHost(*c), strconv.Itoa(port)),
-		Host:        "localhost:" + strconv.Itoa(port),
-		Port:        port,
-		Credential:  cred,
-		browserHost: browserHost,
-		name:        name,
-		variant:     variantOf(*c),
+		Addr:           net.JoinHostPort(publishedHost(*c), strconv.Itoa(port)),
+		Host:           "localhost:" + strconv.Itoa(port),
+		Port:           port,
+		Credential:     cred,
+		browserHost:    browserHost,
+		legacyHost:     publishedOnCookieHost(*c),
+		argvCredential: !readsCredentialFile(c.Config.Labels),
+		name:           name,
+		variant:        variantOf(*c),
 	}, nil
+}
+
+// legacyPublishWarning returns the warning for kept session name, published
+// on legacyPublishHost, whose variant's image has a ttyd that refuses [::1]
+// URLs, so it can't be recreated on PublishHost yet.
+func legacyPublishWarning(name, want string) string {
+	return fmt.Sprintf("Warning: session %s publishes its terminal on %s, the dashboard's cookie host, because it was created before terminals moved to [%s], and its image's ttyd refuses [%s] URLs. Update the image with %s, then run `safeclaw run -s %s` again to recreate it on [%s]\n", name, legacyPublishHost, PublishHost, PublishHost, updateImageCommands(want), name, PublishHost)
+}
+
+// WarnTerminal prints the warnings `safeclaw run` gives about a session an
+// earlier version created, for a terminal whose URL is about to be printed
+// without running it: one published on 127.0.0.1, the dashboard's cookie
+// host, and one whose ttyd takes its credential on its command line. Each
+// says how to recreate the session, updating its image first when the
+// image would be refused.
+func (m *Manager) WarnTerminal(ctx context.Context, t *Terminal) {
+	if !t.legacyHost && !t.argvCredential {
+		return
+	}
+	// The image is only looked at to say whether it needs updating first,
+	// so one that can't be inspected is taken to need it.
+	updated := false
+	if img, err := m.Docker.InspectImage(ctx, variant.Image(t.variant)); err == nil && img != nil {
+		updated = acceptsBracketedHost(img.Config.Labels) && readsCredentialFile(img.Config.Labels)
+	}
+	if t.legacyHost {
+		if updated {
+			m.printf("Warning: session %s publishes its terminal on %s, the dashboard's cookie host, because it was created before terminals moved to [%s]. Run `safeclaw run -s %s` to recreate it there\n", t.name, legacyPublishHost, PublishHost, t.name)
+		} else {
+			m.printf("%s", legacyPublishWarning(t.name, t.variant))
+		}
+	}
+	if t.argvCredential {
+		then := "Update the image with " + updateImageCommands(t.variant) + ", then run `safeclaw run -s " + t.name + "` to recreate the session from it"
+		if updated {
+			then = "Run `safeclaw run -s " + t.name + "` to recreate it from the updated image, whose ttyd reads it from a file"
+		}
+		m.printf("Warning: session %s's ttyd takes its credential on its command line, which other local users can read on a native Linux docker host, because it was created from an older image. %s\n", t.name, then)
+	}
 }

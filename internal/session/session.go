@@ -886,7 +886,7 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	// ttyd refuses the [::1] URLs a recreated one would get. Its own ttyd
 	// reads its credential from a file, or it was refused above.
 	if existing != nil && legacyPublish {
-		m.printf("Warning: session %s publishes its terminal on %s, the dashboard's cookie host, because it was created before terminals moved to [%s], and its image's ttyd refuses [%s] URLs. Update the image with %s, then run `safeclaw run -s %s` again to recreate it on [%s]\n", name, legacyPublishHost, PublishHost, PublishHost, updateImageCommands(want), name, PublishHost)
+		m.printf("%s", legacyPublishWarning(name, want))
 	}
 	if existing != nil && !hardened(*existing) {
 		m.printf("Warning: session %s keeps docker's default capabilities and can gain privileges, because it was created before sessions dropped them. Recreate it, for example with -v or `safeclaw rm`, to drop them\n", name)
