@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// zipHead makes a file look like a zip to LooksLikeArchive.
+// zipHead makes a file look like a zip to Detect.
 const zipHead = "PK\x03\x04"
 
 // fakeArchive is what a fakeRunner lists and extracts for one archive.
@@ -305,8 +305,8 @@ func TestExtractPassword(t *testing.T) {
 func TestExtractFailures(t *testing.T) {
 	f := &fakeRunner{archives: map[string]fakeArchive{}}
 	_, _, err := extract(t, f, Options{})
-	if e := wantKind(t, err, Failed); !strings.Contains(e.Msg, "not an archive") {
-		t.Errorf("not an archive: %v", e)
+	if e := wantKind(t, err, Failed); !strings.Contains(e.Msg, "corrupt") {
+		t.Errorf("a zip 7z can't open: %v", e)
 	}
 	f.archives["top.zip"] = fakeArchive{entries: []Entry{file("a", 1)}, files: map[string]string{"a": "1"}, xErr: &Error{Kind: Failed, Msg: "7z: Data Error"}}
 	_, _, err = extract(t, f, Options{})
@@ -448,20 +448,92 @@ func TestEmptyDirNoFollow(t *testing.T) {
 	}
 }
 
-func TestLooksLikeArchive(t *testing.T) {
+func TestDetect(t *testing.T) {
 	tar := make([]byte, 512)
 	copy(tar[257:], "ustar\x0000")
-	for name, head := range map[string][]byte{
+	for format, head := range map[string][]byte{
 		"zip": []byte("PK\x03\x04rest"), "7z": []byte("7z\xbc\xaf\x27\x1c"), "rar": []byte("Rar!\x1a\x07\x01"),
 		"gzip": []byte("\x1f\x8b\x08"), "bzip2": []byte("BZh91AY"), "xz": []byte("\xfd7zXZ\x00"), "zstd": []byte("\x28\xb5\x2f\xfd"), "tar": tar,
 	} {
-		if !LooksLikeArchive(head) {
-			t.Errorf("%s not detected", name)
+		if got := Detect(head); got != format {
+			t.Errorf("Detect(%s) = %q", format, got)
 		}
 	}
-	for _, head := range [][]byte{nil, []byte("PK"), []byte("%PDF-1.7"), []byte("hello"), make([]byte, 512)} {
-		if LooksLikeArchive(head) {
-			t.Errorf("%q detected", head)
+	for _, head := range [][]byte{nil, []byte("PK"), []byte("%PDF-1.7"), []byte("hello"), make([]byte, 512), tar[:260]} {
+		if got := Detect(head); got != "" {
+			t.Errorf("Detect(%q) = %q", head, got)
 		}
+	}
+}
+
+func TestDetectFile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	zip, text, empty := write("a.zip", zipHead+"rest"), write("a.txt", "just text\n"), write("empty", "")
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(zip, link); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]string{zip: "zip", text: "", empty: "", link: "zip"} {
+		if got, err := DetectFile(p); got != want || err != nil {
+			t.Errorf("DetectFile(%s) = %q, %v; want %q", filepath.Base(p), got, err, want)
+		}
+	}
+	fifo := filepath.Join(dir, "fifo")
+	if err := syscall.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{dir, fifo, filepath.Join(dir, "missing")} {
+		_, err := DetectFile(p)
+		wantKind(t, err, Failed)
+	}
+	// The nested walk doesn't follow links, so it never detects one.
+	if _, err := detectPath(link, syscall.O_NOFOLLOW); err == nil {
+		t.Error("detectPath followed a link with O_NOFOLLOW")
+	}
+	got, err := archivesIn(dir)
+	if err != nil || !slices.Equal(got, []string{zip}) {
+		t.Errorf("archivesIn = %v, %v", got, err)
+	}
+}
+
+// TestNotArchive checks that a top-level file 7z can't open is NotArchive
+// when it doesn't start like an archive, and Failed, as corrupt, when it
+// does.
+func TestNotArchive(t *testing.T) {
+	dir := t.TempDir()
+	f := &fakeRunner{archives: map[string]fakeArchive{}}
+	for name, kind := range map[string]Kind{"notes.txt": NotArchive, "empty": NotArchive, "bad.zip": Failed} {
+		p := filepath.Join(dir, name)
+		content := "just text\n"
+		switch name {
+		case "empty":
+			content = ""
+		case "bad.zip":
+			content = zipHead + "truncated"
+		}
+		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		_, err := List(t.Context(), f, p, nil)
+		e := wantKind(t, err, kind)
+		if kind == Failed && !strings.Contains(e.Msg, "starts like a zip archive") {
+			t.Errorf("%s: %v", name, e)
+		}
+		dest := filepath.Join(dir, name+".out")
+		_, err = Extract(t.Context(), p, dest, Options{Runner: f, MaxSize: 1 << 20})
+		if e := wantKind(t, err, kind); e.Archive != "" {
+			t.Errorf("%s: archive = %q", name, e.Archive)
+		}
+		wantEmpty(t, dest)
+	}
+	if NotArchive.String() != "not an archive" || int(NotArchive) != 5 {
+		t.Errorf("NotArchive = %d %q", NotArchive, NotArchive)
 	}
 }

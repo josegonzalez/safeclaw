@@ -26,12 +26,21 @@ const (
 	unpackPasswordEnv = "SAFECLAW_UNPACK_PASSWORD"
 )
 
+// unpackFormats are the formats detect knows, which are the ones nested
+// archives are unpacked in.
+const unpackFormats = "zip, 7z, rar, tar, gzip, bzip2, xz, or zstd"
+
+const unpackNotArchiveHelp = `A file 7z can't open as an archive is not an archive (exit 5) when it doesn't start like a ` + unpackFormats + ` archive, the formats detect knows, and corrupt (exit 1) when it does. A file in some other format 7z can open, such as an ISO image, is listed and extracted as usual.`
+
 const unpackHelp = `Exit codes:
   0  success
-  1  failed: 7z failed, the archive is corrupt or not an archive, or a usage or I/O error
+  1  failed: 7z failed, the archive is corrupt, or a usage or I/O error
   2  rejected: the archive has links, special files, or unsafe paths (or 7z made some)
   3  needs password: the archive is encrypted and no password, or the wrong one, was given
   4  too large: the contents are over --max-size
+  5  not an archive: 7z can't open the file, and it doesn't start like an archive
+
+` + unpackNotArchiveHelp + `
 
 The password is read from the SAFECLAW_UNPACK_PASSWORD environment variable, or the one --password-env names, never from the arguments, and is passed to 7z on its stdin.
 
@@ -42,17 +51,52 @@ Each entry is printed as a tab-separated line: TYPE, SIZE, PATH, and FLAGS. TYPE
 func newUnpackCommand(use string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use,
-		Short: "List or extract an untrusted archive with 7z, refusing links and unsafe paths",
-		Long: "List or extract an untrusted archive with 7z, refusing links and unsafe paths. Run it inside a sandbox: the sandbox image variant has 7z and links this command as " + unpackProgram + ".\n\n" +
+		Short: "Detect, list, or extract an untrusted archive with 7z, refusing links and unsafe paths",
+		Long: "Detect, list, or extract an untrusted archive with 7z, refusing links and unsafe paths. Run it inside a sandbox: the sandbox image variant has 7z and links this command as " + unpackProgram + ".\n\n" +
 			unpackHelp,
-		Example: `  safeclaw sandbox exec --ephemeral -v ~/Downloads:/in -- safeclaw-unpack list /in/report.zip
+		Example: `  safeclaw sandbox exec --ephemeral -v ~/Downloads:/in -- safeclaw-unpack detect /in/report.zip
+  safeclaw sandbox exec --ephemeral -v ~/Downloads:/in -- safeclaw-unpack list /in/report.zip
   safeclaw-unpack extract --json /sandbox/in/1-report.zip /sandbox/out/report
   SAFECLAW_UNPACK_PASSWORD=infected safeclaw-unpack extract --drop-bad sample.7z out`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	cmd.AddCommand(newUnpackListCommand(), newUnpackExtractCommand())
+	cmd.AddCommand(newUnpackDetectCommand(), newUnpackListCommand(), newUnpackExtractCommand())
+	return cmd
+}
+
+func newUnpackDetectCommand() *cobra.Command {
+	var asJSON bool
+	cmd := &cobra.Command{
+		Use:   "detect FILE",
+		Short: "Print the archive format a file starts like, or none",
+		Long: "Print the archive format FILE starts like, from its first bytes: " + unpackFormats + ", or none. These are the formats extract unpacks nested archives in, found the same way, so detect and extract never disagree. Nothing is run, and 7z isn't needed.\n\n" +
+			"Exit codes:\n  0  FILE starts like an archive\n  1  failed: FILE is missing, not a regular file, or can't be read\n  5  not an archive: FILE doesn't start like one, and none is printed\n\n" +
+			"For list and extract: " + unpackNotArchiveHelp + "\n\n" +
+			"--json prints one JSON object: status (ok, not an archive, or failed), code (the exit code), type (the format, or none), and error when it failed.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			format, err := unpack.DetectFile(args[0])
+			if err != nil {
+				return unpackFailure(cmd, asJSON, err, nil)
+			}
+			v := unpackJSON{Status: "ok", Type: format}
+			if format == "" {
+				v = unpackJSON{Status: unpack.NotArchive.String(), Code: int(unpack.NotArchive), Type: "none"}
+			}
+			if asJSON {
+				err = writeUnpackJSON(cmd.OutOrStdout(), v)
+			} else {
+				_, err = fmt.Fprintln(cmd.OutOrStdout(), v.Type)
+			}
+			if err == nil && v.Code != 0 {
+				err = exitCodeError{v.Code}
+			}
+			return err
+		},
+	}
+	cmd.Flags().BoolVar(&asJSON, "json", false, "print one JSON object instead of the format")
 	return cmd
 }
 
@@ -122,7 +166,7 @@ func newUnpackExtractCommand() *cobra.Command {
 		Long: "Extract an archive into DEST, which must be missing or an empty directory, and not a symbolic link.\n\n" +
 			"The archive is listed first. One with links, special files, or unsafe paths is rejected, or with --drop-bad those entries are left out. One whose listed size is over --max-size is refused before anything is extracted, and the size is checked again while 7z extracts and afterwards, for formats that don't record sizes. " +
 			"After extracting, any link or special file 7z made is deleted (which rejects the archive unless --drop-bad is given, since the listing didn't show it), setuid and setgid bits are cleared, and every path must resolve inside DEST. " +
-			"Each extracted file that starts like a zip, 7z, rar, tar, gzip, bzip2, xz, or zstd archive is then unpacked the same way into PATH.unpacked next to it (PATH.unpacked-2 and so on when that name is taken), up to --depth levels; the archive itself is kept. A file 7z can't open as an archive is left as it is. " +
+			"Each extracted file that starts like a " + unpackFormats + " archive (one detect names a format for) is then unpacked the same way into PATH.unpacked next to it (PATH.unpacked-2 and so on when that name is taken), up to --depth levels; the archive itself is kept. A file 7z can't open as an archive is left as it is. " +
 			"On any failure DEST is emptied, without following links. Each path in DEST is printed when it succeeds, and the entries that got it rejected when it is rejected.\n\n" + unpackHelp,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -175,7 +219,8 @@ type unpackJSON struct {
 	// Archive is the nested archive the failure happened in, relative to
 	// DEST.
 	Archive string `json:"archive,omitempty"`
-	// Type is the archive's format, for list.
+	// Type is the archive's format: 7z's name for it for list, and the
+	// format it starts like, or none, for detect.
 	Type string `json:"type,omitempty"`
 	// Entries are the archive's entries for list, and the paths in DEST
 	// for extract.

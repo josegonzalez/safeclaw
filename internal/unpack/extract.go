@@ -70,7 +70,9 @@ type Result struct {
 // and every path must resolve inside dest. Then each file that starts like
 // an archive is unpacked into NAME.unpacked next to it, the same way, up to
 // Options.Depth levels. On any error dest is emptied, without following
-// links, and the error is an *Error.
+// links, and the error is an *Error. An archive 7z can't open is
+// NotArchive, unless it starts like one Detect knows, which makes it
+// corrupt and Failed; a nested file 7z can't open is left as it is.
 func Extract(ctx context.Context, archive, dest string, o Options) (*Result, error) {
 	if o.Runner == nil {
 		return nil, &Error{Kind: Failed, Msg: "no 7z runner"}
@@ -173,8 +175,11 @@ func (x *extractor) unpack(ctx context.Context, archive, dir, rel string, depth 
 
 	l, err := x.o.Runner.List(ctx, archive, x.o.Password)
 	if err != nil {
-		if depth > 0 && errors.Is(err, errNotArchive) {
-			return err
+		if errors.Is(err, errNotArchive) {
+			if depth > 0 {
+				return err
+			}
+			err = notArchive(archive)
 		}
 		return fail(err)
 	}
@@ -556,7 +561,8 @@ func plural(n int, one, many string) string {
 }
 
 // List lists archive's entries with r, without extracting anything. The
-// error is an *Error.
+// error is an *Error, NotArchive or Failed for one 7z can't open as
+// Extract decides.
 func List(ctx context.Context, r Runner, archive string, pw *string) (*Listing, error) {
 	src, err := filepath.Abs(archive)
 	if err != nil {
@@ -568,6 +574,9 @@ func List(ctx context.Context, r Runner, archive string, pw *string) (*Listing, 
 		return nil, &Error{Kind: Failed, Msg: fmt.Sprintf("%s is not a regular file", archive)}
 	}
 	l, err := r.List(ctx, src, pw)
+	if errors.Is(err, errNotArchive) {
+		err = notArchive(src)
+	}
 	if err != nil {
 		var e *Error
 		if errors.As(err, &e) {

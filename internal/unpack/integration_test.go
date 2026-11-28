@@ -323,16 +323,55 @@ func TestIntegrationPassword(t *testing.T) {
 	}
 }
 
+// TestIntegrationDetect checks that Detect names generated archives the
+// way 7z's listing does.
+func TestIntegrationDetect(t *testing.T) {
+	z := sevenZip(t)
+	tarball := makeTar(t, tarEntry{name: "a.txt", body: "a"})
+	for name, data := range map[string][]byte{
+		"a.zip": makeZip(t, zipEntry{name: "a.txt", body: "a"}),
+		"a.tar": tarball,
+		"a.gz":  gz(t, []byte("a")),
+	} {
+		archive, _ := workdir(t, name, data)
+		format, err := DetectFile(archive)
+		if err != nil {
+			t.Fatal(err)
+		}
+		l, err := List(t.Context(), z, archive, nil)
+		if err != nil || l.Type != format {
+			t.Errorf("%s: detected %q, 7z lists %+v, %v", name, format, l, err)
+		}
+	}
+}
+
 func TestIntegrationNotArchive(t *testing.T) {
 	z := sevenZip(t)
-	archive, dest := workdir(t, "x*?.txt", []byte("just text\n"))
-	_, err := List(t.Context(), z, archive, nil)
-	wantKind(t, err, Failed)
-	_, err = Extract(t.Context(), archive, dest, Options{Runner: z, MaxSize: 1 << 20})
-	wantKind(t, err, Failed)
+	// A file that doesn't start like an archive is NotArchive, and one that
+	// does but that 7z can't open is corrupt.
+	tarball := makeTar(t, tarEntry{name: "a.txt", body: "a"})
+	for _, c := range []struct {
+		name string
+		data []byte
+		kind Kind
+	}{
+		{"x*?.txt", []byte("just text\n"), NotArchive},
+		{"empty", nil, NotArchive},
+		{"doc.pdf", []byte("%PDF-1.7\n%\xe2\xe3\xcf\xd3\n"), NotArchive},
+		{"truncated.zip", makeZip(t, zipEntry{name: "a.txt", body: strings.Repeat("a", 100)})[:20], Failed},
+		{"junk.gz", []byte("\x1f\x8bnot really gzip"), Failed},
+		{"truncated.tar", tarball[:300], Failed},
+	} {
+		archive, dest := workdir(t, c.name, c.data)
+		_, err := List(t.Context(), z, archive, nil)
+		wantKind(t, err, c.kind)
+		_, err = Extract(t.Context(), archive, dest, Options{Runner: z, MaxSize: 1 << 20})
+		wantKind(t, err, c.kind)
+		wantEmpty(t, dest)
+	}
 
 	// A wildcard in the archive's name is taken literally.
-	archive, _ = workdir(t, "a*.zip", makeZip(t, zipEntry{name: "in.txt", body: "1"}))
+	archive, _ := workdir(t, "a*.zip", makeZip(t, zipEntry{name: "in.txt", body: "1"}))
 	if err := os.WriteFile(filepath.Join(filepath.Dir(archive), "ab.zip"), makeZip(t, zipEntry{name: "other.txt", body: "2"}), 0o644); err != nil {
 		t.Fatal(err)
 	}

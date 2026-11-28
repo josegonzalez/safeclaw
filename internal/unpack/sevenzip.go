@@ -139,8 +139,9 @@ type Kind int
 
 // Failure kinds, and the exit codes `safeclaw unpack` uses for them.
 const (
-	// Failed is any other failure: 7z failed, the archive is corrupt, or an
-	// I/O or usage error.
+	// Failed is any other failure: 7z failed, the archive is corrupt
+	// (including one that starts like an archive Detect knows but that 7z
+	// can't open), or an I/O or usage error.
 	Failed Kind = 1
 	// Rejected is an archive with links, special files, or unsafe paths.
 	Rejected Kind = 2
@@ -149,6 +150,9 @@ const (
 	NeedsPassword Kind = 3
 	// TooLarge is an archive whose contents exceed the size limit.
 	TooLarge Kind = 4
+	// NotArchive is a file 7z can't open as an archive that doesn't start
+	// like one Detect knows either.
+	NotArchive Kind = 5
 )
 
 func (k Kind) String() string {
@@ -159,6 +163,8 @@ func (k Kind) String() string {
 		return "needs password"
 	case TooLarge:
 		return "too large"
+	case NotArchive:
+		return "not an archive"
 	}
 	return "failed"
 }
