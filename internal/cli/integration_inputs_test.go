@@ -9,10 +9,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/josegonzalez/safeclaw/internal/config"
 	"github.com/josegonzalez/safeclaw/internal/docker"
@@ -146,5 +151,107 @@ func TestIntegrationSandboxRestore(t *testing.T) {
 	}
 	if c, _ := d.InspectOne(ctx, config.ContainerName(second)); c != nil {
 		t.Error("a refused restore created a sandbox")
+	}
+}
+
+// TestIntegrationSandboxRestoreUnder starts two one-off sandboxes with the
+// same --name-prefix and --keep-inputs-under in the same second, at once,
+// one through `sandbox run` and one through a separate manager, so only
+// docker keeps them apart. It checks that each records in its own
+// DIR/NAME, that `sandbox run` printed only the name to stdout and the
+// record to stderr, and that `sandbox inspect` shows it, then copies a
+// file into one, removes it, and restores it with --restore-from DIR/NAME.
+func TestIntegrationSandboxRestoreUnder(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+	dir := t.TempDir()
+	now := time.Now()
+	newTestManager := func(sub string) *session.Manager {
+		return &session.Manager{Docker: d, Secrets: secrets.FileStore{Dir: filepath.Join(dir, sub, ".secrets")},
+			CopyDir: filepath.Join(dir, sub, "copy"), Out: io.Discard, Now: func() time.Time { return now }}
+	}
+	m := newTestManager("cli")
+	orig := newManager
+	t.Cleanup(func() { newManager = orig })
+	newManager = func() *session.Manager { return m }
+
+	prefix := fmt.Sprintf("itest-under-%d", os.Getpid())
+	base := prefix + "-" + now.UTC().Format("20060102-150405")
+	restored := prefix + "-restored"
+	for _, name := range []string{base, base + "-2", restored} {
+		container := config.ContainerName(name)
+		t.Cleanup(func() { _ = d.Remove(context.Background(), container, true) })
+	}
+	parent := filepath.Join(dir, "triage")
+
+	var cliOut, cliErr string
+	var cliRunErr, otherErr error
+	var other *session.Result
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		cliOut, cliErr, cliRunErr = runStderr("sandbox", "run", "--rm", "--name-prefix", prefix, "--keep-inputs-under", parent, "--variant", config.BaseVariant)
+	})
+	wg.Go(func() {
+		other, otherErr = newTestManager("other").KeepInputsUnder(ctx, session.SandboxOptions{Remove: true, NamePrefix: prefix, Variant: config.BaseVariant}, parent)
+	})
+	wg.Wait()
+	if cliRunErr != nil || otherErr != nil {
+		t.Fatalf("sandbox run: %v\n%s\nother: %v", cliRunErr, cliErr, otherErr)
+	}
+	name := strings.TrimSuffix(cliOut, "\n")
+	names := []string{name, other.Name}
+	slices.Sort(names)
+	if want := []string{base, base + "-2"}; !slices.Equal(names, want) {
+		t.Fatalf("names = %q (stdout %q), want %q", names, cliOut, want)
+	}
+	record := filepath.Join(parent, name)
+	if !strings.Contains(cliErr, "Recording its inputs in "+filepath.Join(record, session.InputsFile)+"\n") {
+		t.Errorf("stderr doesn't name the record:\n%s", cliErr)
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range entries {
+		got = append(got, e.Name())
+		fi, err := os.Stat(filepath.Join(parent, e.Name(), session.InputsFile))
+		if err != nil || !fi.Mode().IsRegular() {
+			t.Errorf("%s holds no record: %v", e.Name(), err)
+		}
+	}
+	if !slices.Equal(got, names) {
+		t.Errorf("DIR holds %q, want %q", got, names)
+	}
+	out, stderr, err := runStderr("sandbox", "inspect", name, "--field", "keep_inputs")
+	if err != nil || out != record+"\n" {
+		t.Errorf("inspect --field keep_inputs: %q, %v\n%s", out, err, stderr)
+	}
+
+	notes := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(notes, []byte("read me\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CopyIn(ctx, name, []string{notes}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Remove(ctx, config.ContainerName(name), true); err != nil {
+		t.Fatal(err)
+	}
+	out, stderr, err = runStderr("sandbox", "run", "--rm", "-s", restored, "--restore-from", record, "--variant", config.BaseVariant)
+	if err != nil || out != restored+"\n" {
+		t.Fatalf("run --restore-from: %q, %v\n%s", out, err, stderr)
+	}
+	sum, err := d.Exec(ctx, config.ContainerName(restored), docker.ExecOptions{User: config.SandboxUser}, "sha256sum", "/sandbox/in/1-notes.txt")
+	h := sha256.Sum256([]byte("read me\n"))
+	if err != nil || !strings.HasPrefix(string(sum), hex.EncodeToString(h[:])+" ") {
+		t.Errorf("restored file: %q, %v", sum, err)
+	}
+	out, _, err = runStderr("sandbox", "inspect", restored, "--field", "keep_inputs")
+	if err != nil || out != record+"\n" {
+		t.Errorf("restored sandbox's keep_inputs: %q, %v", out, err)
 	}
 }

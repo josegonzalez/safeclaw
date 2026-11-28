@@ -68,6 +68,11 @@ type SandboxInfo struct {
 	Labels map[string]string `json:"labels"`
 	// Profile is the sandbox profile it was created with, null for none.
 	Profile *SandboxProfile `json:"profile"`
+	// KeepInputs is the absolute directory of the input record a one-off
+	// sandbox made with --keep-inputs, --keep-inputs-under, or
+	// --restore-from keeps, from its config.LabelKeepInputs label, and
+	// empty for none.
+	KeepInputs string `json:"keep_inputs"`
 }
 
 // SandboxProfile is the sandbox profile a sandbox was created with.
@@ -175,9 +180,10 @@ func sandboxInfo(name string, c docker.Container) SandboxInfo {
 			MemoryBytes: h.Memory,
 			CPUs:        float64(h.NanoCpus) / 1e9,
 		},
-		Tmpfs:  []SandboxTmpfs{},
-		Mounts: []SandboxMount{},
-		Labels: map[string]string{},
+		Tmpfs:      []SandboxTmpfs{},
+		Mounts:     []SandboxMount{},
+		Labels:     map[string]string{},
+		KeepInputs: c.Label(config.LabelKeepInputs),
 	}
 	if info.Variant == "" {
 		info.Variant = config.BaseVariant

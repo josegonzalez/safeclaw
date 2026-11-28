@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -82,7 +83,8 @@ func (m *Manager) now() time.Time {
 // createOneOff creates a new one-off sandbox and returns its name. With a
 // name prefix it is named by prefixedName, trying the next suffix while
 // the name is taken: by a container that exists, or by one created
-// meanwhile, which docker refuses the name for. The time is read once, so
+// meanwhile, which docker refuses the name for, or, with keepInputsUnder,
+// by a record in the directory named after it. The time is read once, so
 // every attempt has the same timestamp. opts.NamePrefix must already be
 // resolved.
 func (m *Manager) createOneOff(ctx context.Context, opts SandboxOptions) (string, error) {
@@ -111,8 +113,12 @@ func (m *Manager) createOneOff(ctx context.Context, opts SandboxOptions) (string
 			continue
 		}
 		err = m.startOneOff(ctx, name, opts)
-		if docker.IsNameConflict(err) {
+		switch {
+		case docker.IsNameConflict(err):
 			m.printf("Name taken meanwhile: %s\n", config.ContainerName(name))
+			continue
+		case errors.Is(err, errHoldsRecord):
+			m.printf("Name taken by a record: %s\n", filepath.Join(opts.keepInputsUnder.parent, name))
 			continue
 		}
 		return name, err
@@ -122,8 +128,35 @@ func (m *Manager) createOneOff(ctx context.Context, opts SandboxOptions) (string
 }
 
 // startOneOff creates the one-off sandbox name.
+//
+// With keepInputsUnder, its record is started in the directory named
+// after it once docker has accepted the name, since only the run whose
+// container has the name may start that record. A directory that already
+// holds a record refuses the name before docker run, and one that came to
+// hold a record meanwhile removes the new sandbox again, both with an
+// error wrapping errHoldsRecord. When the record can't be started for any
+// other reason, the new sandbox is removed too.
 func (m *Manager) startOneOff(ctx context.Context, name string, opts SandboxOptions) error {
 	container := config.ContainerName(name)
+	under := opts.keepInputsUnder
+	if under != nil {
+		opts.keepInputs = filepath.Join(under.parent, name)
+		if err := checkNoRecord(opts.keepInputs); err != nil {
+			return err
+		}
+	}
 	m.printf("Creating one-off sandbox: %s\n", container)
-	return m.newSandbox(ctx, name, container, opts)
+	if err := m.newSandbox(ctx, name, container, opts); err != nil || under == nil {
+		return err
+	}
+	if err := under.start(ctx, opts.keepInputs, opts.Verify); err != nil {
+		if rerr := m.Docker.Remove(context.WithoutCancel(ctx), container, true); rerr != nil {
+			// Not wrapping err, so a name prefix doesn't go on to the
+			// next name past a sandbox left behind.
+			return fmt.Errorf("%s, and sandbox %q could not be removed: %w", err, name, rerr)
+		}
+		return fmt.Errorf("%w, so sandbox %q was removed", err, name)
+	}
+	m.printf("Recording its inputs in %s\n", filepath.Join(opts.keepInputs, InputsFile))
+	return nil
 }

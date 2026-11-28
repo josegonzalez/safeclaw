@@ -84,14 +84,15 @@ type key struct {
 // the command the section is named after.
 var sections = map[string]map[string]key{
 	Run: {
-		"memory":      {limit: true},
-		"pids-limit":  {limit: true},
-		"cpus":        {limit: true},
-		"disk":        {limit: true},
-		"variant":     {},
-		"rm":          {},
-		"name-prefix": {},
-		"verify":      {strict: true},
+		"memory":            {limit: true},
+		"pids-limit":        {limit: true},
+		"cpus":              {limit: true},
+		"disk":              {limit: true},
+		"variant":           {},
+		"rm":                {},
+		"name-prefix":       {},
+		"keep-inputs-under": {},
+		"verify":            {strict: true},
 	},
 	Exec: {
 		"escape-controls": {strict: true},

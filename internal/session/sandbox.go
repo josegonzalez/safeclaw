@@ -224,6 +224,10 @@ type SandboxOptions struct {
 	// sandbox from KeepInputs or RestoreSandbox appends to, recorded in
 	// its LabelKeepInputs label.
 	keepInputs string
+	// keepInputsUnder is set for a one-off sandbox from KeepInputsUnder,
+	// which keeps its record in the directory named after it under a
+	// parent directory.
+	keepInputsUnder *recordUnder
 
 	// kept are the bind mounts carried over from a recreated sandbox.
 	kept []string

@@ -129,7 +129,7 @@ func TestInspectSandbox(t *testing.T) {
 		`"tmpfs":[{"path":"/sandbox","options":"rw,nosuid,nodev,exec,size=1073741824,uid=2000,gid=2000,mode=0700","size_bytes":1073741824},` +
 		`{"path":"/tmp","options":"rw,nosuid,nodev,size=256m","size_bytes":268435456}],` +
 		`"mounts":[{"type":"bind","source":"/host/in","destination":"/in","read_only":true,"recursive_read_only":true}],` +
-		`"labels":{"safeclaw.type":"sandbox","safeclaw.variant":"sandbox"},"profile":null}`
+		`"labels":{"safeclaw.type":"sandbox","safeclaw.variant":"sandbox"},"profile":null,"keep_inputs":""}`
 	if string(b) != want {
 		t.Errorf("info =\n%s\nwant\n%s", b, want)
 	}
@@ -176,6 +176,22 @@ func TestInspectSandboxProfile(t *testing.T) {
 	b, _ := json.Marshal(info)
 	if !strings.Contains(string(b), `"profile":{"ref":"triage","sha256":"abc123"}`) {
 		t.Errorf("info = %s", b)
+	}
+}
+
+// A sandbox that keeps an input record shows the record's directory, both
+// in labels and in keep_inputs.
+func TestInspectSandboxKeepInputs(t *testing.T) {
+	c := goodSandbox()
+	c["Config"].(map[string]any)["Labels"] = map[string]string{"safeclaw.type": "sandbox",
+		config.LabelKeepInputs: "/home/me/triage/triage-20261128-110940"}
+	m, _ := newInspectManager(t, &inspectWorld{c: c})
+	info, err := m.InspectSandbox(context.Background(), "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.KeepInputs != "/home/me/triage/triage-20261128-110940" || info.Labels[config.LabelKeepInputs] != info.KeepInputs {
+		t.Errorf("keep_inputs = %q, labels = %v", info.KeepInputs, info.Labels)
 	}
 }
 

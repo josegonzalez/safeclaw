@@ -21,7 +21,13 @@ func TestSandboxRunInputFlagsRefused(t *testing.T) {
 		{[]string{"-s", "box", "--restore-from", "d"}, "--restore-from can only be used with --rm"},
 		{[]string{"--rm", "--keep-inputs", ""}, "--keep-inputs can't be empty"},
 		{[]string{"--rm", "--restore-from", ""}, "--restore-from can't be empty"},
-		{[]string{"--rm", "--keep-inputs", "a", "--restore-from", "b"}, "can't be used together"},
+		{[]string{"--rm", "--keep-inputs", "a", "--restore-from", "b"}, "--keep-inputs and --restore-from can't be used together"},
+		{[]string{"-s", "box", "--keep-inputs-under", "d"}, "--keep-inputs-under can only be used with --rm"},
+		{[]string{"--name-prefix", "triage", "--keep-inputs-under", "d"}, "can only be used with --rm"},
+		{[]string{"--rm", "--keep-inputs-under", ""}, "--keep-inputs-under can't be empty"},
+		{[]string{"--rm", "--keep-inputs", "a", "--keep-inputs-under", "b"}, "--keep-inputs and --keep-inputs-under can't be used together"},
+		{[]string{"--rm", "--keep-inputs-under", "a", "--restore-from", "b"}, "--keep-inputs-under and --restore-from can't be used together"},
+		{[]string{"--rm", "--keep-inputs", "a", "--keep-inputs-under", "b", "--restore-from", "c"}, "--keep-inputs and --keep-inputs-under and --restore-from can't be used together"},
 	} {
 		fakeContainers(t, map[string]string{}, nil)
 		_, _, err := runStderr(append([]string{"sandbox", "run"}, tc.args...)...)

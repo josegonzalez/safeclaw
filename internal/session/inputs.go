@@ -367,16 +367,10 @@ func (m *Manager) KeepInputs(ctx context.Context, opts SandboxOptions, dir strin
 		return nil, err
 	}
 	defer unlock()
-	p := filepath.Join(dir, InputsFile)
-	if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
-		if err != nil {
-			return nil, err
-		}
-		return nil, fmt.Errorf("%w directory %s already holds a record: restore it with --restore-from, or keep inputs in another directory", ErrInputs, dir)
-	}
-	if err := writeInputs(dir, &inputRecord{Schema: InputsSchema, Verify: opts.Verify}); err != nil {
+	if err := newRecord(dir, opts.Verify); err != nil {
 		return nil, err
 	}
+	p := filepath.Join(dir, InputsFile)
 	opts.keepInputs = dir
 	res, err := m.EnsureSandbox(ctx, opts)
 	if err != nil {
@@ -385,6 +379,165 @@ func (m *Manager) KeepInputs(ctx context.Context, opts SandboxOptions, dir strin
 	}
 	m.printf("Recording its inputs in %s\n", p)
 	return res, nil
+}
+
+// errHoldsRecord is wrapped by the error refusing a record directory that
+// already holds a record.
+var errHoldsRecord = errors.New("already holds a record")
+
+// holdsRecordError refuses dir for holding a record already.
+func holdsRecordError(dir string) error {
+	return fmt.Errorf("%w directory %s %w: restore it with --restore-from, or keep inputs in another directory", ErrInputs, dir, errHoldsRecord)
+}
+
+// newRecord writes an empty record to dir, refusing a dir that holds one
+// already. The caller holds the record's lock.
+func newRecord(dir string, verify bool) error {
+	if _, err := os.Lstat(filepath.Join(dir, InputsFile)); !errors.Is(err, fs.ErrNotExist) {
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrInputs, err)
+		}
+		return holdsRecordError(dir)
+	}
+	return writeInputs(dir, &inputRecord{Schema: InputsSchema, Verify: verify})
+}
+
+// checkNoRecord refuses dir, a record directory KeepInputsUnder is about
+// to name a sandbox after, when it already holds a record, or exists but
+// isn't a record directory checkInputsDir accepts. A dir that doesn't
+// exist yet passes.
+func checkNoRecord(dir string) error {
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err := checkInputsDir(dir); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(filepath.Join(dir, InputsFile)); !errors.Is(err, fs.ErrNotExist) {
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrInputs, err)
+		}
+		return holdsRecordError(dir)
+	}
+	return nil
+}
+
+// start starts the record of a sandbox KeepInputsUnder has just created
+// in dir, the parent's directory named after it: dir is created mode 0700
+// if it doesn't exist, and must then be a record directory that holds no
+// record. The record is created under its lock, so of two runs that reach
+// the same dir only one starts the record. A dir it created is removed
+// again when the record can't be started, so only a sandbox that was kept
+// leaves a directory behind.
+func (u *recordUnder) start(ctx context.Context, dir string, verify bool) error {
+	err := os.Mkdir(dir, 0o700)
+	if err != nil && !errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("%w directory: %w", ErrInputs, err)
+	}
+	created := err == nil
+	if err := startRecord(ctx, dir, verify); err != nil {
+		if created {
+			_ = os.Remove(filepath.Join(dir, inputsLock))
+			_ = os.Remove(dir)
+		}
+		return err
+	}
+	u.dir, u.created = dir, created
+	return nil
+}
+
+// remove removes the record start started, once its sandbox was removed
+// again, and the directory too when start created it.
+func (u *recordUnder) remove() {
+	if u.dir == "" {
+		return
+	}
+	_ = os.Remove(filepath.Join(u.dir, InputsFile))
+	if u.created {
+		_ = os.Remove(filepath.Join(u.dir, inputsLock))
+		_ = os.Remove(u.dir)
+	}
+}
+
+// startRecord writes a new record to dir under its lock.
+func startRecord(ctx context.Context, dir string, verify bool) error {
+	unlock, err := lockInputs(ctx, dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return newRecord(dir, verify)
+}
+
+// checkInputsParent refuses a KeepInputsUnder parent directory that is a
+// symbolic link, not a directory, not the caller's, or writable by anyone
+// else, who could otherwise swap a sandbox's record directory under it.
+// Unlike a record directory, it may be readable by others: it holds only
+// the record directories, each mode 0700.
+func checkInputsParent(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("%w parent directory: %w", ErrInputs, err)
+	}
+	if fi.Mode()&fs.ModeSymlink != 0 {
+		return fmt.Errorf("%w parent directory %s %w", ErrInputs, dir, ErrSymlink)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("%w parent directory %s is not a directory", ErrInputs, dir)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%w parent directory %s is not owned by you", ErrInputs, dir)
+	}
+	if fi.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%w parent directory %s is mode %04o, writable by others: it must not be group- or world-writable (chmod go-w %s)", ErrInputs, dir, fi.Mode().Perm(), dir)
+	}
+	return nil
+}
+
+// KeepInputsUnder creates a one-off sandbox, as EnsureSandbox does with
+// opts.Remove, that keeps a record of its inputs in parent/NAME, NAME
+// being the name it gets, so the name can be picked by opts.NamePrefix.
+// parent is created mode 0700, with any missing parents, when it doesn't
+// exist; an existing one must not be a link, must be the caller's, and
+// must not be writable by anyone else. parent/NAME is checked as KeepInputs
+// checks its dir, but is created, and its record started, only for the
+// name docker accepts; with a name prefix, a name whose directory already
+// holds a record is skipped like a name a container has. When the record
+// can't be started, the new sandbox is removed.
+func (m *Manager) KeepInputsUnder(ctx context.Context, opts SandboxOptions, parent string) (*Result, error) {
+	if !opts.Remove {
+		return nil, errors.New("--keep-inputs-under is only for one-off sandboxes, made with --rm")
+	}
+	parent, err := inputsDir(parent)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return nil, fmt.Errorf("%w parent directory: %w", ErrInputs, err)
+	}
+	if err := checkInputsParent(parent); err != nil {
+		return nil, err
+	}
+	under := &recordUnder{parent: parent}
+	opts.keepInputsUnder = under
+	res, err := m.EnsureSandbox(ctx, opts)
+	if err != nil {
+		// A sandbox whose record was started can still be removed
+		// afterwards, by a failed --verify.
+		under.remove()
+		return nil, err
+	}
+	return res, nil
+}
+
+// recordUnder is a KeepInputsUnder parent directory, and the record
+// directory started in it once the sandbox's name was accepted.
+type recordUnder struct {
+	parent string
+	// dir is the record directory start started a record in, and created
+	// whether start created it.
+	dir     string
+	created bool
 }
 
 // RestoreError lists the recorded sources a restore refused, each with
