@@ -221,6 +221,8 @@ Run the Release workflow from the Actions tab (or `gh workflow run release.yml -
 
 Each job gets only the token permissions it needs: the tag and release jobs can write repository contents, and the image, manifest, and variant jobs can write packages. The release, manifest, and variant manifest jobs can also request an OIDC token and write attestations: attestations are signed keylessly with a short-lived Sigstore certificate issued for the workflow run, so no signing key is stored as a secret. Storage records are not created, since they need an organization-owned repository. goreleaser fails with `go mod tidy -diff` if `go.mod` or `go.sum` are not tidy, instead of rewriting them during the release.
 
+The release notes are GitHub's own, with one line per pull request merged since the last release, giving its title, author, and number. `.github/release.yml` groups them by label into features (`enhancement`), fixes (`bug`), dependencies, and other changes, and leaves out `documentation` and `internal` pull requests. The `pr-labels` workflow sets that label from the pull request title's semantic prefix whenever a pull request is opened or its title is edited: `feat:` becomes `enhancement`, `fix:` becomes `bug`, `docs:` becomes `documentation`, and `test:`, `chore:`, `ci:`, `build:`, and `style:` become `internal`. Dependabot labels its own pull requests `dependencies`. A pull request's labels can also be changed by hand before releasing to move it to another group.
+
 `make release-snapshot` runs goreleaser locally without publishing.
 
 ### Verifying release artifacts

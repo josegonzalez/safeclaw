@@ -1,0 +1,51 @@
+name: pr-labels
+
+# Labels each pull request from its title's semantic prefix, so the
+# release notes in .github/release.yml can group it: feat is a feature,
+# fix a fix, docs is left out as documentation, and test, chore, ci,
+# build, and style are left out as internal. Other prefixes, and titles
+# without one, get no label and land under "Other changes".
+#
+# pull_request_target gives the token write access to labels for pull
+# requests from forks too. It runs this file from the base branch and
+# never checks out or runs the pull request's code; the title is only
+# read from the environment, never put into the script.
+on:
+  pull_request_target:
+    types: [opened, edited, reopened]
+
+permissions: {}
+
+jobs:
+  label:
+    # Dependabot labels its own pull requests `dependencies`.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      PR: ${{ github.event.pull_request.number }}
+      TITLE: ${{ github.event.pull_request.title }}
+    steps:
+      - name: Label from the title
+        run: |
+          want=""
+          re='^([a-z]+)(\([^)]*\))?!?: '
+          if [[ "$TITLE" =~ $re ]]; then
+            case "${BASH_REMATCH[1]}" in
+              feat) want=enhancement ;;
+              fix) want=bug ;;
+              docs) want=documentation ;;
+              test | chore | ci | build | style) want=internal ;;
+            esac
+          fi
+          have=$(gh pr view "$PR" --json labels --jq '.labels[].name')
+          for label in enhancement bug documentation internal; do
+            if [ "$label" = "$want" ]; then
+              grep -qx "$label" <<<"$have" || gh pr edit "$PR" --add-label "$label"
+            elif grep -qx "$label" <<<"$have"; then
+              gh pr edit "$PR" --remove-label "$label"
+            fi
+          done
