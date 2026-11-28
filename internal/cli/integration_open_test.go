@@ -109,8 +109,8 @@ func TestIntegrationSandboxOpen(t *testing.T) {
 	}
 	sh := func(script string) {
 		t.Helper()
-		if out, err := d.Exec(ctx, container, docker.ExecOptions{User: config.SandboxUser, Workdir: config.SandboxDir}, "sh", "-c", script); err != nil {
-			t.Fatalf("exec %q: %v\n%s", script, err, out)
+		if out, stderr, err := runStderr("sandbox", "exec", name, "--", "sh", "-c", script); err != nil {
+			t.Fatalf("exec %q: %v\n%s%s", script, err, out, stderr)
 		}
 	}
 
