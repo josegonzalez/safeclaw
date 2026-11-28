@@ -1,5 +1,20 @@
 # Development
 
+## Layout
+
+One binary, `safeclaw`, is built from `cmd/safeclaw`.
+
+- `internal/session` - the session and sandbox lifecycle shared by the CLI and dashboard (`Ensure` is upstream's `run.sh`)
+- `internal/secrets` - secret storage: the system keychain, or files when there is none
+- `internal/variant` - image variants: built-ins, the `config.yaml` loader, and generated Dockerfiles
+- `internal/docker` - docker CLI wrapper; `dockertest` is the fake used in tests
+- `internal/dashboard` - HTTP server, templates, and vendored front-end files
+- `internal/wrapper` - in-container tmux bootstrap (`safeclaw ttyd-wrapper`)
+- `internal/unpack` - the archive checks behind `safeclaw unpack` and `safeclaw-unpack`
+- `internal/version` - build information, `version --json`, and `--require`
+- `internal/cli` - cobra commands
+- `Dockerfile`, `setup/` - the image, embedded into the binary by `embed.go`
+
 ## Building
 
 ```bash
