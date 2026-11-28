@@ -309,6 +309,44 @@ Exit codes:
 
 1, 3, and 5 mean what they do for `safeclaw-unpack` (failed, needs a password, not a file it handles), and 2 and 4, its rejected and too large, are unused. On every exit but 0 and 6, OUTDIR is emptied without following links, while the report still says what was skipped and why; on 6 it keeps what was written.
 
+### Reading emails
+
+The `sandbox` image variant also links `/usr/local/bin/safeclaw-mail` to the image's `safeclaw` binary, which runs as `safeclaw mail` when called by that name, so callers share one tested way of opening untrusted emails instead of each writing its own decoder. Like `safeclaw-unpack`, it needs no config directory, and it should run inside a sandbox. It is written in Go with the standard library's `net/mail` and `mime` packages and `golang.org/x/net/html`, and runs no other program.
+
+`safeclaw-mail list FILE` prints the message's main headers (`From`, `Reply-To`, `To`, `Cc`, `Date`, `Subject`, and `Message-ID`, each occurrence in order) as `Name: Value` lines, then an empty line, then one tab-separated line per part: its ID, media type, decoded size (`-` for a multipart), original file name (`-` for none), and flags. The ID is `1` for the message's content, `X.N` for the Nth part of multipart `X`, and `X.1` for the content of nested message `X`. Header values have their RFC 2047 encoded words decoded, in any charset `golang.org/x/net/html/charset` knows, and then invalid UTF-8 becomes U+FFFD, tabs, line breaks, and other spaces become a plain space, and every other character `unicode.IsPrint` rejects is dropped, such as control characters, bidi overrides, and zero-width characters. The name is decoded the same way, including RFC 2231 parameters, and escaped as `safeclaw-unpack` escapes paths, so it shows exactly what the message said. Flags are comma-separated, `-` for none:
+
+| Flag | Meaning |
+|------|---------|
+| `BODY` | a `text/plain` or `text/html` part that isn't an attachment and has no file name, whose text is in `body.txt` |
+| `SKIPPED` | a body part of a `multipart/alternative` that another part was chosen over |
+| `ATTACHMENT` | any other part, written to its own file |
+| `NESTED-MESSAGE` | a `message/rfc822` (or `message/global`) part whose headers and parts were followed |
+| `DEPTH-LIMIT` | a nested message past `--depth`, written as an attachment instead |
+| `UNSAFE-NAME` | an attachment whose name had to be changed to make it safe |
+| `BAD-ENCODING` | a part whose transfer encoding or charset couldn't be decoded in full, or an HTML body with a single token over 4 MiB; what could be decoded is kept |
+| `MALFORMED` | a part with a Content-Type that can't be parsed (read as `application/octet-stream`) or a part header net/mail can't parse (kept whole as an attachment), or a multipart with no boundary, no delimiter, or no close delimiter; what could be read is kept |
+
+`safeclaw-mail extract FILE DEST` has `safeclaw-unpack`'s rules for DEST: it must be missing or an empty directory, and not a symbolic link, and on any failure it is emptied without following links. It writes `body.txt`, with the main headers, an empty line, and the text of every body part in order, each after a blank line. For a nested message, a `---------- Forwarded message (part ID) ----------` line and its main headers come before its text. In a `multipart/alternative` the text of each alternative is held until the last one is read, then only one is used: the first that is itself a `text/plain` body part, else the last that has any body text, so the other alternatives' text never reaches `body.txt`. HTML is turned into text with the `golang.org/x/net/html` tokenizer, streaming, without building a tree: `script`, `style`, `noscript`, `template`, `title`, `iframe`, `object`, `svg`, and `math` are left out with their contents, block elements and `<br>` become line breaks, list items get a `- ` marker, whitespace is collapsed outside `<pre>`, an image's alt text is kept in brackets, and a link whose text isn't its address is followed by the address in angle brackets, so the text shows where a link really goes. Body text is decoded from its charset and then stripped: CRLF and lone CR become LF, invalid UTF-8 becomes U+FFFD, and control characters other than tab and newline, and the bidi marks, embeddings, overrides, and isolates, are dropped.
+
+Each attachment is written as `N-NAME`, `N` counting attachments from 1 across the whole message, nested ones included, so two with the same name never collide. `NAME` is the decoded name made safe: slashes and backslashes become `_`, invalid UTF-8 becomes `_`, other spaces become a plain space, characters `unicode.IsPrint` rejects are dropped, runs of dots are shortened until no `..` is left, leading dots, dashes, and spaces and trailing spaces are trimmed, and it is cut to 100 bytes, keeping an extension of up to 16 bytes. An attachment with no name, or none left, is `N-attachment`, or `N-message.eml` for a message. Files are created with `O_EXCL`, so nothing in DEST is ever overwritten or followed. Every part, file name, and destination file is printed as `list` prints it, with a sixth field, the file it was written to in DEST (`-` for none). `--json` prints one JSON object instead: `{"status", "code", "headers": [{"name", "value"}], "parts": [{"part", "type", "size", "name", "flags", "file", "headers"}], "body"}`, with names unescaped, a null size for a multipart, and a nested message's main headers in its `headers`; a failure prints `{"status", "code", "error", "part"}`.
+
+Transfer encodings are decoded leniently and streaming, the way mail readers do. Base64 skips anything outside its alphabet and adds missing padding; data after the padding, or a last group of one character, flags the part `BAD-ENCODING`. Quoted-printable is decoded without reading whole lines, so a line of any length works, and an `=` that starts no escape is kept as it is, flagging the part. An unknown encoding is read as it is, flagged. `7bit`, `8bit`, and `binary` are read as they are.
+
+Parts are split on their boundary by `safeclaw-mail` itself, following RFC 2046: a delimiter is `--` and the boundary at the start of a line, optionally followed by `--` for the close delimiter, then spaces or tabs, then the end of the line, and the line break before it belongs to the delimiter. The preamble and the epilogue are ignored. Each part's header is read with `net/mail`, like the message's, rather than with `mime/multipart`, whose header parser follows HTTP's stricter rules: a part header with a raw control character or a field name with a space would fail there, ending the multipart and hiding the parts after it. With its own splitter, a part whose header `net/mail` can't parse is kept whole as an attachment flagged `MALFORMED`, and the parts after it are read as usual. A `multipart/digest`'s parts default to `message/rfc822`.
+
+Everything is streamed and bounded, so a crafted message can't exhaust memory. Each header (the message's, each nested message's, and each part's) is read into memory up to 256 KiB, 1000 fields, and 64 KiB per line, and only then parsed. A message is limited to 1000 parts, nested messages included, and to 32 levels of nesting, counting multiparts and nested messages. Going over any of these rejects the message. The HTML tokenizer buffers at most 4 MiB for one token. `--max-size` limits the total of `body.txt`, the attachments, and the alternatives' text while it is held. `--depth` (default `3`, `0` for none) limits how many levels of nested messages are followed; deeper ones are written as attachments, flagged `DEPTH-LIMIT`, rather than rejected. A file is a message when it starts with a header (after an mbox `From ` line, if there is one) that has at least one of `From`, `To`, `Cc`, `Subject`, `Date`, `Message-ID`, `MIME-Version`, `Content-Type`, `Received`, `Return-Path`, `Sender`, or `Reply-To`.
+
+Exit codes, reusing `safeclaw-unpack`'s where they mean the same thing:
+
+| Code | Meaning |
+|------|---------|
+| 0 | success |
+| 1 | failed: a usage or I/O error, or DEST is not a missing or empty directory |
+| 2 | rejected: the message is over a limit on its structure: over 1000 parts, nested over 32 levels deep, or a header over 256 KiB, over 1000 fields, or with a line over 64 KiB |
+| 3 | not used: it means needs password in `safeclaw-unpack`, which emails don't have |
+| 4 | too large: what would be written is over `--max-size` |
+| 5 | not a message: the file doesn't start with a message header |
+
 ### Inspecting and verifying
 
 `safeclaw sandbox inspect NAME` and `safeclaw sandbox verify NAME` let a script confirm that a container really is an isolated sandbox, and whether it is running, without relying on the `safeclaw-` prefix, the labels, or `docker inspect` templates. Neither changes the sandbox. Both refuse interactive sessions and missing names.
@@ -389,7 +427,7 @@ Sessions using host networking, or sharing another container's network, can't be
 
 An image variant is the base `safeclaw` image with extra apt packages or `run` commands, tagged `safeclaw:NAME`. Variants come from two places:
 
-- built in: `sandbox` adds poppler-utils, tesseract-ocr and tesseract-ocr-eng, 7zip, and file, and links `safeclaw-unpack` (see [unpacking archives](#unpacking-archives)) and `safeclaw-totext` (see [extracting text](#extracting-text))
+- built in: `sandbox` adds poppler-utils, tesseract-ocr and tesseract-ocr-eng, 7zip, and file, and links `safeclaw-unpack` (see [unpacking archives](#unpacking-archives)), `safeclaw-totext` (see [extracting text](#extracting-text)), and `safeclaw-mail` (see [reading emails](#reading-emails))
 - `~/.config/safeclaw/config.yaml` (honoring `XDG_CONFIG_HOME`), whose `variants` map adds variants or replaces a built-in of the same name, and whose `defaults` pick the variant each session type uses when none is given (`base` for sessions and `sandbox` for sandboxes unless set)
 
 The config file is decoded strictly, so unknown keys are errors. Names are lowercase and may not be `base`, which means the base image, or `latest`. Package names are checked, and `run` commands are one line each and run as root. The file is read whenever a variant is resolved, so the dashboard sees edits without a restart, and commands that don't resolve variants, like `ls`, `stop`, and `rm`, don't read it.

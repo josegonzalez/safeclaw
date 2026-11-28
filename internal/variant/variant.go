@@ -75,6 +75,10 @@ const UnpackLinkCommand = "ln -s safeclaw /usr/local/bin/safeclaw-unpack"
 // the sandbox variant.
 const TotextLinkCommand = "ln -s safeclaw /usr/local/bin/safeclaw-totext"
 
+// MailLinkCommand links safeclaw-mail to the image's safeclaw binary in the
+// sandbox variant.
+const MailLinkCommand = "ln -s safeclaw /usr/local/bin/safeclaw-mail"
+
 // Builtins returns the variants safeclaw defines itself.
 func Builtins() []Variant {
 	return []Variant{
@@ -82,9 +86,10 @@ func Builtins() []Variant {
 			Name:     Sandbox,
 			Packages: []string{"7zip", "file", "poppler-utils", "tesseract-ocr", "tesseract-ocr-eng"},
 			// safeclaw run as safeclaw-unpack is `safeclaw unpack`, which
-			// drives the 7z installed above, and run as safeclaw-totext is
-			// `safeclaw totext`, which drives poppler-utils and tesseract.
-			Run:    []string{UnpackLinkCommand, TotextLinkCommand},
+			// drives the 7z installed above, run as safeclaw-totext is
+			// `safeclaw totext`, which drives poppler-utils and tesseract,
+			// and run as safeclaw-mail is `safeclaw mail`.
+			Run:    []string{UnpackLinkCommand, TotextLinkCommand, MailLinkCommand},
 			Source: SourceBuiltin,
 		},
 	}

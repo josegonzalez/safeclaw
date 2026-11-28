@@ -109,6 +109,18 @@ safeclaw sandbox exec triage -- safeclaw-totext --json --max-pages 20 --ocr-lang
 
 `safeclaw-totext` exits 0 when every page was converted, 1 when it failed (a tool failed on the whole file, or the file is corrupt), 3 when the PDF is encrypted, 5 when the file is not a supported type, 6 when it wrote text but skipped something (pages over `--max-pages`, default `100`, or a page whose extraction or OCR timed out or failed), and 7 when a tool timed out before anything was written. `--ocr-threshold` (default `10`) is the number of characters below which a PDF page is OCR'd, `--ocr-dpi` (default `300`) and `--ocr-lang` (default `eng`) set how, and `--timeout` (default `1m`) limits each tool run.
 
+The `sandbox` variant also has `safeclaw-mail`, which opens untrusted emails (`.eml` files) without a decoder of your own: it writes the headers and the text of every body part, forwarded messages included, to `body.txt`, preferring `text/plain` in a `multipart/alternative` and otherwise turning HTML into text without its scripts or styles, and writes each attachment under a safe, numbered name. It decodes transfer encodings, charsets, and encoded words, strips control characters from everything it prints, and limits the number of parts, their nesting, the size of headers, and the size of what it writes. See [reading emails](docs/architecture.md#reading-emails).
+
+```bash
+# The main headers, then one part per line: part, type, size, escaped name, and flags such as ATTACHMENT, NESTED-MESSAGE, and UNSAFE-NAME
+safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- safeclaw-mail list /in/invoice.eml
+
+# Write body.txt and the attachments into a new or empty directory; --json prints one JSON object instead
+safeclaw sandbox exec triage -- safeclaw-mail extract /in/invoice.eml /sandbox/out/invoice
+```
+
+`safeclaw-mail` uses `safeclaw-unpack`'s exit codes where they mean the same thing: 0 on success, 1 when it failed, 2 when the message was rejected for going over a limit on its structure, 4 when what it would write is over `--max-size` (default `512m`), and 5 when the file is not a message. It never exits 3. `--depth` (default `3`) limits how many levels of nested messages are followed; one past it is written as an attachment.
+
 ```bash
 # Create a sandbox, mounting host directories read-only (-v repeats)
 safeclaw sandbox run -s triage -v ~/inbox:/in -v ~/triage-tools:/opt/tools
@@ -240,7 +252,7 @@ safeclaw sandbox exec --ephemeral --variant base -- ls
 - yt-dlp 2026.11.23
 - [DX plugin](https://github.com/ykdojo/claude-code-tips#tip-44-install-the-dx-plugin), [custom status line](https://github.com/ykdojo/claude-code-tips#tip-0-customize-your-status-line), [shell aliases](#aliases)
 - ttyd web terminal + tmux
-- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, file, `safeclaw-unpack`, and `safeclaw-totext`
+- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, file, `safeclaw-unpack`, `safeclaw-totext`, and `safeclaw-mail`
 
 ## Sensible defaults
 

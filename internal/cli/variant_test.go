@@ -258,7 +258,7 @@ func TestVariantList(t *testing.T) {
 		"base      built-in   -                                                                  safeclaw (present)           -\n" +
 		"docs      config     pandoc                                                             safeclaw:docs (missing)      session\n" +
 		"notes     config     (+1 run)                                                           safeclaw:notes (missing)     -\n" +
-		"sandbox   built-in   7zip file poppler-utils tesseract-ocr tesseract-ocr-eng (+2 run)   safeclaw:sandbox (present)   sandbox\n"
+		"sandbox   built-in   7zip file poppler-utils tesseract-ocr tesseract-ocr-eng (+3 run)   safeclaw:sandbox (present)   sandbox\n"
 	if out != want {
 		t.Errorf("variant ls =\n%s\nwant\n%s", out, want)
 	}
