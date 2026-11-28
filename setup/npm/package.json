@@ -1,0 +1,9 @@
+{
+  "name": "safeclaw-image-npm",
+  "private": true,
+  "dependencies": {
+    "@playwright/mcp": "0.0.86",
+    "node-lief": "1.3.2",
+    "yarn": "1.22.22"
+  }
+}

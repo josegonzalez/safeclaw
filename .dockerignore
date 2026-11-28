@@ -1,6 +1,11 @@
 .git
 .github
+.claude
 dist
 tmp
+completions
+safeclaw
+**/.env
+**/*.pem
 *.md
 !setup/**/*.md
