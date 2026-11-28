@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -112,7 +113,7 @@ func TestUnpackPassword(t *testing.T) {
 
 func TestUnpackFlags(t *testing.T) {
 	cmd := newUnpackExtractCommand()
-	for name, want := range map[string]string{"max-size": "512m", "depth": "3", "drop-bad": "false", "json": "false", "password-env": unpackPasswordEnv} {
+	for name, want := range map[string]string{"max-size": "512m", "depth": "3", "drop-bad": "false", "nested": "fail", "json": "false", "password-env": unpackPasswordEnv} {
 		if got := cmd.Flags().Lookup(name).DefValue; got != want {
 			t.Errorf("--%s default = %q, want %q", name, got, want)
 		}
@@ -132,6 +133,70 @@ func TestUnpackFlags(t *testing.T) {
 	}
 	if _, err := run(t, newUnpackExtractCommand(), "--depth", "-1", "a", "b"); !errors.Is(err, exitCodeError{1}) {
 		t.Errorf("bad --depth: %v", err)
+	}
+	if _, err := run(t, newUnpackExtractCommand(), "--nested", "skip", "a", "b"); !errors.Is(err, exitCodeError{1}) {
+		t.Errorf("bad --nested: %v", err)
+	}
+	for _, s := range []string{"--nested keep-going", "REJECTED, NEEDS-PASSWORD, TOO-LARGE, or FAILED", "exits 0", "nested_failures"} {
+		if !strings.Contains(cmd.Long, s) {
+			t.Errorf("extract help lacks %q", s)
+		}
+	}
+}
+
+// TestWriteExtracted checks how nested archives left packed by --nested
+// keep-going are shown: flagged in the listing and named on stderr, or
+// under nested_failures in --json.
+func TestWriteExtracted(t *testing.T) {
+	bad := []unpack.Entry{{Path: "in.zip.unpacked/l", Type: unpack.TypeSymlink, Size: -1, Link: "/etc"}}
+	res := &unpack.Result{
+		Entries: []unpack.Entry{
+			{Path: "a.pdf", Type: unpack.TypeFile, Size: 4},
+			{Path: "in.zip", Type: unpack.TypeFile, Size: 9, Extra: []string{unpack.FlagRejected}},
+			{Path: "big.gz", Type: unpack.TypeFile, Size: 9, Extra: []string{unpack.FlagTooLarge}},
+		},
+		Failed: []*unpack.Error{
+			{Kind: unpack.Rejected, Archive: "in.zip", Msg: "1 entry with links", Bad: bad},
+			{Kind: unpack.TooLarge, Archive: "big.gz", Msg: "too big\x1b"},
+		},
+	}
+	cmd := newUnpackCommand("unpack")
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	if err := writeExtracted(cmd, false, res); err != nil {
+		t.Fatal(err)
+	}
+	wantOut := "file\t4\ta.pdf\t-\nfile\t9\tin.zip\tREJECTED\nfile\t9\tbig.gz\tTOO-LARGE\n"
+	wantErr := "unpack: left packed: rejected: in.zip: 1 entry with links\nunpack: left packed: too large: big.gz: too big\\x1b\n"
+	if out.String() != wantOut || errOut.String() != wantErr {
+		t.Errorf("text stdout =\n%q\nstderr =\n%q", out.String(), errOut.String())
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if err := writeExtracted(cmd, true, res); err != nil {
+		t.Fatal(err)
+	}
+	var v unpackJSON
+	if err := json.Unmarshal(out.Bytes(), &v); err != nil || errOut.Len() != 0 {
+		t.Fatalf("json = %s, %v", out.String(), err)
+	}
+	if v.Status != "ok" || v.Code != 0 || len(v.Entries) != 3 || len(v.NestedFailures) != 2 || v.Entries[1].Flags[0] != "REJECTED" {
+		t.Errorf("json = %s", out.String())
+	}
+	n := v.NestedFailures[0]
+	if n.Archive != "in.zip" || n.Status != "rejected" || n.Code != 2 || n.Error == "" || len(n.Rejected) != 1 || n.Rejected[0].Path != "in.zip.unpacked/l" || n.Rejected[0].Link != "/etc" {
+		t.Errorf("nested failure = %+v", n)
+	}
+	if n := v.NestedFailures[1]; n.Status != "too large" || n.Code != 4 || n.Rejected != nil {
+		t.Errorf("nested failure = %+v", n)
+	}
+
+	// Without failures there is no nested_failures key.
+	out.Reset()
+	if err := writeExtracted(cmd, true, &unpack.Result{Entries: res.Entries[:1]}); err != nil || strings.Contains(out.String(), "nested_failures") {
+		t.Errorf("json without failures = %s, %v", out.String(), err)
 	}
 }
 
@@ -194,6 +259,58 @@ func TestUnpackCommand(t *testing.T) {
 		if !errors.Is(err, exitCodeError{code}) || json.Unmarshal([]byte(out), &v) != nil || v.Code != code {
 			t.Errorf("extract %s = %q, %v; want exit %d", filepath.Base(file), out, err, code)
 		}
+	}
+}
+
+// TestUnpackKeepGoing runs extract with the real 7z on a generated zip
+// holding a nested zip with a symlink: rejected (exit 2) by default, and
+// left packed and flagged with exit 0 with --nested keep-going.
+func TestUnpackKeepGoing(t *testing.T) {
+	if _, err := unpack.Find(); err != nil {
+		t.Skip(err)
+	}
+	makeZip := func(link bool, files map[string]string) []byte {
+		var b bytes.Buffer
+		w := zip.NewWriter(&b)
+		for name, body := range files {
+			h := &zip.FileHeader{Name: name, Method: zip.Deflate}
+			if link && name == "l" {
+				h.SetMode(os.ModeSymlink | 0o777)
+			}
+			f, err := w.CreateHeader(h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = f.Write([]byte(body))
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return b.Bytes()
+	}
+	inner := makeZip(true, map[string]string{"ok.txt": "ok", "l": "/etc/passwd"})
+	dir := filepath.Join(t.TempDir(), "a", "b")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(dir, "outer.zip")
+	if err := os.WriteFile(archive, makeZip(false, map[string]string{"good.txt": "good", "inner.zip": string(inner)}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := run(t, newUnpackCommand("unpack"), "extract", archive, filepath.Join(dir, "fail")); !errors.Is(err, exitCodeError{2}) {
+		t.Errorf("default: %v, want exit 2", err)
+	}
+	out, err := run(t, newUnpackCommand("unpack"), "extract", "--nested", "keep-going", archive, filepath.Join(dir, "text"))
+	if err != nil || out != "file\t4\tgood.txt\t-\nfile\t"+strconv.Itoa(len(inner))+"\tinner.zip\tREJECTED\n" {
+		t.Errorf("keep-going = %q, %v", out, err)
+	}
+	out, err = run(t, newUnpackCommand("unpack"), "extract", "--nested", "keep-going", "--json", archive, filepath.Join(dir, "json"))
+	var v unpackJSON
+	if err != nil || json.Unmarshal([]byte(out), &v) != nil || v.Status != "ok" || len(v.NestedFailures) != 1 || v.NestedFailures[0].Archive != "inner.zip" || len(v.NestedFailures[0].Rejected) != 1 {
+		t.Errorf("keep-going --json = %q, %v", out, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "json", "inner.zip.unpacked")); err == nil {
+		t.Error("the rejected archive's directory was left behind")
 	}
 }
 

@@ -169,6 +169,20 @@ func (k Kind) String() string {
 	return "failed"
 }
 
+// Flag is the flag on a nested archive left packed with Options.KeepGoing
+// because it failed with k.
+func (k Kind) Flag() string {
+	switch k {
+	case Rejected:
+		return FlagRejected
+	case NeedsPassword:
+		return FlagNeedsPassword
+	case TooLarge:
+		return FlagTooLarge
+	}
+	return FlagFailed
+}
+
 // Error is an unpack failure.
 type Error struct {
 	Kind Kind

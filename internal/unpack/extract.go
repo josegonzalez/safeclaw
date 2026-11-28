@@ -44,6 +44,12 @@ type Options struct {
 	// DropBad leaves out links, special files, and entries with unsafe
 	// paths instead of rejecting the archive.
 	DropBad bool
+	// KeepGoing leaves a nested archive that fails packed, flagged with its
+	// Kind's Flag, and carries on, instead of failing the whole extraction.
+	// What it extracted is removed, without following links, and the size
+	// limit stays shared by the whole tree. The archive given to Extract
+	// still fails the extraction for its own problems.
+	KeepGoing bool
 	// PollInterval is how often the size is checked while 7z extracts.
 	PollInterval time.Duration
 }
@@ -55,6 +61,9 @@ type Result struct {
 	// Dropped are the bad entries left out with Options.DropBad, with the
 	// directory of the nested archive they came from in front.
 	Dropped []Entry
+	// Failed are the nested archives left packed with Options.KeepGoing,
+	// one error each, in the order they were tried, with Archive set.
+	Failed []*Error
 }
 
 // Extract extracts archive into dest, which must be missing or an empty
@@ -69,10 +78,12 @@ type Result struct {
 // setuid and setgid bits and become readable and writable by their owner,
 // and every path must resolve inside dest. Then each file that starts like
 // an archive is unpacked into NAME.unpacked next to it, the same way, up to
-// Options.Depth levels. On any error dest is emptied, without following
-// links, and the error is an *Error. An archive 7z can't open is
-// NotArchive, unless it starts like one Detect knows, which makes it
-// corrupt and Failed; a nested file 7z can't open is left as it is.
+// Options.Depth levels. With Options.KeepGoing, a nested archive that
+// fails is left packed and flagged instead. On any other error dest is
+// emptied, without following links, and the error is an *Error. An archive
+// 7z can't open is NotArchive, unless it starts like one Detect knows,
+// which makes it corrupt and Failed; a nested file 7z can't open is left as
+// it is.
 func Extract(ctx context.Context, archive, dest string, o Options) (*Result, error) {
 	if o.Runner == nil {
 		return nil, &Error{Kind: Failed, Msg: "no 7z runner"}
@@ -111,7 +122,7 @@ func Extract(ctx context.Context, archive, dest string, o Options) (*Result, err
 		_ = emptyDir(root)
 		return nil, &Error{Kind: Failed, Msg: err.Error()}
 	}
-	return &Result{Entries: entries, Dropped: x.dropped}, nil
+	return &Result{Entries: entries, Dropped: x.dropped, Failed: x.failed}, nil
 }
 
 // prepareDest makes dest if it is missing and returns its absolute path
@@ -156,6 +167,8 @@ type extractor struct {
 	// unpacked maps a nested archive's path to its directory, both
 	// relative to root.
 	unpacked map[string]string
+	// failed are the nested archives left packed with KeepGoing.
+	failed []*Error
 }
 
 // unpack extracts archive into dir, rel being dir relative to the root
@@ -276,6 +289,7 @@ func (x *extractor) unpack(ctx context.Context, archive, dir, rel string, depth 
 		if err != nil {
 			return fail(err)
 		}
+		before := x.mark()
 		err = x.unpack(ctx, p, sub, relTo(x.root, sub), depth+1)
 		if errors.Is(err, errNotArchive) {
 			// It only starts like an archive.
@@ -285,9 +299,53 @@ func (x *extractor) unpack(ctx context.Context, archive, dir, rel string, depth 
 			continue
 		}
 		if err != nil {
-			return err
+			var e *Error
+			if !x.o.KeepGoing || ctx.Err() != nil || !errors.As(err, &e) {
+				return err
+			}
+			if err := x.leavePacked(sub, before); err != nil {
+				return fail(err)
+			}
+			// A deeper archive's failure is handled where it happens,
+			// so this one is p's own and names it.
+			x.flags[prel] = append(x.flags[prel], e.Kind.Flag())
+			x.failed = append(x.failed, e)
+			continue
 		}
 		x.unpacked[prel] = relTo(x.root, sub)
+	}
+	return nil
+}
+
+// mark is how much a nested archive's unpacking has recorded, so it can
+// be taken back when the archive is left packed.
+type mark struct{ dropped, failed int }
+
+func (x *extractor) mark() mark {
+	return mark{dropped: len(x.dropped), failed: len(x.failed)}
+}
+
+// leavePacked removes sub, a nested archive's directory, without following
+// links, and forgets what was recorded for it since m.
+func (x *extractor) leavePacked(sub string, m mark) error {
+	if err := emptyDir(sub); err != nil {
+		return err
+	}
+	if err := os.Remove(sub); err != nil {
+		return err
+	}
+	x.dropped = x.dropped[:m.dropped]
+	x.failed = x.failed[:m.failed]
+	prefix := relTo(x.root, sub) + "/"
+	for p := range x.flags {
+		if strings.HasPrefix(p, prefix) {
+			delete(x.flags, p)
+		}
+	}
+	for p := range x.unpacked {
+		if strings.HasPrefix(p, prefix) {
+			delete(x.unpacked, p)
+		}
 	}
 	return nil
 }
