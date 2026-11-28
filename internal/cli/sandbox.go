@@ -47,7 +47,7 @@ type sandboxFlags struct {
 	session, variant, memory, cpus, disk string
 	volumes                              []string
 	pidsLimit                            int
-	remove                               bool
+	remove, verify                       bool
 }
 
 // limitFlags are the sandbox run flags that recreate an existing sandbox
@@ -55,7 +55,7 @@ type sandboxFlags struct {
 var limitFlags = []string{"memory", "pids-limit", "cpus", "disk"}
 
 // createFlags are the flags that configure a new sandbox.
-var createFlags = append([]string{"session", "volume", "variant"}, limitFlags...)
+var createFlags = append([]string{"session", "volume", "variant", "verify"}, limitFlags...)
 
 // register adds the flags that configure a new sandbox. recreates is
 // appended to the help of the flags that recreate an existing sandbox.
@@ -79,6 +79,7 @@ func (f sandboxFlags) options(changed func(name string) bool) session.SandboxOpt
 		Volumes: f.volumes,
 		Variant: f.variant,
 		Remove:  f.remove,
+		Verify:  f.verify,
 	}
 	if changed("memory") {
 		opts.Memory = f.memory
@@ -108,7 +109,10 @@ func newSandboxRunCommand() *cobra.Command {
 		Long: "Create or start a sandbox. -s is required unless --rm is set.\n\n" +
 			"/sandbox is a tmpfs of --disk bytes: writes past it fail, its pages count toward --memory, and it is emptied when the sandbox stops.\n\n" +
 			"With --rm, a new one-off sandbox is created and removed when it stops. " +
-			"Without -s it gets a random name. Its name is the only thing printed to stdout, and an existing name is refused.",
+			"Without -s it gets a random name. Its name is the only thing printed to stdout, and an existing name is refused.\n\n" +
+			"With --verify, the sandbox gets the checks of `safeclaw sandbox verify` once it has started. If any fails, the report is printed " +
+			"to stderr and it exits non-zero naming the failed checks. A sandbox this run created or recreated is then removed, " +
+			"including when safeclaw is interrupted before the checks end; one that already existed is left as it was.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts := f.options(func(name string) bool { return cmd.Flags().Changed(name) })
@@ -116,13 +120,17 @@ func newSandboxRunCommand() *cobra.Command {
 			if opts.Name, err = resolveName(cmd, opts.Name); err != nil {
 				return err
 			}
-			if !opts.Remove {
-				_, err := session.NewManager(cmd.OutOrStdout()).EnsureSandbox(cmd.Context(), opts)
-				return err
+			m := newManager()
+			m.Out = cmd.OutOrStdout()
+			if opts.Remove {
+				m.Out = cmd.ErrOrStderr()
 			}
-			res, err := session.NewManager(cmd.ErrOrStderr()).EnsureSandbox(cmd.Context(), opts)
+			res, err := m.EnsureSandbox(cmd.Context(), opts)
 			if err != nil {
-				return err
+				return verifyReport(cmd.ErrOrStderr(), err)
+			}
+			if !opts.Remove {
+				return nil
 			}
 			_, err = fmt.Fprintln(cmd.OutOrStdout(), res.Name)
 			return err
@@ -130,6 +138,7 @@ func newSandboxRunCommand() *cobra.Command {
 	}
 	f.register(cmd, "sandbox name (required without --rm)", " (recreates an existing sandbox)")
 	cmd.Flags().BoolVar(&f.remove, "rm", false, "create a one-off sandbox that is removed when it stops")
+	cmd.Flags().BoolVar(&f.verify, "verify", false, "run the sandbox verify checks once it has started, and remove it if a check fails and this run created it")
 	return cmd
 }
 
@@ -171,6 +180,9 @@ func newSandboxExecCommand() *cobra.Command {
 		Long: "Run a command in a sandbox as the sandbox user.\n\n" +
 			"With --ephemeral, no NAME is given: the command runs in a new one-off sandbox that is removed when it exits, " +
 			"and the command's exit code is returned. Without -s the sandbox gets a random name, and an existing name is refused.\n\n" +
+			"With --ephemeral --verify, the one-off sandbox gets the checks of `safeclaw sandbox verify` once it has started, and the command " +
+			"starts only after every check has passed. If any fails, the report is printed to stderr, the sandbox is removed without running the command, " +
+			"and it exits non-zero naming the failed checks. The sandbox is also removed when safeclaw is interrupted before the checks end.\n\n" +
 			"With --escape-controls, the command's stdout and stderr are kept apart and passed through safeclaw, which writes control characters " +
 			"other than newline and tab, invalid UTF-8, and other unprintable characters as visible escapes such as \\x1b, " +
 			"so escape sequences from untrusted files never reach the terminal. The exit code is returned as is " +
@@ -189,15 +201,21 @@ func newSandboxExecCommand() *cobra.Command {
 			return completeType(config.TypeSandbox)(cmd, args, toComplete)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			m := session.NewManager(nil)
+			m := newManager()
 			env, err := m.ExecEnv(envSpecs, os.LookupEnv)
 			if err != nil {
 				return err
 			}
 			run := execRun{escape: escape, interactive: interactive, timeout: timeout, ephemeral: ephemeral}
-			// Without --timeout or --escape-controls safeclaw replaces
-			// itself with docker, which then inherits the env pipe as is.
-			replace := !escape && timeout == 0
+			if ephemeral && f.verify {
+				run.verify = func(ctx context.Context, exited <-chan struct{}) error {
+					return m.VerifyEphemeral(ctx, run.name, exited)
+				}
+			}
+			// Without --timeout, --escape-controls or --verify safeclaw
+			// replaces itself with docker, which then inherits the env
+			// pipe as is.
+			replace := !escape && timeout == 0 && run.verify == nil
 			x := session.ExecOptions{Interactive: interactive, TTY: tty, Timeout: timeout}
 			if env != "" {
 				if run.envFile, err = envPipe(env); err != nil {
@@ -249,6 +267,7 @@ func newSandboxExecCommand() *cobra.Command {
 	cmd.Flags().StringArrayVarP(&envSpecs, "env", "e", nil, "set NAME=VALUE, or NAME from safeclaw's environment, for the command (repeatable)")
 	cmd.Flags().BoolVar(&ephemeral, "ephemeral", false, "run the command in a new one-off sandbox that is removed when it exits")
 	f.register(cmd, "name for the --ephemeral sandbox (random by default)", " (with --ephemeral)")
+	cmd.Flags().BoolVar(&f.verify, "verify", false, "run the sandbox verify checks on the --ephemeral sandbox before the command, and remove it without running the command if a check fails")
 	return cmd
 }
 
@@ -285,6 +304,10 @@ type execRun struct {
 	envFile *os.File
 	// name is the sandbox's session name.
 	name string
+	// verify, when set, is called once docker has started, and lets the
+	// command start or returns why it must not. exited is closed when
+	// docker exits.
+	verify func(ctx context.Context, exited <-chan struct{}) error
 }
 
 // runSandboxExec runs a sandbox exec argv as a child of safeclaw, for
@@ -310,18 +333,60 @@ func runSandboxExec(cmd *cobra.Command, m *session.Manager, argv []string, r exe
 		o.extraFiles = []*os.File{r.envFile}
 	}
 	var forced atomic.Bool
-	if r.timeout > 0 {
-		o.deadline = r.timeout + session.TimeoutKillAfter + timeoutGrace
-		o.onDeadline = func(p *os.Process) {
-			forced.Store(true)
-			if r.ephemeral {
-				_ = m.Docker.Remove(context.Background(), config.ContainerName(r.name), true)
-			}
-			_ = p.Kill()
+	deadline := r.timeout + session.TimeoutKillAfter + timeoutGrace
+	onDeadline := func(p *os.Process) {
+		forced.Store(true)
+		if r.ephemeral {
+			_ = m.Docker.Remove(context.Background(), config.ContainerName(r.name), true)
 		}
+		_ = p.Kill()
+	}
+	if r.timeout > 0 && r.verify == nil {
+		o.deadline, o.onDeadline = deadline, onDeadline
 	}
 	start := time.Now()
+	// With verify, the command starts once it returns, so the timeout is
+	// counted from then. start and timer are only read after verified
+	// has been received.
+	var timer *time.Timer
+	// launched is set when docker started, by runChild before it returns.
+	launched := false
+	verified := make(chan error, 1)
+	exited := make(chan struct{})
+	if r.verify != nil {
+		ctx := cmd.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		o.started = func(p *os.Process) {
+			launched = true
+			go func() {
+				err := r.verify(ctx, exited)
+				if err == nil {
+					start = time.Now()
+					if r.timeout > 0 {
+						timer = time.AfterFunc(deadline, func() { onDeadline(p) })
+					}
+				} else {
+					// docker exits once its container is gone; this
+					// only makes sure it does.
+					_ = p.Kill()
+				}
+				verified <- err
+			}()
+		}
+	}
 	code, err := runChild(argv, o)
+	close(exited)
+	if launched {
+		verr := <-verified
+		if timer != nil {
+			timer.Stop()
+		}
+		if verr != nil && !errors.Is(verr, session.ErrExited) {
+			return verifyReport(cmd.ErrOrStderr(), errors.Join(verr, err))
+		}
+	}
 	if err != nil {
 		return err
 	}

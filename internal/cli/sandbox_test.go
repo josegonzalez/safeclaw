@@ -113,6 +113,8 @@ func TestSandboxExecArgs(t *testing.T) {
 		{[]string{"--ephemeral", "--timeout", "1m", "-e", "A=1", "-v", "/a:/a", "-v", "/b:/b"}, []string{"ls"}, ""},
 		{[]string{"--timeout", "0s"}, []string{"box", "ls"}, "invalid --timeout"},
 		{[]string{"--ephemeral", "--timeout", "-1s"}, []string{"ls"}, "invalid --timeout"},
+		{[]string{"--ephemeral", "--verify"}, []string{"ls"}, ""},
+		{[]string{"--verify"}, []string{"box", "ls"}, "--verify can only be used with --ephemeral"},
 	}
 	for _, tc := range cases {
 		cmd := newSandboxExecCommand()

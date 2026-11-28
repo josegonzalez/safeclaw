@@ -155,6 +155,13 @@ safeclaw sandbox verify triage                    # checks each isolation guaran
 
 Only the checks `verify` makes from the docker configuration are authoritative. Its live checks run inside the sandbox as the sandbox user, so code already running there can make them report anything: treat them as advisory. See [inspecting and verifying](docs/architecture.md#inspecting-and-verifying).
 
+To get a sandbox that passed those checks or none at all, pass `--verify` when creating it. If any check fails, the report goes to stderr, the sandbox it just created is removed (an existing named sandbox is left alone), and it exits non-zero naming the failed checks. With `exec --ephemeral`, the command only starts once every check has passed:
+
+```bash
+name=$(safeclaw sandbox run --rm --verify -v ~/inbox:/in)
+safeclaw sandbox exec --ephemeral --verify -v ~/inbox:/in -- pdftotext /in/report.pdf -
+```
+
 ## Taking a session offline
 
 While an interactive session handles something untrusted, take it offline. `safeclaw net off` saves the session's networks and disconnects it from them, and `safeclaw net on` reconnects it to exactly those networks. Its web terminal is unreachable while it is offline, and it stays offline across restarts.
@@ -312,10 +319,10 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw attach NAME` | Attach to a session's tmux session in this terminal. Clipboard writes, passthrough, hyperlinks to anything but http and https sites off localhost, and other sequences that act on the host terminal are filtered out, and the titles and modes the session leaves set are reset after it detaches ([details](docs/architecture.md#attaching-from-the-host)) |
 | `safeclaw net off NAME` | Save a session's networks and disconnect it from them. `--owner` names the hold and `--reason` says why. |
 | `safeclaw net on NAME` | Release the hold for `--owner` (or the unnamed hold) and reconnect the session once none remain. `--force` releases every hold. |
-| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory recursively read-only and can be repeated, `--variant` picks the image variant, `--memory`, `--pids-limit`, `--cpus`, and `--disk` (the size of `/sandbox`) set limits. |
+| `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory recursively read-only and can be repeated, `--variant` picks the image variant, `--memory`, `--pids-limit`, `--cpus`, and `--disk` (the size of `/sandbox`) set limits. `--verify` runs the `sandbox verify` checks once it has started, exiting non-zero and removing it if this run created it and a check fails. |
 | `safeclaw sandbox run --rm [-s NAME]` | Create a one-off sandbox that is removed when it stops, and print its name |
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY, `--escape-controls` to escape control characters in its output, `--timeout DUR` to stop it after DUR and exit 124, `-e NAME=VALUE` or `-e NAME` to set an environment variable for the command without putting the value in docker's arguments) |
-| `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`, and the same `--timeout` and `-e` as `sandbox exec`. |
+| `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`, and the same `--timeout` and `-e` as `sandbox exec`. With `--verify`, the command only starts once the sandbox has passed the `sandbox verify` checks, and a sandbox that fails one is removed without running it. |
 | `safeclaw sandbox cp-in NAME FILE...` | Copy regular host files into a running sandbox as `N-name`, owned by the sandbox user, refusing links and other file types. `--to` picks a directory under `/sandbox` (default `/sandbox/in`). |
 | `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, sparse files, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given. `--replace` implies `--force` and also removes the regular files in the host directory that match an `--only` glob but were not copied, keeping symlinks, directories, and other files, and only once every file has arrived and passed every check. `--max-size` (default `1g`) caps the total, and `--max-files` (default `1000`) caps the number of files. |
 | `safeclaw sandbox ls` | List sandboxes |

@@ -456,6 +456,76 @@ func TestIntegrationSandboxEphemeral(t *testing.T) {
 	waitGone(t, d, config.ContainerName(ename))
 }
 
+// TestIntegrationSandboxVerify checks that real sandboxes created with
+// Verify pass every check, that a verified one-off command runs only once
+// it is let through, and that one interrupted first is removed without
+// running.
+func TestIntegrationSandboxVerify(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+	dir := t.TempDir()
+	m := &Manager{
+		Docker:      d,
+		Secrets:     secrets.FileStore{Dir: filepath.Join(dir, ".secrets")},
+		SessionsDir: filepath.Join(dir, "sessions"),
+		NetworkDir:  filepath.Join(dir, "network"),
+		Out:         os.Stdout,
+	}
+	res, err := m.EnsureSandbox(ctx, SandboxOptions{Remove: true, Variant: config.BaseVariant, Verify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Remove(ctx, res.Container, true) })
+	if err := m.Stop(ctx, res.Name); err != nil {
+		t.Fatal(err)
+	}
+	waitGone(t, d, res.Container)
+
+	start := func(verifyCtx context.Context) (string, error, error) {
+		t.Helper()
+		argv, name, err := m.PrepareEphemeral(ctx, SandboxOptions{Variant: config.BaseVariant, Verify: true},
+			ExecOptions{Interactive: true}, []string{"sh", "-c", "cat; ls -A /tmp"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		container := config.ContainerName(name)
+		t.Cleanup(func() { _ = d.Remove(ctx, container, true) })
+		c := exec.Command(argv[0], argv[1:]...)
+		c.Stdin = strings.NewReader("from stdin\n")
+		var out strings.Builder
+		c.Stdout = &out
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		exited := make(chan struct{})
+		verified := make(chan error, 1)
+		go func() { verified <- m.VerifyEphemeral(verifyCtx, name, exited) }()
+		runErr := c.Wait()
+		close(exited)
+		verr := <-verified
+		waitGone(t, d, container)
+		return out.String(), verr, runErr
+	}
+
+	// The command reads the stdin given before it started, and the flag
+	// that let it through is gone.
+	out, verr, runErr := start(ctx)
+	if verr != nil || runErr != nil || out != "from stdin\n" {
+		t.Errorf("verified command: out = %q, verify = %v, run = %v", out, verr, runErr)
+	}
+
+	cctx, cancel := context.WithCancel(ctx)
+	cancel()
+	out, verr, runErr = start(cctx)
+	var ve *SandboxVerifyError
+	if !errors.As(verr, &ve) || ve.RemoveErr != nil || runErr == nil || out != "" {
+		t.Errorf("interrupted: out = %q, verify = %v, run = %v", out, verr, runErr)
+	}
+}
+
 // TestIntegrationSandboxVariant checks that the built-in sandbox variant has
 // the document extraction tools, that sandboxes use it by default, and that
 // it keeps the sandbox isolation.
