@@ -269,3 +269,46 @@ func TestExpandProgramName(t *testing.T) {
 		t.Error("safeclaw has no expand command")
 	}
 }
+
+// TestExpandDirectory checks a directory input on the command line: its
+// files are inputs, what is left out is noted on stderr, the same command
+// line reruns, and a DEST inside it is refused.
+func TestExpandDirectory(t *testing.T) {
+	in := t.TempDir()
+	if err := os.WriteFile(filepath.Join(in, "1-m.eml"), []byte(testMail), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/passwd", filepath.Join(in, "2-link\tx")); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "out")
+	const lines = "email\t1-1-m.eml\tUNPACKED,UNSAFE-NAME\t1-1-m.eml.unpacked\n"
+	out, errOut, err := runExpand(t, in, dest)
+	if err != nil {
+		t.Fatalf("%v: %s", err, errOut)
+	}
+	if out != lines {
+		t.Errorf("out = %q", out)
+	}
+	if want := "safeclaw-expand: ignoring " + escapeField(filepath.Join(in, "2-link\tx")) + ": a symbolic link\n"; errOut != want {
+		t.Errorf("stderr = %q, want %q", errOut, want)
+	}
+	out, _, err = runExpand(t, "--plan", in, dest)
+	if err != nil || out != "" {
+		t.Errorf("plan = %q, %v", out, err)
+	}
+	if out, _, err = runExpand(t, in, dest); err != nil || out != lines {
+		t.Errorf("rerun = %q, %v", out, err)
+	}
+	if m, err := expand.ReadManifest(dest); err != nil || len(m.Inputs) != 1 {
+		t.Errorf("manifest = %+v, %v", m, err)
+	}
+
+	empty, emptyDest := t.TempDir(), filepath.Join(t.TempDir(), "out")
+	if out, errOut, err := runExpand(t, "--json", empty, emptyDest); err != nil || !strings.Contains(out, `"inputs":[]`) || errOut != "" {
+		t.Errorf("empty = %q, %q, %v", out, errOut, err)
+	}
+	if _, errOut, err := runExpand(t, in, filepath.Join(in, "out")); !errors.Is(err, exitCodeError{1}) || !strings.Contains(errOut, "is inside the input directory") {
+		t.Errorf("dest inside: %v %q", err, errOut)
+	}
+}

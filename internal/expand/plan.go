@@ -41,14 +41,17 @@ type PlanItem struct {
 // returned without a listing, since a later run keeps them packed; every
 // other container left packed is listed with Options.Runner and
 // Options.Password. The manifest is checked as Run checks it, and with no
-// manifest dest must be missing or an empty directory and inputs given.
+// manifest dest must be missing or an empty directory and inputs given,
+// though input directories with no files in them are fine. Inputs are
+// resolved as Run resolves them.
 // Options.Depth and Options.NoMail must be the destination's; skips and
 // the size limit aren't used.
 func Plan(ctx context.Context, inputs []string, dest string, o Options) ([]PlanItem, error) {
 	if len(o.Skip) > 0 || len(o.Unskip) > 0 {
 		return nil, errors.New("a plan doesn't change the skip list")
 	}
-	if err := checkOptions(inputs, o); err != nil {
+	sources, err := checkOptions(inputs, dest, o)
+	if err != nil {
 		return nil, err
 	}
 	st, err := openStateLocked(dest, false)
@@ -94,8 +97,8 @@ func Plan(ctx context.Context, inputs []string, dest string, o Options) ([]PlanI
 		}
 	}
 	n := len(m.Inputs)
-	for _, in := range inputs {
-		p := fmt.Sprintf("%d-%s", n+1, inputName(in))
+	for _, in := range sources {
+		p := fmt.Sprintf("%d-%s", n+1, inputName(in.path))
 		_, sum, err := hashFile(in)
 		if err != nil {
 			return nil, err
@@ -105,9 +108,11 @@ func Plan(ctx context.Context, inputs []string, dest string, o Options) ([]PlanI
 		}
 		have[inputKey(p, sum)] = true
 		n++
-		real, err := filepath.EvalSymlinks(in)
-		if err != nil {
-			return nil, err
+		real := in.path
+		if !in.inDir {
+			if real, err = filepath.EvalSymlinks(in.path); err != nil {
+				return nil, err
+			}
 		}
 		kind, err := detectKind(real, o.NoMail)
 		if err != nil {
