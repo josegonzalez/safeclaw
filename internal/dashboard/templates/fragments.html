@@ -47,6 +47,10 @@
 {{end}}
 
 {{define "create-error"}}{{template "dialog-error" .}}{{end}}
+{{define "create-warning"}}
+<p class="modal-hint warning">session {{.Name}} was created. Warning: {{range $i, $w := .Warnings}}{{if $i}}; {{end}}{{$w}}{{end}}</p>
+<p class="modal-hint"><a href="{{.URL}}" target="_blank" rel="noopener">open its terminal</a></p>
+{{end}}
 {{define "dialog-error"}}<p class="modal-hint error">{{.}}</p>{{end}}
 
 {{define "info-error"}}

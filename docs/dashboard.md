@@ -43,7 +43,7 @@ Stop and delete need two clicks, and make the checks the CLI's `stop` and `rm` m
 | `GET /fragments/auth` | Claude Code token banner, empty while the token is valid |
 | `GET /fragments/options` | The new session form's variant and secrets pickers |
 | `GET /events` | SSE stream of `sessions` events |
-| `POST /sessions` | Create a session (`name`, `volume`, `variant`, `secrets` as `all`, `none`, or `only` with a `secret` field per name, `query`, `open_tab`). Errors return 422 and render in the dialog |
+| `POST /sessions` | Create a session (`name`, `volume`, `variant`, `secrets` as `all`, `none`, or `only` with a `secret` field per name, `query`, `open_tab`). Errors return 422 and render in the dialog, including a `volume` that would expose the config directory (see [volume mounts](architecture.md#volume-mounts)). A `volume` that exposes a container runtime socket creates the session and keeps the dialog open with a warning and a link to its terminal |
 | `GET /sessions/validate?name=` | Name hint shown while typing |
 | `GET /sessions/{name}/info` | Session info dialog with the `safeclaw attach` command |
 | `GET /sessions/{name}/actions` | Normal action button, used to revert a confirm |
@@ -70,7 +70,7 @@ curl -H "Authorization: Bearer $(cat ~/.config/safeclaw/dashboard/7680.token)" h
 | `POST /api/delete` | `{"name"}` | As for stop |
 | `POST /api/net/off` | `{"name", "owner", "reason"}` | `{success, offline, holds}`, or 409 for a sandbox, a network that can't be disconnected, or while a container left from a mixed-case name shares the session's state |
 | `POST /api/net/on` | `{"name", "owner", "force"}` | `{success, offline, holds}`. `offline` stays true while other holds remain. 409 with the holders when `owner` holds nothing but others do, and 409 while a container left from a mixed-case name shares the session's state |
-| `POST /api/create` | `{"name", "volume", "variant", "secrets", "query", "recreate"}` | `{success, url}` (with the credential, as for start) or `{success: false, error}`, with 400 for an invalid name, 409 for a sandbox name, for an existing session's name unless `recreate` is true, or when it would recreate an offline session. With `recreate`, an existing session is started, and recreated when a volume is given or the variant or secrets differ, as `safeclaw run` does. `secrets` is `"all"`, `"none"`, or a list of names; leaving it out keeps an existing session's set, or gives a new one every secret |
+| `POST /api/create` | `{"name", "volume", "variant", "secrets", "query", "recreate"}` | `{success, url, warnings}` (with the credential, as for start, and `warnings` listing each container runtime socket the volume exposes, left out when there are none) or `{success: false, error}`, with 400 for an invalid name or a volume that would expose the config directory, 409 for a sandbox name, for an existing session's name unless `recreate` is true, or when it would recreate an offline session. With `recreate`, an existing session is started, and recreated when a volume is given or the variant or secrets differ, as `safeclaw run` does. `secrets` is `"all"`, `"none"`, or a list of names; leaving it out keeps an existing session's set, or gives a new one every secret |
 | `GET /api/events` | | SSE, `data: <docker action>`, or `data: refresh` when events may have been missed |
 
 ## Security

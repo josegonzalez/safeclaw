@@ -81,7 +81,7 @@ type runFlags struct {
 
 func (f *runFlags) register(cmd *cobra.Command) {
 	cmd.Flags().StringVarP(&f.session, "session", "s", "", "session name (default \"default\")")
-	cmd.Flags().StringVarP(&f.volume, "volume", "v", "", "mount a host directory, /host/path:/container/path (recreates an existing container)")
+	cmd.Flags().StringVarP(&f.volume, "volume", "v", "", "mount a host directory, /host/path:/container/path (recreates an existing container; one that is, contains, or is inside the safeclaw config directory is refused)")
 	cmd.Flags().StringVar(&f.variant, "variant", "", "image variant, or base for the base image (default from the config file, else base; a different one recreates an existing container)")
 	_ = cmd.RegisterFlagCompletionFunc("variant", completeVariants)
 	cmd.Flags().BoolVarP(&f.noOpen, "no-open", "n", false, "do not open the browser")
