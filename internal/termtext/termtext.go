@@ -111,3 +111,11 @@ func incompleteTail(b []byte) int {
 	}
 	return 0
 }
+
+// EscapeField escapes s for one field of a tab-separated line: backslashes
+// are doubled, then everything Escape escapes, then tabs and newlines, so
+// the result is unambiguous and has no control characters.
+func EscapeField(s string) string {
+	s = Escape(strings.ReplaceAll(s, `\`, `\\`))
+	return strings.NewReplacer("\t", `\t`, "\n", `\n`).Replace(s)
+}

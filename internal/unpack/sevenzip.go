@@ -43,8 +43,11 @@ func Find() (SevenZip, error) {
 	return SevenZip{}, errors.New("7z not found on PATH; it is in the sandbox image variant (the 7zip package)")
 }
 
-// errNotArchive is returned when 7z can't open a file as an archive.
-var errNotArchive = errors.New("not an archive 7z can open")
+// ErrNotArchive is returned by a Runner when 7z can't open a file as an
+// archive. The *Error List and Extract return for such a file wraps it,
+// whether its Kind is NotArchive or, for a file that starts like an
+// archive, Failed.
+var ErrNotArchive = errors.New("not an archive 7z can open")
 
 var (
 	notArchiveRe = regexp.MustCompile(`(?i)can ?not open (the )?file as (\[\w+\] )?archive`)
@@ -115,7 +118,7 @@ func (z SevenZip) run(ctx context.Context, pw *string, args ...string) (string, 
 	case pw == nil && passPromptRe.MatchString(out):
 		return "", &Error{Kind: NeedsPassword, Msg: "the archive is encrypted and no password was given"}
 	case notArchiveRe.MatchString(msg):
-		return "", errNotArchive
+		return "", ErrNotArchive
 	}
 	if msg == "" {
 		msg = err.Error()
@@ -192,7 +195,12 @@ type Error struct {
 	Msg     string
 	// Bad are the entries that got the archive rejected.
 	Bad []Entry
+	// cause is the error it wraps, such as ErrNotArchive.
+	cause error
 }
+
+// Unwrap returns the error e wraps, if any.
+func (e *Error) Unwrap() error { return e.cause }
 
 func (e *Error) Error() string {
 	if e.Archive != "" {

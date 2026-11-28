@@ -31,6 +31,9 @@ func Execute() int {
 	if isMailProgram(os.Args[0]) {
 		return executeMail(ctx, os.Args[1:])
 	}
+	if isExpandProgram(os.Args[0]) {
+		return executeExpand(ctx, os.Args[1:])
+	}
 	// Every command may read or write the config directory, which holds
 	// session history and credentials, so it is checked before any runs.
 	if err := config.SecureDir(os.Stderr); err != nil {
@@ -86,6 +89,7 @@ func NewRootCommand() *cobra.Command {
 		newUnpackCommand("unpack"),
 		newTotextCommand("totext"),
 		newMailCommand("mail"),
+		newExpandCommand("expand"),
 		newVersionCommand(),
 	)
 	return root

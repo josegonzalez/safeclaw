@@ -79,6 +79,10 @@ const TotextLinkCommand = "ln -s safeclaw /usr/local/bin/safeclaw-totext"
 // sandbox variant.
 const MailLinkCommand = "ln -s safeclaw /usr/local/bin/safeclaw-mail"
 
+// ExpandLinkCommand links safeclaw-expand to the image's safeclaw binary
+// in the sandbox variant.
+const ExpandLinkCommand = "ln -s safeclaw /usr/local/bin/safeclaw-expand"
+
 // Builtins returns the variants safeclaw defines itself.
 func Builtins() []Variant {
 	return []Variant{
@@ -88,8 +92,9 @@ func Builtins() []Variant {
 			// safeclaw run as safeclaw-unpack is `safeclaw unpack`, which
 			// drives the 7z installed above, run as safeclaw-totext is
 			// `safeclaw totext`, which drives poppler-utils and tesseract,
-			// and run as safeclaw-mail is `safeclaw mail`.
-			Run:    []string{UnpackLinkCommand, TotextLinkCommand, MailLinkCommand},
+			// run as safeclaw-mail is `safeclaw mail`, and run as
+			// safeclaw-expand is `safeclaw expand`, which drives both.
+			Run:    []string{UnpackLinkCommand, TotextLinkCommand, MailLinkCommand, ExpandLinkCommand},
 			Source: SourceBuiltin,
 		},
 	}

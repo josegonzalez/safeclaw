@@ -31,8 +31,8 @@ var signatures = []struct {
 const (
 	tarMagicOffset = 257
 	tarMagic       = "ustar"
-	// headSize is how much of a file Detect needs.
-	headSize = tarMagicOffset + len(tarMagic)
+	// HeadSize is how much of a file Detect needs.
+	HeadSize = tarMagicOffset + len(tarMagic)
 )
 
 // Detect returns the archive format head, the start of a file, has the
@@ -44,7 +44,7 @@ func Detect(head []byte) string {
 			return s.format
 		}
 	}
-	if len(head) >= headSize && string(head[tarMagicOffset:headSize]) == tarMagic {
+	if len(head) >= HeadSize && string(head[tarMagicOffset:HeadSize]) == tarMagic {
 		return "tar"
 	}
 	return ""
@@ -80,7 +80,7 @@ func detectPath(p string, flag int) (string, error) {
 	} else if !fi.Mode().IsRegular() {
 		return "", fmt.Errorf("%s is not a regular file", p)
 	}
-	head := make([]byte, headSize)
+	head := make([]byte, HeadSize)
 	n, err := io.ReadFull(f, head)
 	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return "", err
@@ -90,16 +90,16 @@ func detectPath(p string, flag int) (string, error) {
 
 // notArchive is the error for an archive given to List or Extract that 7z
 // can't open: one that starts like an archive Detect knows is corrupt, and
-// Failed, and anything else is NotArchive.
+// Failed, and anything else is NotArchive. Either wraps ErrNotArchive.
 func notArchive(archive string) error {
 	format, err := DetectFile(archive)
 	if err != nil {
 		return err
 	}
 	if format != "" {
-		return &Error{Kind: Failed, Msg: fmt.Sprintf("it starts like a %s archive but 7z can't open it, so it is corrupt", format)}
+		return &Error{Kind: Failed, Msg: fmt.Sprintf("it starts like a %s archive but 7z can't open it, so it is corrupt", format), cause: ErrNotArchive}
 	}
-	return &Error{Kind: NotArchive, Msg: "7z can't open it as an archive, and it doesn't start like one"}
+	return &Error{Kind: NotArchive, Msg: "7z can't open it as an archive, and it doesn't start like one", cause: ErrNotArchive}
 }
 
 // archivesIn returns the regular files under dir that look like archives,

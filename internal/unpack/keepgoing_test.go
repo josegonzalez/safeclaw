@@ -115,7 +115,7 @@ func TestExtractKeepGoingBudget(t *testing.T) {
 	if len(res.Dropped) != 0 {
 		t.Errorf("dropped from an archive left packed: %v", paths(res.Dropped))
 	}
-	if n, err := treeSize(dest); err != nil || n > 1000 {
+	if n, err := TreeSize(dest); err != nil || n > 1000 {
 		t.Errorf("tree size = %d, %v", n, err)
 	}
 }
