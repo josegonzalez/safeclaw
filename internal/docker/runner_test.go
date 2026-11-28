@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // sh runs scripts in place of docker, so ExecRunner is tested against a
@@ -100,5 +101,28 @@ func TestStreamKeepsStderrTail(t *testing.T) {
 	}
 	if len(de.Stderr) > MaxStderr+64 || !strings.HasSuffix(de.Stderr, "reason\n") {
 		t.Errorf("stderr kept %d bytes, ending %q", len(de.Stderr), de.Stderr[len(de.Stderr)-20:])
+	}
+}
+
+func TestOutputReturnsWhenStdinBlocks(t *testing.T) {
+	// A stdin whose Read never returns would keep os/exec copying it
+	// forever, so Output must stop waiting once its context kills docker.
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	r := ExecRunner{Binary: "/bin/sh", WaitDelay: 100 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.Output(ctx, pr, "-c", "cat")
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("Output succeeded with a stdin that never ends")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Output still waiting on stdin after its context was done")
 	}
 }

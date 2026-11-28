@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/creack/pty"
 	"golang.org/x/term"
@@ -79,6 +80,9 @@ func firstArg(args []string) string {
 type ExecRunner struct {
 	// Binary is the docker executable. Defaults to "docker".
 	Binary string
+	// WaitDelay is how long Output waits for docker's stdio once docker
+	// has exited or its context is done. Defaults to DefaultWaitDelay.
+	WaitDelay time.Duration
 }
 
 func (r ExecRunner) bin() string {
@@ -88,17 +92,59 @@ func (r ExecRunner) bin() string {
 	return "docker"
 }
 
-// Output implements Runner.
+// DefaultWaitDelay is how long Output waits for docker's stdout and stderr
+// to close once docker has exited or its context is done, so a pipe a
+// child of docker holds open can't keep Output from returning.
+const DefaultWaitDelay = 5 * time.Second
+
+// Output implements Runner. Docker's stdin is closed as soon as stdin
+// ends, so docker sees EOF then, and Output returns once docker exits
+// without waiting for the rest of stdin: os/exec would wait for its copy
+// of a stdin whose Read blocks forever, even after the context killed
+// docker. A stdin that fails is an error unless docker exited first.
 func (r ExecRunner) Output(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, r.bin(), args...)
+	cmd.WaitDelay = r.WaitDelay
+	if cmd.WaitDelay <= 0 {
+		cmd.WaitDelay = DefaultWaitDelay
+	}
 	stdout := &limitBuffer{max: MaxOutput}
 	stderr := &tailBuffer{max: MaxStderr}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	if stdin != nil {
-		cmd.Stdin = stdin
+	var in io.WriteCloser
+	if f, ok := stdin.(*os.File); ok {
+		cmd.Stdin = f
+	} else if stdin != nil {
+		var err error
+		if in, err = cmd.StdinPipe(); err != nil {
+			return nil, &Error{Args: args, Err: err}
+		}
 	}
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return nil, &Error{Args: args, Stderr: stderr.String(), Err: err}
+	}
+	copied := make(chan error, 1)
+	if in != nil {
+		go func() {
+			_, err := io.Copy(in, stdin)
+			// Closing ends docker's stdin, so it sees EOF.
+			_ = in.Close()
+			copied <- err
+		}()
+	}
+	// Wait closes docker's stdin once docker exits, which ends a copy
+	// still writing to it, but not one blocked reading stdin.
+	err := cmd.Wait()
+	if err == nil {
+		select {
+		case cerr := <-copied:
+			if cerr != nil && !errors.Is(cerr, syscall.EPIPE) && !errors.Is(cerr, os.ErrClosed) {
+				err = fmt.Errorf("writing stdin: %w", cerr)
+			}
+		default:
+		}
+	}
 	if stdout.over {
 		// The refused write closed the pipe, so docker may have died of it;
 		// the real reason is the size.

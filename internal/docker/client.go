@@ -456,16 +456,49 @@ func (c *Client) NetworkDisconnect(ctx context.Context, network, container strin
 // ExecOptions configures Exec and ExecStream.
 type ExecOptions struct {
 	Detach bool
-	Stdin  io.Reader
+	// Stdin is streamed to the command, which gets EOF only once docker
+	// passes on the close of its stdin. Use Input for input known up front.
+	Stdin io.Reader
+	// Input, when set, is the command's whole stdin, which must be text
+	// without NUL bytes. dd reads it in the container and stops after
+	// len(Input) bytes, so the command gets EOF even if docker never passes
+	// on the close of its stdin. It needs /bin/sh and /bin/dd in the
+	// container. It can't be used with Stdin or MaxOutput. An empty Input
+	// runs the command without -i, so its stdin is empty.
+	Input string
 	// User runs the command as this user instead of the container's.
 	User string
 	// Workdir runs the command in this directory instead of the container's.
 	Workdir string
 	// MaxOutput, when above zero, is the most stdout Exec buffers, in place
 	// of the runner's MaxOutput: a command that writes more is stopped and
-	// Exec returns an *OutputLimitError. It can't be used with Stdin or
-	// Detach.
+	// Exec returns an *OutputLimitError. It can't be used with Stdin, Input,
+	// or Detach.
 	MaxOutput int
+}
+
+// boundedInputScript runs "$@" with exactly $0 bytes of stdin, so the
+// command's stdin ends there whether or not docker passes on the close of
+// its own. dd reads a byte at a time, so it never asks for more than $0
+// bytes. The input is read whole before the command starts, so a dd
+// failure fails the run rather than hand the command an empty stdin, and
+// a command that doesn't read it is not a failure. The x keeps the
+// trailing newlines command substitution would drop. printf is a shell
+// builtin, so the input, which may be secrets, is in no process's
+// arguments. Its paths are absolute so commands run as root look nothing
+// up in a PATH the container's user may control.
+const boundedInputScript = `in=$(/bin/dd bs=1 count="$0" status=none && echo x) || exit; printf %s "${in%x}" | "$@"`
+
+// UnwrapInput returns the docker args of an exec given ExecOptions.Input
+// without the wrapper that bounds its stdin, and whether they had it.
+// dockertest uses it so tests match the command itself.
+func UnwrapInput(args []string) ([]string, bool) {
+	for i := 0; i+4 <= len(args); i++ {
+		if args[i] == "/bin/sh" && args[i+1] == "-c" && args[i+2] == boundedInputScript {
+			return append(slices.Clone(args[:i]), args[i+4:]...), true
+		}
+	}
+	return args, false
 }
 
 // OutputLimitError is returned by Exec when a command writes more than its
@@ -487,7 +520,7 @@ func (o ExecOptions) args(name string, cmd []string) []string {
 	if o.Detach {
 		args = append(args, "-d")
 	}
-	if o.Stdin != nil {
+	if o.Stdin != nil || o.Input != "" {
 		args = append(args, "-i")
 	}
 	if o.User != "" {
@@ -497,16 +530,30 @@ func (o ExecOptions) args(name string, cmd []string) []string {
 		args = append(args, "--workdir", o.Workdir)
 	}
 	args = append(args, name)
+	if o.Input != "" {
+		args = append(args, "/bin/sh", "-c", boundedInputScript, strconv.Itoa(len(o.Input)))
+	}
 	return append(args, cmd...)
 }
 
 // Exec runs a command in a container and returns its stdout, at most
-// opts.MaxOutput bytes of it when that is set.
+// opts.MaxOutput bytes of it when that is set. Docker's stdin is closed
+// once Stdin or Input has been written.
 func (c *Client) Exec(ctx context.Context, name string, opts ExecOptions, cmd ...string) ([]byte, error) {
+	if opts.Stdin != nil && opts.Input != "" {
+		return nil, errors.New("docker exec: Stdin can't be used with Input")
+	}
+	if strings.ContainsRune(opts.Input, 0) {
+		return nil, errors.New("docker exec: Input can't contain NUL bytes")
+	}
 	if opts.MaxOutput > 0 {
 		return c.execLimited(ctx, name, opts, cmd)
 	}
-	return c.R.Output(ctx, opts.Stdin, opts.args(name, cmd)...)
+	stdin := opts.Stdin
+	if opts.Input != "" {
+		stdin = strings.NewReader(opts.Input)
+	}
+	return c.R.Output(ctx, stdin, opts.args(name, cmd)...)
 }
 
 // execLimited runs a command with Stream, reading at most opts.MaxOutput
@@ -514,8 +561,8 @@ func (c *Client) Exec(ctx context.Context, name string, opts ExecOptions, cmd ..
 // *OutputLimitError returned, so a command flooding its stdout costs the
 // host no more than the limit.
 func (c *Client) execLimited(ctx context.Context, name string, opts ExecOptions, cmd []string) ([]byte, error) {
-	if opts.Stdin != nil || opts.Detach {
-		return nil, errors.New("docker exec: MaxOutput can't be used with Stdin or Detach")
+	if opts.Stdin != nil || opts.Input != "" || opts.Detach {
+		return nil, errors.New("docker exec: MaxOutput can't be used with Stdin, Input, or Detach")
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -544,10 +591,10 @@ func (c *Client) execLimited(ctx context.Context, name string, opts ExecOptions,
 
 // ExecStream runs a command in a container and returns its stdout as it is
 // written. Calling the returned function waits for the command to exit and
-// returns an *Error carrying stderr if it failed. opts.Stdin and
-// opts.Detach are ignored.
+// returns an *Error carrying stderr if it failed. opts.Stdin, opts.Input,
+// and opts.Detach are ignored.
 func (c *Client) ExecStream(ctx context.Context, name string, opts ExecOptions, cmd ...string) (io.ReadCloser, func() error, error) {
-	opts.Stdin, opts.Detach = nil, false
+	opts.Stdin, opts.Input, opts.Detach = nil, "", false
 	return c.R.Stream(ctx, opts.args(name, cmd)...)
 }
 

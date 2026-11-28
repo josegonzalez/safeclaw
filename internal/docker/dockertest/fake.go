@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 
@@ -13,8 +14,14 @@ import (
 
 // Call is one recorded docker invocation.
 type Call struct {
+	// Args leave out the wrapper docker.ExecOptions.Input adds to bound
+	// the command's stdin, so they name the command itself. Raw has them
+	// as given.
 	Args  []string
+	Raw   []string
 	Stdin string
+	// Input is set for an exec given docker.ExecOptions.Input.
+	Input bool
 }
 
 // String joins the args with spaces.
@@ -33,23 +40,43 @@ type Runner struct {
 	// StreamHandler, when set, answers Stream calls in place of Handler
 	// and Events, for streams that block or fail partway.
 	StreamHandler func(ctx context.Context, args []string) (io.ReadCloser, func() error, error)
+	// ExecHandler, when set, answers Output calls in place of Handler with
+	// the call's context and its stdin unread, for commands that read
+	// their stdin as a process would or outlive their context.
+	ExecHandler func(ctx context.Context, args []string, stdin io.Reader) ([]byte, error)
 }
 
-// Output implements docker.Runner.
-func (r *Runner) Output(_ context.Context, stdin io.Reader, args ...string) ([]byte, error) {
-	in := ""
+// Output implements docker.Runner. Handler gets the args without the
+// wrapper docker.ExecOptions.Input adds, like Call.Args. When ExecHandler
+// is set, it answers instead, with the call's context and stdin.
+func (r *Runner) Output(ctx context.Context, stdin io.Reader, args ...string) ([]byte, error) {
+	cmd, input := docker.UnwrapInput(args)
+	call := Call{Args: slices.Clone(cmd), Raw: slices.Clone(args), Input: input}
+	r.mu.Lock()
+	eh := r.ExecHandler
+	r.mu.Unlock()
+	if eh != nil {
+		r.record(call)
+		return eh(ctx, cmd, stdin)
+	}
 	if stdin != nil {
 		b, _ := io.ReadAll(stdin)
-		in = string(b)
+		call.Stdin = string(b)
 	}
+	r.record(call)
 	r.mu.Lock()
-	r.Calls = append(r.Calls, Call{Args: append([]string(nil), args...), Stdin: in})
 	h := r.Handler
 	r.mu.Unlock()
 	if h == nil {
 		return nil, nil
 	}
-	return h(args, in)
+	return h(cmd, call.Stdin)
+}
+
+func (r *Runner) record(c Call) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Calls = append(r.Calls, c)
 }
 
 // Passthrough implements docker.Runner.
