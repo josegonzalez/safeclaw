@@ -33,7 +33,7 @@ const unpackFormats = "zip, 7z, rar, tar, gzip, bzip2, xz, or zstd"
 const unpackNotArchiveHelp = `A file 7z can't open as an archive is not an archive (exit 5) when it doesn't start like a ` + unpackFormats + ` archive, the formats detect knows, and corrupt (exit 1) when it does. A file in some other format 7z can open, such as an ISO image, is listed and extracted as usual.`
 
 const unpackHelp = `Exit codes:
-  0  success
+  0  success, including an extract --nested keep-going that left some nested archives packed and flagged
   1  failed: 7z failed, the archive is corrupt, or a usage or I/O error
   2  rejected: the archive has links, special files, or unsafe paths (or 7z made some)
   3  needs password: the archive is encrypted and no password, or the wrong one, was given
@@ -44,7 +44,7 @@ const unpackHelp = `Exit codes:
 
 The password is read from the SAFECLAW_UNPACK_PASSWORD environment variable, or the one --password-env names, never from the arguments, and is passed to 7z on its stdin.
 
-Each entry is printed as a tab-separated line: TYPE, SIZE, PATH, and FLAGS. TYPE is file, dir, symlink, hardlink, or special (a device, fifo, or socket). SIZE is in bytes, - when unknown. PATH is escaped as in a Go string, with backslashes doubled and tabs, newlines, and other unprintable characters written as \t, \n, \xNN, or \uNNNN. FLAGS is a comma-separated list, - for none: ENCRYPTED, LINK, SPECIAL, UNSAFE-PATH (empty, absolute, a drive letter, a .. segment, or control characters), DROPPED (left out by --drop-bad), UNPACKED (a nested archive unpacked into PATH.unpacked), and DEPTH-LIMIT (a nested archive left packed). --json prints one JSON object instead, with the paths unescaped.`
+Each entry is printed as a tab-separated line: TYPE, SIZE, PATH, and FLAGS. TYPE is file, dir, symlink, hardlink, or special (a device, fifo, or socket). SIZE is in bytes, - when unknown. PATH is escaped as in a Go string, with backslashes doubled and tabs, newlines, and other unprintable characters written as \t, \n, \xNN, or \uNNNN. FLAGS is a comma-separated list, - for none: ENCRYPTED, LINK, SPECIAL, UNSAFE-PATH (empty, absolute, a drive letter, a .. segment, or control characters), DROPPED (left out by --drop-bad), UNPACKED (a nested archive unpacked into PATH.unpacked), DEPTH-LIMIT (a nested archive left packed), and, with extract --nested keep-going, REJECTED, NEEDS-PASSWORD, TOO-LARGE, or FAILED (a nested archive left packed because it failed that way). --json prints one JSON object instead, with the paths unescaped.`
 
 // newUnpackCommand builds `safeclaw unpack`, named use: "unpack" under
 // safeclaw, or safeclaw-unpack when run through that link.
@@ -57,7 +57,8 @@ func newUnpackCommand(use string) *cobra.Command {
 		Example: `  safeclaw sandbox exec --ephemeral -v ~/Downloads:/in -- safeclaw-unpack detect /in/report.zip
   safeclaw sandbox exec --ephemeral -v ~/Downloads:/in -- safeclaw-unpack list /in/report.zip
   safeclaw-unpack extract --json /sandbox/in/1-report.zip /sandbox/out/report
-  SAFECLAW_UNPACK_PASSWORD=infected safeclaw-unpack extract --drop-bad sample.7z out`,
+  SAFECLAW_UNPACK_PASSWORD=infected safeclaw-unpack extract --drop-bad sample.7z out
+  safeclaw-unpack extract --nested keep-going --json /sandbox/in/1-report.zip /sandbox/out/report`,
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -158,7 +159,7 @@ func newUnpackListCommand() *cobra.Command {
 
 func newUnpackExtractCommand() *cobra.Command {
 	var f unpackFlags
-	var maxSize string
+	var maxSize, nested string
 	var o unpack.Options
 	cmd := &cobra.Command{
 		Use:   "extract ARCHIVE DEST",
@@ -167,10 +168,10 @@ func newUnpackExtractCommand() *cobra.Command {
 			"The archive is listed first. One with links, special files, or unsafe paths is rejected, or with --drop-bad those entries are left out. One whose listed size is over --max-size is refused before anything is extracted, and the size is checked again while 7z extracts and afterwards, for formats that don't record sizes. " +
 			"After extracting, any link or special file 7z made is deleted (which rejects the archive unless --drop-bad is given, since the listing didn't show it), setuid and setgid bits are cleared, and every path must resolve inside DEST. " +
 			"Each extracted file that starts like a " + unpackFormats + " archive (one detect names a format for) is then unpacked the same way into PATH.unpacked next to it (PATH.unpacked-2 and so on when that name is taken), up to --depth levels; the archive itself is kept. A file 7z can't open as an archive is left as it is. " +
-			"On any failure DEST is emptied, without following links. Each path in DEST is printed when it succeeds, and the entries that got it rejected when it is rejected.\n\n" + unpackHelp,
+			"On any failure DEST is emptied, without following links. Each path in DEST is printed when it succeeds, and the entries that got it rejected when it is rejected.\n\n" +
+			"With --nested keep-going, a nested archive that is rejected, needs a password, would take the total past --max-size, or fails otherwise is left packed instead, flagged REJECTED, NEEDS-PASSWORD, TOO-LARGE, or FAILED, and everything it extracted is removed, without following links. The other files are kept, and the run exits 0. Each archive left packed is also reported on stderr, or in --json under nested_failures with its status, code, error, and the entries that got it rejected. The size limit is shared by the whole tree, and the archive given still fails the run for its own problems.\n\n" + unpackHelp,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			out := cmd.OutOrStdout()
 			n, err := session.ParseSize(maxSize)
 			if err != nil || n <= 0 {
 				return unpackFailure(cmd, f.json, &unpack.Error{Kind: unpack.Failed, Msg: fmt.Sprintf("--max-size: invalid size %q: want a positive number of bytes with an optional k, m, g, or t suffix", maxSize)}, nil)
@@ -178,6 +179,13 @@ func newUnpackExtractCommand() *cobra.Command {
 			o.MaxSize = n
 			if o.Depth < 0 {
 				return unpackFailure(cmd, f.json, &unpack.Error{Kind: unpack.Failed, Msg: "--depth can't be negative"}, nil)
+			}
+			switch nested {
+			case nestedFail:
+			case nestedKeepGoing:
+				o.KeepGoing = true
+			default:
+				return unpackFailure(cmd, f.json, &unpack.Error{Kind: unpack.Failed, Msg: fmt.Sprintf("--nested: invalid value %q: want %s or %s", nested, nestedFail, nestedKeepGoing)}, nil)
 			}
 			if o.Password, err = f.password(); err != nil {
 				return unpackFailure(cmd, f.json, &unpack.Error{Kind: unpack.Failed, Msg: err.Error()}, nil)
@@ -195,17 +203,46 @@ func newUnpackExtractCommand() *cobra.Command {
 				}
 				return unpackFailure(cmd, f.json, err, dropped)
 			}
-			if f.json {
-				return writeUnpackJSON(out, unpackJSON{Status: "ok", Entries: jsonEntries(res.Entries), Dropped: jsonEntries(res.Dropped)})
-			}
-			return writeEntries(out, append(res.Entries, res.Dropped...))
+			return writeExtracted(cmd, f.json, res)
 		},
 	}
 	f.register(cmd)
 	cmd.Flags().StringVar(&maxSize, "max-size", "512m", "limit on the total size of what is extracted, nested archives and the archives they came from included (k, m, g, or t suffix)")
 	cmd.Flags().IntVar(&o.Depth, "depth", unpack.DefaultDepth, "levels of nested archives to unpack, 0 for none")
 	cmd.Flags().BoolVar(&o.DropBad, "drop-bad", false, "leave out links, special files, and entries with unsafe paths instead of rejecting the archive")
+	cmd.Flags().StringVar(&nested, "nested", nestedFail, "what a failing nested archive does: "+nestedFail+" fails the whole extraction, "+nestedKeepGoing+" leaves it packed and flagged")
 	return cmd
+}
+
+// --nested values.
+const (
+	nestedFail      = "fail"
+	nestedKeepGoing = "keep-going"
+)
+
+// writeExtracted prints a successful extraction: each path in DEST, then
+// the dropped entries, and each nested archive left packed on stderr, or
+// one JSON object.
+func writeExtracted(cmd *cobra.Command, asJSON bool, res *unpack.Result) error {
+	out := cmd.OutOrStdout()
+	if asJSON {
+		v := unpackJSON{Status: "ok", Entries: jsonEntries(res.Entries), Dropped: jsonEntries(res.Dropped)}
+		for _, e := range res.Failed {
+			n := nestedJSON{Archive: e.Archive, Status: e.Kind.String(), Code: int(e.Kind), Error: e.Error()}
+			if len(e.Bad) > 0 {
+				n.Rejected = jsonEntries(e.Bad)
+			}
+			v.NestedFailures = append(v.NestedFailures, n)
+		}
+		return writeUnpackJSON(out, v)
+	}
+	if err := writeEntries(out, append(res.Entries, res.Dropped...)); err != nil {
+		return err
+	}
+	for _, e := range res.Failed {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s: left packed: %s\n", cmd.Root().Name(), termtext.Escape(e.Error()))
+	}
+	return nil
 }
 
 // unpackJSON is the --json output.
@@ -229,6 +266,21 @@ type unpackJSON struct {
 	Rejected []entryJSON `json:"rejected,omitempty"`
 	// Dropped are the entries left out by --drop-bad.
 	Dropped []entryJSON `json:"dropped,omitempty"`
+	// NestedFailures are the nested archives extract --nested keep-going
+	// left packed.
+	NestedFailures []nestedJSON `json:"nested_failures,omitempty"`
+}
+
+// nestedJSON is a nested archive left packed by --nested keep-going.
+type nestedJSON struct {
+	// Archive is its path relative to DEST.
+	Archive string `json:"archive"`
+	// Status and Code are what its own failure would have been.
+	Status string `json:"status"`
+	Code   int    `json:"code"`
+	Error  string `json:"error"`
+	// Rejected are the entries that got it rejected.
+	Rejected []entryJSON `json:"rejected,omitempty"`
 }
 
 type entryJSON struct {

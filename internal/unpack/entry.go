@@ -38,6 +38,13 @@ const (
 	// FlagDepthLimit marks a nested archive left packed because it is
 	// deeper than Options.Depth.
 	FlagDepthLimit = "DEPTH-LIMIT"
+	// FlagRejected, FlagNeedsPassword, FlagTooLarge, and FlagFailed mark a
+	// nested archive left packed with Options.KeepGoing because it failed
+	// with that Kind (see Kind.Flag).
+	FlagRejected      = "REJECTED"
+	FlagNeedsPassword = "NEEDS-PASSWORD"
+	FlagTooLarge      = "TOO-LARGE"
+	FlagFailed        = "FAILED"
 )
 
 // Entry is one entry of an archive, or one path extracted from it.

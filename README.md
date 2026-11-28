@@ -90,9 +90,12 @@ safeclaw sandbox exec triage -- safeclaw-unpack extract /in/report.zip /sandbox/
 
 # Leave out the bad entries instead of rejecting the archive, with a password from the environment
 SAFECLAW_UNPACK_PASSWORD=... safeclaw sandbox exec -e SAFECLAW_UNPACK_PASSWORD triage -- safeclaw-unpack extract --drop-bad /in/sample.7z /sandbox/out/sample
+
+# Keep the good files when a nested archive fails, leaving that archive packed and flagged
+safeclaw sandbox exec triage -- safeclaw-unpack extract --nested keep-going /in/report.zip /sandbox/out/report
 ```
 
-`safeclaw-unpack` exits 0 on success, 1 when it failed (7z failed, or the archive is corrupt), 2 when the archive was rejected for links or unsafe paths, 3 when it needs a password (none or the wrong one was given), 4 when it is over `--max-size` (default `512m`), and 5 when the file is not an archive: `detect` found no archive format, or 7z can't open it for `list` or `extract` and it doesn't start like an archive `detect` knows. `detect` uses the same check `extract` uses to find nested archives, so callers can ask it instead of keeping their own list of archive types. The password comes from `SAFECLAW_UNPACK_PASSWORD`, or the variable `--password-env` names, and reaches 7z on its stdin rather than its arguments. `--depth` (default `3`) limits how many levels of nested archives are unpacked, each into `NAME.unpacked` next to it.
+`safeclaw-unpack` exits 0 on success, 1 when it failed (7z failed, or the archive is corrupt), 2 when the archive was rejected for links or unsafe paths, 3 when it needs a password (none or the wrong one was given), 4 when it is over `--max-size` (default `512m`), and 5 when the file is not an archive: `detect` found no archive format, or 7z can't open it for `list` or `extract` and it doesn't start like an archive `detect` knows. `detect` uses the same check `extract` uses to find nested archives, so callers can ask it instead of keeping their own list of archive types. The password comes from `SAFECLAW_UNPACK_PASSWORD`, or the variable `--password-env` names, and reaches 7z on its stdin rather than its arguments. `--depth` (default `3`) limits how many levels of nested archives are unpacked, each into `NAME.unpacked` next to it. By default a nested archive that fails fails the whole extraction. With `--nested keep-going`, it is left packed and flagged `REJECTED`, `NEEDS-PASSWORD`, `TOO-LARGE`, or `FAILED` instead, nothing it extracted is kept, and the run exits 0 as long as the outer archive itself extracted.
 
 ```bash
 # Create a sandbox, mounting host directories read-only (-v repeats)
