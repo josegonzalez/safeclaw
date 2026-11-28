@@ -154,6 +154,23 @@ func Dir() string {
 	return filepath.Join(base, "safeclaw")
 }
 
+// CacheDir returns the safeclaw cache directory, honoring XDG_CACHE_HOME.
+// It holds data that can be fetched again, such as malware signatures.
+func CacheDir() string {
+	base := os.Getenv("XDG_CACHE_HOME")
+	if base == "" {
+		home, _ := os.UserHomeDir()
+		base = filepath.Join(home, ".cache")
+	}
+	return filepath.Join(base, "safeclaw")
+}
+
+// SignaturesDir returns the directory holding the ClamAV signatures that
+// `sandbox update-signatures` installs and sandboxes mount read-only.
+func SignaturesDir() string {
+	return filepath.Join(CacheDir(), "clamav")
+}
+
 // File returns the path of the optional config file.
 func File() string {
 	return filepath.Join(Dir(), "config.yaml")

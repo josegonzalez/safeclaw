@@ -33,6 +33,8 @@ func newSandboxCommand() *cobra.Command {
 		newSandboxExecCommand(),
 		newSandboxCopyInCommand(),
 		newSandboxCopyOutCommand(),
+		newSandboxScanCommand(),
+		newSandboxUpdateSignaturesCommand(),
 		newSandboxListCommand(),
 		newSandboxStatusCommand(),
 		newSandboxInspectCommand(),
@@ -466,7 +468,7 @@ func newSandboxCopyInCommand() *cobra.Command {
 
 func newSandboxCopyOutCommand() *cobra.Command {
 	var only []string
-	var force, replace bool
+	var force, replace, noScan, allowFlagged bool
 	var maxSize string
 	var maxFiles int
 	cmd := &cobra.Command{
@@ -479,7 +481,12 @@ func newSandboxCopyOutCommand() *cobra.Command {
 			"Files are read as the sandbox user and written with mode 0644, less the umask. Nothing is written unless every file arrives, " +
 			"and existing files are refused unless --force is set. " +
 			"--replace implies --force and, once every file has arrived and passed every check, also removes the regular files in HOST_DIR that match an --only glob but were not copied, " +
-			"keeping symbolic links, directories, and everything else; if any move fails, HOST_DIR is left as it was. More files than --max-files, or more bytes than --max-size, refuse the whole copy. The host path of each file is printed, quoted when it is not printable text.",
+			"keeping symbolic links, directories, and everything else; if any move fails, HOST_DIR is left as it was. More files than --max-files, or more bytes than --max-size, refuse the whole copy. The host path of each file is printed, quoted when it is not printable text.\n\n" +
+			"Every file is scanned for malware with ClamAV before anything is placed, in a fresh container with no network that sees only the copied files and the signatures, " +
+			"so nothing running in the sandbox can change the result. A file flagged as infected, or that could not be scanned (over the scanner's size limits, or an encrypted archive or document), " +
+			"refuses the whole copy, naming each file and the reason, and HOST_DIR is left as it was, with --force and --replace too. --allow-flagged copies them anyway, and --no-scan skips the scan. " +
+			"Each file's result and the signatures' date are printed to stderr. With no signatures installed the copy is refused: run `safeclaw sandbox update-signatures` first, or pass --no-scan. " +
+			"The scan needs the sandbox variant's image, and gets the sandbox's CPU and process limits with at least " + session.DefaultScanMemory + " of memory, since clamscan holds the whole signature database in memory.",
 		Args:              cobra.ExactArgs(3),
 		ValidArgsFunction: completeSandboxFirst,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -490,17 +497,31 @@ func newSandboxCopyOutCommand() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("--max-size: %w", err)
 			}
-			paths, err := session.NewManager(nil).CopyOut(cmd.Context(), args[0], args[1], args[2], session.CopyOutOptions{
-				Only:     only,
-				Force:    force,
-				Replace:  replace,
-				MaxSize:  limit,
-				MaxFiles: maxFiles,
+			if noScan && allowFlagged {
+				return errors.New("--allow-flagged can't be used with --no-scan")
+			}
+			res, err := newManager().CopyOutReport(cmd.Context(), args[0], args[1], args[2], session.CopyOutOptions{
+				Only:         only,
+				Force:        force,
+				Replace:      replace,
+				MaxSize:      limit,
+				MaxFiles:     maxFiles,
+				NoScan:       noScan,
+				AllowFlagged: allowFlagged,
 			})
+			if flagged, ok := errors.AsType[*session.FlaggedError](err); ok {
+				writeCopyScan(cmd.ErrOrStderr(), flagged.Report, "refused")
+			}
 			if err != nil {
 				return err
 			}
-			return writePaths(cmd.OutOrStdout(), paths)
+			switch {
+			case res.Scan != nil:
+				writeCopyScan(cmd.ErrOrStderr(), res.Scan, "copied because of --allow-flagged")
+			case noScan:
+				fmt.Fprintln(cmd.ErrOrStderr(), "Not scanned for malware (--no-scan)")
+			}
+			return writePaths(cmd.OutOrStdout(), res.Paths)
 		},
 	}
 	cmd.Flags().StringArrayVar(&only, "only", nil, "keep files whose names match this glob (repeatable)")
@@ -509,7 +530,16 @@ func newSandboxCopyOutCommand() *cobra.Command {
 	cmd.Flags().BoolVar(&replace, "replace", false, "overwrite existing host files and remove other host files matching --only")
 	cmd.Flags().StringVar(&maxSize, "max-size", session.DefaultCopyMaxSize, "limit on the total size of the files kept, with a k, m, g, or t suffix (0 for none)")
 	cmd.Flags().IntVar(&maxFiles, "max-files", session.DefaultCopyMaxFiles, "limit on the number of files kept (0 for none)")
+	cmd.Flags().BoolVar(&noScan, "no-scan", false, "copy without scanning the files for malware")
+	cmd.Flags().BoolVar(&allowFlagged, "allow-flagged", false, "copy files the malware scan flags as infected or could not scan")
 	return cmd
+}
+
+// writeCopyScan writes cp-out's scan report to stderr: the signatures, then
+// each file's result, with note after each flagged one.
+func writeCopyScan(out io.Writer, report *session.ScanReport, note string) {
+	fmt.Fprintf(out, "Scanned %d file(s) for malware with ClamAV signatures %s\n", len(report.Results), report.Signatures)
+	_ = writeScanResults(out, report.Results, note)
 }
 
 func newSandboxListCommand() *cobra.Command {

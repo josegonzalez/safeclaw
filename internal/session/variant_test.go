@@ -138,13 +138,13 @@ func TestEnsureSandboxRecreateKeeps(t *testing.T) {
 		want []string
 	}{
 		{"variant", SandboxOptions{Name: "box", Variant: "base"},
-			[]string{" --memory 2147483648 --pids-limit 64 --cpus 0.5 --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw sha256:base-id sleep infinity"}},
+			[]string{" --memory 2147483648 --pids-limit 64 --cpus 0.5 SIGS--mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw sha256:base-id sleep infinity"}},
 		{"volume", SandboxOptions{Name: "box", Volumes: []string{"/new:/new"}},
-			[]string{"--label safeclaw.variant=sandbox ", " --memory 2147483648 --pids-limit 64 --cpus 0.5 --mount type=bind,src=/new,dst=/new,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw:sandbox sha256:sb-id sleep infinity"}},
+			[]string{"--label safeclaw.variant=sandbox ", " --memory 2147483648 --pids-limit 64 --cpus 0.5 SIGS--mount type=bind,src=/new,dst=/new,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw:sandbox sha256:sb-id sleep infinity"}},
 		{"limit", SandboxOptions{Name: "box", Memory: "4g", Recreate: true},
-			[]string{"--label safeclaw.variant=sandbox ", "size=536870912,", " --memory 4g --pids-limit 64 --cpus 0.5 --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw:sandbox sha256:sb-id sleep infinity"}},
+			[]string{"--label safeclaw.variant=sandbox ", "size=536870912,", " --memory 4g --pids-limit 64 --cpus 0.5 SIGS--mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw:sandbox sha256:sb-id sleep infinity"}},
 		{"disk", SandboxOptions{Name: "box", Disk: "2g", Recreate: true},
-			[]string{"size=2147483648,", " --memory 2147483648 --pids-limit 64 --cpus 0.5 --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw:sandbox sha256:sb-id sleep infinity"}},
+			[]string{"size=2147483648,", " --memory 2147483648 --pids-limit 64 --cpus 0.5 SIGS--mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly --label safeclaw.image=safeclaw:sandbox sha256:sb-id sleep infinity"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,6 +157,7 @@ func TestEnsureSandboxRecreateKeeps(t *testing.T) {
 			}
 			run, _ := r.Find("run ")
 			for _, want := range tc.want {
+				want = strings.ReplaceAll(want, " SIGS", sigMount(m)+" ")
 				if !strings.Contains(run.String(), want) {
 					t.Errorf("run = %q\nlacks %q", run.String(), want)
 				}

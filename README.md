@@ -74,7 +74,7 @@ Prints a URL like `http://127.0.0.1:7680/?token=...` to open. The token is made 
 
 A sandbox is a headless container for opening untrusted files, such as PDFs, archives, or emails that haven't been checked. It gets no secrets, git config, web terminal, or Claude Code, has no network, and runs as an unprivileged user that can't read `/home/sclaw`. See [architecture](docs/architecture.md#sandboxes) for the full list of defaults.
 
-Sandboxes run the `sandbox` [image variant](#image-variants) by default, which adds document extraction tools: `pdftotext`, `pdfinfo`, and `pdftoppm` from poppler-utils, `tesseract` with English language data, `7z`, and `file`. Fetch it once with `safeclaw pull --variant sandbox` (or `safeclaw build --variant sandbox`), or pass `--variant base` to use the base image.
+Sandboxes run the `sandbox` [image variant](#image-variants) by default, which adds document extraction tools: `pdftotext`, `pdfinfo`, and `pdftoppm` from poppler-utils, `tesseract` with English language data, `7z`, `file`, and ClamAV's `clamscan` and `freshclam` for [malware scanning](#scanning-for-malware). Fetch it once with `safeclaw pull --variant sandbox` (or `safeclaw build --variant sandbox`), or pass `--variant base` to use the base image.
 
 The `sandbox` variant also has `safeclaw-unpack`, which lists and extracts untrusted archives with `7z` more safely than running `7z x` or `unzip` yourself: it refuses archives with links, special files, or unsafe paths (absolute, a drive letter, a `..` segment, or control characters), checks a size limit before, during, and after extracting, deletes any link 7z made and checks every extracted path stays inside the destination, and unpacks nested archives up to a depth limit. See [unpacking archives](docs/architecture.md#unpacking-archives).
 
@@ -150,6 +150,9 @@ safeclaw sandbox cp-out triage /sandbox/out ./results --only '*.txt'
 # Fetch them again after another run: overwrite, and remove the .txt files that are gone
 safeclaw sandbox cp-out triage /sandbox/out ./results --only '*.txt' --replace
 
+# Check files for malware inside the sandbox (advisory; cp-out scans again on the way out)
+safeclaw sandbox scan triage /sandbox/in/1-report.zip /sandbox/out
+
 # Remove it
 safeclaw sandbox rm -f triage
 ```
@@ -191,6 +194,19 @@ To get a sandbox that passed those checks or none at all, pass `--verify` when c
 name=$(safeclaw sandbox run --rm --verify -v ~/inbox:/in)
 safeclaw sandbox exec --ephemeral --verify -v ~/inbox:/in -- pdftotext /in/report.pdf -
 ```
+
+### Scanning for malware
+
+`cp-out` scans every file it copies with ClamAV before placing any of them, and refuses the whole copy when a file is flagged as infected or could not be scanned (over clamscan's size limits, or an encrypted archive or document), naming each file and the reason, so `HOST_DIR` is left as it was, with `--force` and `--replace` too. `--allow-flagged` copies them anyway, and `--no-scan` skips the scan, for files your own script wrote. Each file's result and the signatures' date go to stderr, and the copied paths to stdout as before. The scan runs in a fresh container of the `sandbox` variant with no network that sees only the copied files and the signatures, never in the sandbox, so nothing the untrusted files left running there can change it.
+
+Signatures are kept in `~/.cache/safeclaw/clamav` (`$XDG_CACHE_HOME/safeclaw/clamav`), which every sandbox mounts read-only at `/var/lib/clamav`. Download them, and later refresh them, with `update-signatures`; until then `cp-out` refuses to copy without `--no-scan`:
+
+```bash
+safeclaw sandbox update-signatures   # about 110 MB the first time, then only what changed; prints the date and version
+safeclaw sandbox scan triage /sandbox/out --json   # clean, infected with the signature name, or error, for each file
+```
+
+`update-signatures` runs freshclam in a short-lived container with network access but no secrets, web terminal, or mount other than a staging directory in the cache, and keeps the old signatures when it fails. Each scan loads the whole database, which takes about 8 seconds and 1.1 GB of memory, so a scan container gets the sandbox's CPU and process limits and at least 3 GB of memory. `sandbox scan` is advisory, since it runs inside the sandbox where the untrusted files are. It exits 1 when a file is infected, otherwise 2 when one could not be scanned. See [scanning for malware](docs/architecture.md#scanning-for-malware).
 
 ## Taking a session offline
 
@@ -252,7 +268,7 @@ safeclaw sandbox exec --ephemeral --variant base -- ls
 - yt-dlp 2026.11.23
 - [DX plugin](https://github.com/ykdojo/claude-code-tips#tip-44-install-the-dx-plugin), [custom status line](https://github.com/ykdojo/claude-code-tips#tip-0-customize-your-status-line), [shell aliases](#aliases)
 - ttyd web terminal + tmux
-- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, file, `safeclaw-unpack`, `safeclaw-totext`, and `safeclaw-mail`
+- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, file, clamav and clamav-freshclam, `safeclaw-unpack`, `safeclaw-totext`, and `safeclaw-mail`
 
 ## Sensible defaults
 
@@ -366,7 +382,9 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY, `--escape-controls` to escape control characters in its output, `--timeout DUR` to stop it after DUR and exit 124, `-e NAME=VALUE` or `-e NAME` to set an environment variable for the command without putting the value in docker's arguments) |
 | `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`, and the same `--timeout` and `-e` as `sandbox exec`. With `--verify`, the command only starts once the sandbox has passed the `sandbox verify` checks, and a sandbox that fails one is removed without running it. |
 | `safeclaw sandbox cp-in NAME FILE...` | Copy regular host files into a running sandbox as `N-name`, owned by the sandbox user, refusing links and other file types. `--to` picks a directory under `/sandbox` (default `/sandbox/in`). |
-| `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, sparse files, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given. `--replace` implies `--force` and also removes the regular files in the host directory that match an `--only` glob but were not copied, keeping symlinks, directories, and other files, and only once every file has arrived and passed every check. `--max-size` (default `1g`) caps the total, and `--max-files` (default `1000`) caps the number of files. |
+| `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, sparse files, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given. `--replace` implies `--force` and also removes the regular files in the host directory that match an `--only` glob but were not copied, keeping symlinks, directories, and other files, and only once every file has arrived and passed every check. `--max-size` (default `1g`) caps the total, and `--max-files` (default `1000`) caps the number of files. Every file is scanned for malware first, outside the sandbox, and a flagged or unscannable file refuses the copy unless `--allow-flagged` is given; `--no-scan` skips the scan. |
+| `safeclaw sandbox scan NAME PATH...` | Scan files in a running sandbox with ClamAV, printing clean, infected with the signature name, or error for each. Advisory, since it runs inside the sandbox. `--json` prints the signatures and results as JSON. Exits 1 when a file is infected, otherwise 2 when one could not be scanned. |
+| `safeclaw sandbox update-signatures` | Download the latest ClamAV signatures with freshclam in a short-lived networked container into `~/.cache/safeclaw/clamav`, keeping the old ones if it fails, and print their date and version. |
 | `safeclaw sandbox ls` | List sandboxes |
 | `safeclaw sandbox status NAME` | Print `running`, `stopped`, or `missing`, exiting 0, 3, or 4. A name that is an interactive session exits 5 with an error, and any other error exits 1. |
 | `safeclaw sandbox inspect NAME` | Print a sandbox's status, variant, network, user, capabilities, read-only root, limits including `--disk`, mounts, and safeclaw labels as JSON with a versioned schema. `--field NAME` prints one top-level field, a string as plain text and anything else as JSON. |

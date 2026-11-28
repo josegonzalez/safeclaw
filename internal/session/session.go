@@ -357,6 +357,9 @@ type Manager struct {
 	// CopyDir holds the per-sandbox locks that serialize copies into each
 	// sandbox. Defaults to config.CopyDir().
 	CopyDir string
+	// SignaturesDir holds the ClamAV signatures, which sandboxes mount
+	// read-only and cp-out scans with. Defaults to config.SignaturesDir().
+	SignaturesDir string
 	// TTYDDir holds each session's ttyd credential. Defaults to
 	// config.TTYDDir().
 	TTYDDir string
@@ -394,15 +397,16 @@ type Manager struct {
 // NewManager returns a Manager using the real docker CLI and config paths.
 func NewManager(out io.Writer) *Manager {
 	return &Manager{
-		Docker:       docker.New(),
-		Secrets:      secrets.Open(config.SecretsDir(), config.SecretsLockPath(), os.Stderr),
-		SessionsDir:  config.SessionsDir(),
-		NetworkDir:   config.NetworkDir(),
-		CopyDir:      config.CopyDir(),
-		TTYDDir:      config.TTYDDir(),
-		DashboardDir: config.DashboardDir(),
-		AuthDir:      config.AuthDir(),
-		Out:          out,
+		Docker:        docker.New(),
+		Secrets:       secrets.Open(config.SecretsDir(), config.SecretsLockPath(), os.Stderr),
+		SessionsDir:   config.SessionsDir(),
+		NetworkDir:    config.NetworkDir(),
+		CopyDir:       config.CopyDir(),
+		SignaturesDir: config.SignaturesDir(),
+		TTYDDir:       config.TTYDDir(),
+		DashboardDir:  config.DashboardDir(),
+		AuthDir:       config.AuthDir(),
+		Out:           out,
 		LoadVariants: func() (*variant.Set, error) {
 			return variant.Load(config.File())
 		},

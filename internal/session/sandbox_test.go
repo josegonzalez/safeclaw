@@ -44,7 +44,7 @@ func TestEnsureSandboxCreates(t *testing.T) {
 	if !ok {
 		t.Fatal("no docker run")
 	}
-	want := sandboxRunPrefix + " --memory 2g --pids-limit 256 --cpus 1 --label safeclaw.image=safeclaw:sandbox sha256:img sleep infinity"
+	want := sandboxRunPrefix + " --memory 2g --pids-limit 256 --cpus 1" + sigMount(m) + " --label safeclaw.image=safeclaw:sandbox sha256:img sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -71,7 +71,7 @@ func TestEnsureSandboxLimitsAndVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, _ := r.Find("run ")
-	want := strings.Replace(sandboxRunPrefix, "size=1073741824,", "size=268435456,", 1) + " --memory 512m --pids-limit 64 --cpus 0.5 --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly,consistency=cached --label safeclaw.image=safeclaw:sandbox sha256:img sleep infinity"
+	want := strings.Replace(sandboxRunPrefix, "size=1073741824,", "size=268435456,", 1) + " --memory 512m --pids-limit 64 --cpus 0.5" + sigMount(m) + " --mount type=bind,src=/in,dst=/in,readonly,bind-propagation=rprivate,bind-recursive=readonly,consistency=cached --label safeclaw.image=safeclaw:sandbox sha256:img sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -317,7 +317,7 @@ func TestEnsureSandboxRemove(t *testing.T) {
 	}
 	run, _ := r.Find("run ")
 	want := strings.Replace(sandboxRunPrefix, "run -d --name safeclaw-box", "run -d --rm --name safeclaw-job", 1) +
-		" --memory 2g --pids-limit 256 --cpus 1 --label safeclaw.image=safeclaw:sandbox sha256:img sleep infinity"
+		" --memory 2g --pids-limit 256 --cpus 1" + sigMount(m) + " --label safeclaw.image=safeclaw:sandbox sha256:img sleep infinity"
 	if run.String() != want {
 		t.Errorf("run = %q\nwant  %q", run.String(), want)
 	}
@@ -456,7 +456,7 @@ func TestPrepareEphemeral(t *testing.T) {
 	if name != "tmp-abcd1234" {
 		t.Errorf("name = %q", name)
 	}
-	want, _ := EphemeralRunArgs("safeclaw-tmp-abcd1234", SandboxOptions{Variant: "sandbox", image: "sha256:img"}, ExecOptions{Interactive: true}, []string{"cat"})
+	want, _ := EphemeralRunArgs("safeclaw-tmp-abcd1234", SandboxOptions{Variant: "sandbox", image: "sha256:img", signatures: m.SignaturesDir}, ExecOptions{Interactive: true}, []string{"cat"})
 	if !slices.Equal(argv, append([]string{"docker", "run"}, want...)) {
 		t.Errorf("argv = %v", argv)
 	}
