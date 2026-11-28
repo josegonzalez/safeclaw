@@ -1,0 +1,69 @@
+
+7-Zip [64] 17.05 : Copyright (c) 1999-2021 Igor Pavlov : 2017-08-28
+p7zip Version 17.05 (locale=utf8,Utf16=on,HugeFiles=on,64 bits,10 CPUs LE)
+
+Scanning the drive for archives:
+1 file, 390 bytes (1 KiB)
+
+Listing archive: x.zip
+
+--
+Path = x.zip
+Type = zip
+Physical Size = 390
+
+----------
+Path = d
+Folder = +
+Size = 0
+Packed Size = 0
+Modified = 2026-11-28 07:20:50
+Created = 2026-11-28 07:20:50
+Accessed = 2026-11-28 07:20:50
+Attributes = D_ drwxr-xr-x
+Encrypted = -
+Comment = 
+CRC = 
+Method = Store
+Characteristics = NTFS
+Host OS = Unix
+Version = 20
+Volume Index = 0
+Offset = 0
+
+Path = d/a.txt
+Folder = -
+Size = 3
+Packed Size = 3
+Modified = 2026-11-28 07:20:50
+Created = 2026-11-28 07:20:50
+Accessed = 2026-11-28 07:20:50
+Attributes = _ -rw-r--r--
+Encrypted = -
+Comment = 
+CRC = ED6F7A7A
+Method = Store
+Characteristics = NTFS
+Host OS = Unix
+Version = 10
+Volume Index = 0
+Offset = 32
+
+Path = d/l
+Folder = -
+Size = 5
+Packed Size = 5
+Modified = 2026-11-28 07:20:50
+Created = 2026-11-28 07:20:50
+Accessed = 2026-11-28 07:20:50
+Attributes = _ lrwxr-xr-x
+Encrypted = -
+Comment = 
+CRC = C1EBF7BA
+Method = Store
+Characteristics = NTFS
+Host OS = Unix
+Version = 10
+Volume Index = 0
+Offset = 72
+

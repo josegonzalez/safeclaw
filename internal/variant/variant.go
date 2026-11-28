@@ -67,13 +67,20 @@ func (v Variant) Image() string {
 	return Image(v.Name)
 }
 
+// UnpackLinkCommand links safeclaw-unpack to the image's safeclaw binary in
+// the sandbox variant.
+const UnpackLinkCommand = "ln -s safeclaw /usr/local/bin/safeclaw-unpack"
+
 // Builtins returns the variants safeclaw defines itself.
 func Builtins() []Variant {
 	return []Variant{
 		{
 			Name:     Sandbox,
 			Packages: []string{"7zip", "file", "poppler-utils", "tesseract-ocr", "tesseract-ocr-eng"},
-			Source:   SourceBuiltin,
+			// safeclaw run as safeclaw-unpack is `safeclaw unpack`, which
+			// drives the 7z installed above.
+			Run:    []string{UnpackLinkCommand},
+			Source: SourceBuiltin,
 		},
 	}
 }

@@ -1,0 +1,87 @@
+
+7-Zip 26.00 (arm64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-02-12
+ 64-bit arm_v:8-A locale=C.UTF-8 Threads:10 OPEN_MAX:20480, ASM
+
+Scanning the drive for archives:
+1 file, 407 bytes (1 KiB)
+
+Listing archive: evil.zip
+
+--
+Path = evil.zip
+Type = zip
+Physical Size = 407
+
+----------
+Path = ok.txt
+Folder = -
+Size = 2
+Packed Size = 2
+Modified = 2026-11-28 12:11:58
+Created = 
+Accessed = 
+Attributes = V 01800000 0rw-------
+Encrypted = -
+Comment = 
+CRC = 79DCDD47
+Method = Store
+Characteristics = 
+Host OS = Unix
+Version = 20
+Volume Index = 0
+Offset = 0
+
+Path = C:/drive.txt
+Folder = -
+Size = 1
+Packed Size = 1
+Modified = 2026-11-28 12:11:58
+Created = 
+Accessed = 
+Attributes = V 01800000 0rw-------
+Encrypted = -
+Comment = 
+CRC = 8CDC1683
+Method = Store
+Characteristics = 
+Host OS = Unix
+Version = 20
+Volume Index = 0
+Offset = 38
+
+Path = ..\back.txt
+Folder = -
+Size = 1
+Packed Size = 1
+Modified = 2026-11-28 12:11:58
+Created = 
+Accessed = 
+Attributes = V 01800000 0rw-------
+Encrypted = -
+Comment = 
+CRC = 8CDC1683
+Method = Store
+Characteristics = 
+Host OS = Unix
+Version = 20
+Volume Index = 0
+Offset = 81
+
+Path = zsym
+Folder = -
+Size = 11
+Packed Size = 11
+Modified = 1980-01-01 00:00:00
+Created = 
+Accessed = 
+Attributes =  lrwxrwxrwx
+Encrypted = -
+Comment = 
+CRC = 291FB90A
+Method = Store
+Characteristics = 
+Host OS = Unix
+Version = 20
+Volume Index = 0
+Offset = 123
+
