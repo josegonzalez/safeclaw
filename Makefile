@@ -22,7 +22,7 @@ lint:
 	golangci-lint run ./...
 
 dev:
-	air
+	go tool air
 
 image: build
 	./safeclaw build --context .
