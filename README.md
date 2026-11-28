@@ -102,6 +102,9 @@ safeclaw sandbox exec triage -- unzip -d /sandbox/out /sandbox/in/1-report.zip
 # Copy only the matching regular files back out, dropping links and directories
 safeclaw sandbox cp-out triage /sandbox/out ./results --only '*.txt'
 
+# Fetch them again after another run: overwrite, and remove the .txt files that are gone
+safeclaw sandbox cp-out triage /sandbox/out ./results --only '*.txt' --replace
+
 # Remove it
 safeclaw sandbox rm -f triage
 ```
@@ -299,7 +302,7 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY, `--escape-controls` to escape control characters in its output, `--timeout DUR` to stop it after DUR and exit 124, `-e NAME=VALUE` or `-e NAME` to set an environment variable for the command without putting the value in docker's arguments) |
 | `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`, and the same `--timeout` and `-e` as `sandbox exec`. |
 | `safeclaw sandbox cp-in NAME FILE...` | Copy regular host files into a running sandbox as `N-name`, owned by the sandbox user, refusing links and other file types. `--to` picks a directory under `/sandbox` (default `/sandbox/in`). |
-| `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, sparse files, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given, `--max-size` (default `1g`) caps the total, and `--max-files` (default `1000`) caps the number of files. |
+| `safeclaw sandbox cp-out NAME DIR HOST_DIR --only GLOB` | Copy the regular files directly in a sandbox directory that match an `--only` glob into an existing host directory, dropping links, directories, sparse files, and nested files. Names that are not printable UTF-8 or start with `-` refuse the copy, and hidden files only match a glob starting with `.`. Existing files are refused unless `--force` is given. `--replace` implies `--force` and also removes the regular files in the host directory that match an `--only` glob but were not copied, keeping symlinks, directories, and other files, and only once every file has arrived and passed every check. `--max-size` (default `1g`) caps the total, and `--max-files` (default `1000`) caps the number of files. |
 | `safeclaw sandbox ls` | List sandboxes |
 | `safeclaw sandbox status NAME` | Print `running`, `stopped`, or `missing`, exiting 0, 3, or 4. A name that is an interactive session exits 5 with an error, and any other error exits 1. |
 | `safeclaw sandbox inspect NAME` | Print a sandbox's status, variant, network, user, capabilities, read-only root, limits including `--disk`, mounts, and safeclaw labels as JSON with a versioned schema. `--field NAME` prints one top-level field, a string as plain text and anything else as JSON. |

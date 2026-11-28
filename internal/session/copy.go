@@ -329,6 +329,10 @@ type CopyOutOptions struct {
 	Only []string
 	// Force overwrites existing host files.
 	Force bool
+	// Replace implies Force, and once every file has arrived removes the
+	// regular files in the host directory that match Only but were not
+	// copied. Symlinks, directories, and other entries are kept.
+	Replace bool
 	// MaxSize caps the total size of the files kept. 0 means no limit.
 	MaxSize int64
 	// MaxFiles caps the number of files kept. 0 means no limit.
@@ -340,8 +344,9 @@ type CopyOutOptions struct {
 // directories, other file types, and anything nested are dropped. The
 // files are read by the sandbox user and land with mode 0644, less the
 // umask. Nothing is written to hostDir unless every file arrives, and
-// existing names are refused unless opts.Force is set. It returns the host
-// path of each file, sorted.
+// existing names are refused unless opts.Force or opts.Replace is set. With
+// opts.Replace, hostDir's other regular files matching opts.Only are
+// removed. It returns the host path of each file, sorted.
 func (m *Manager) CopyOut(ctx context.Context, name, src, hostDir string, opts CopyOutOptions) ([]string, error) {
 	if len(opts.Only) == 0 {
 		return nil, ErrNoGlob
@@ -395,6 +400,9 @@ func (m *Manager) CopyOut(ctx context.Context, name, src, hostDir string, opts C
 	}
 	if err != nil {
 		return nil, err
+	}
+	if opts.Replace {
+		return replaceFiles(tmp, hostDir, names, opts.Only)
 	}
 	return placeFiles(tmp, hostDir, names, opts.Force)
 }
@@ -562,6 +570,74 @@ func placeFiles(tmp, hostDir string, names []string, force bool) ([]string, erro
 					_ = os.Remove(p)
 				}
 			}
+			return nil, placeError(to, err)
+		}
+		placed = append(placed, to)
+	}
+	return placed, nil
+}
+
+// renameFile is os.Rename, replaced in tests to fail a move. Undoing
+// uses os.Rename itself.
+var renameFile = os.Rename
+
+// replaceFiles moves names from tmp into hostDir, replacing existing files
+// and symlinks but never a directory, and removes hostDir's other regular
+// files whose names match globs. Symlinks, directories, and other entries
+// are never removed, whatever their name, and nothing is followed. Every
+// host file to be replaced or removed is first moved aside into tmp, so if
+// any move fails the files already placed are removed and the old ones moved
+// back, leaving hostDir as it was. The old files are deleted with tmp.
+func replaceFiles(tmp, hostDir string, names, globs []string) ([]string, error) {
+	slices.Sort(names)
+	kept := make(map[string]bool, len(names))
+	var aside []string
+	for _, n := range names {
+		kept[n] = true
+		fi, err := os.Lstat(filepath.Join(hostDir, n))
+		switch {
+		case errors.Is(err, fs.ErrNotExist):
+		case err != nil:
+			return nil, err
+		case fi.IsDir():
+			return nil, fmt.Errorf("%q %w", filepath.Join(hostDir, n), ErrIsDirectory)
+		default:
+			aside = append(aside, n)
+		}
+	}
+	entries, err := os.ReadDir(hostDir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if n := e.Name(); e.Type().IsRegular() && !kept[n] && matchAny(globs, n) {
+			aside = append(aside, n)
+		}
+	}
+	old, err := os.MkdirTemp(tmp, "old-")
+	if err != nil {
+		return nil, err
+	}
+	var moved, placed []string
+	undo := func() {
+		for _, p := range placed {
+			_ = os.Remove(p)
+		}
+		for _, n := range moved {
+			_ = os.Rename(filepath.Join(old, n), filepath.Join(hostDir, n))
+		}
+	}
+	for _, n := range aside {
+		if err := renameFile(filepath.Join(hostDir, n), filepath.Join(old, n)); err != nil {
+			undo()
+			return nil, err
+		}
+		moved = append(moved, n)
+	}
+	for _, n := range names {
+		to := filepath.Join(hostDir, n)
+		if err := renameFile(filepath.Join(tmp, n), to); err != nil {
+			undo()
 			return nil, placeError(to, err)
 		}
 		placed = append(placed, to)
