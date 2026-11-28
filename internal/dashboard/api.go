@@ -230,6 +230,13 @@ func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {
 	case x != nil && !req.Recreate:
 		writeJSONStatus(w, http.StatusConflict, apiResult{Error: fmt.Sprintf("session %q already exists: set recreate to start or replace it", name)})
 		return
+	case x == nil:
+		// A new session's name must also be short enough; Ensure decides
+		// for an existing one, which it may start but not recreate.
+		if err := session.ValidateNewName(name); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, apiResult{Error: err.Error()})
+			return
+		}
 	}
 	warnings, err := checkVolume(req.Volume)
 	if err != nil {

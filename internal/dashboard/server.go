@@ -686,7 +686,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// The name is checked in the form Ensure uses, so a name with the
 	// container prefix can't pass as new and recreate the session it names.
 	name := session.NormalizeName(r.PostForm.Get("name"))
-	if err := session.ValidateName(name); err != nil {
+	if err := session.ValidateNewName(name); err != nil {
 		s.render(w, http.StatusUnprocessableEntity, "create-error", err.Error())
 		return
 	}
