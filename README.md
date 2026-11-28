@@ -97,6 +97,18 @@ safeclaw sandbox exec triage -- safeclaw-unpack extract --nested keep-going /in/
 
 `safeclaw-unpack` exits 0 on success, 1 when it failed (7z failed, or the archive is corrupt), 2 when the archive was rejected for links or unsafe paths, 3 when it needs a password (none or the wrong one was given), 4 when it is over `--max-size` (default `512m`), and 5 when the file is not an archive: `detect` found no archive format, or 7z can't open it for `list` or `extract` and it doesn't start like an archive `detect` knows. `detect` uses the same check `extract` uses to find nested archives, so callers can ask it instead of keeping their own list of archive types. The password comes from `SAFECLAW_UNPACK_PASSWORD`, or the variable `--password-env` names, and reaches 7z on its stdin rather than its arguments. `--depth` (default `3`) limits how many levels of nested archives are unpacked, each into `NAME.unpacked` next to it. By default a nested archive that fails fails the whole extraction. With `--nested keep-going`, it is left packed and flagged `REJECTED`, `NEEDS-PASSWORD`, `TOO-LARGE`, or `FAILED` instead, nothing it extracted is kept, and the run exits 0 as long as the outer archive itself extracted.
 
+It also has `safeclaw-totext`, which turns an untrusted PDF, image, or text file into text that is safe to read, instead of each caller writing its own script around `pdftotext` and `tesseract`. It detects the type from the file's first bytes, writes one file per PDF page (`p001.txt`, `p002.txt`, and so on), OCRs pages with almost no text and image files, copies text files, and removes control characters from all of them. Every tool runs under its own timeout and is killed with everything it started when the timeout passes. See [extracting text](docs/architecture.md#extracting-text).
+
+```bash
+# One file per page in a new or empty directory, then a report: type, page lines, and skipped lines
+safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- safeclaw-totext /in/report.pdf /sandbox/out/report
+
+# The report as JSON with a versioned schema, for building an index of the pages
+safeclaw sandbox exec triage -- safeclaw-totext --json --max-pages 20 --ocr-lang eng /in/scan.pdf /sandbox/out/scan
+```
+
+`safeclaw-totext` exits 0 when every page was converted, 1 when it failed (a tool failed on the whole file, or the file is corrupt), 3 when the PDF is encrypted, 5 when the file is not a supported type, 6 when it wrote text but skipped something (pages over `--max-pages`, default `100`, or a page whose extraction or OCR timed out or failed), and 7 when a tool timed out before anything was written. `--ocr-threshold` (default `10`) is the number of characters below which a PDF page is OCR'd, `--ocr-dpi` (default `300`) and `--ocr-lang` (default `eng`) set how, and `--timeout` (default `1m`) limits each tool run.
+
 ```bash
 # Create a sandbox, mounting host directories read-only (-v repeats)
 safeclaw sandbox run -s triage -v ~/inbox:/in -v ~/triage-tools:/opt/tools
@@ -228,7 +240,7 @@ safeclaw sandbox exec --ephemeral --variant base -- ls
 - yt-dlp 2026.11.23
 - [DX plugin](https://github.com/ykdojo/claude-code-tips#tip-44-install-the-dx-plugin), [custom status line](https://github.com/ykdojo/claude-code-tips#tip-0-customize-your-status-line), [shell aliases](#aliases)
 - ttyd web terminal + tmux
-- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, file, and `safeclaw-unpack`
+- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, file, `safeclaw-unpack`, and `safeclaw-totext`
 
 ## Sensible defaults
 
