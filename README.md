@@ -174,6 +174,18 @@ safeclaw net on work --owner triage
 
 Each `net off` records a hold for its `--owner` (or one shared unnamed hold without it), and the session is reconnected only once every hold is released, so one job can't bring a session back online while another still relies on it being offline. `--force` releases every hold. A held session can't be removed either: `safeclaw rm` and the dashboard's delete refuse it, naming its holders, until they release their holds, and `safeclaw rm --release-holds` removes it anyway. The saved state is tied to the container, so a session recreated under the same name starts online. See [architecture](docs/architecture.md#offline-sessions) for details.
 
+## Starting and scripting sessions
+
+Start sessions with `safeclaw run`, `safeclaw new`, or the dashboard, never a raw `docker start`. They refresh the session's `.env`, git config, and ttyd; `docker start` only starts the container, so its web terminal never comes up.
+
+`safeclaw run -q "QUERY"` sends a query to Claude Code once its prompt is ready. To type into a running session from a script, send keys to its tmux session, `main`. The first Enter sometimes doesn't submit the prompt, so check the pane and send another Enter if the text is still there:
+
+```bash
+docker exec safeclaw-work tmux send-keys -t main 'your command' Enter
+docker exec safeclaw-work tmux capture-pane -t main -p   # still unsubmitted? send Enter again
+docker exec safeclaw-work tmux send-keys -t main Enter
+```
+
 ## Image variants
 
 An image variant is the `safeclaw` image with extra apt packages or setup steps, tagged `safeclaw:NAME`. The built-in `sandbox` variant is published alongside each release. Define more, or override `sandbox`, in `~/.config/safeclaw/config.yaml`:
