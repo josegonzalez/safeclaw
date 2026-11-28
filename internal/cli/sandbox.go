@@ -129,7 +129,7 @@ func newSandboxRunCommand() *cobra.Command {
 	var namePrefix string
 	var inputs inputFlags
 	cmd := &cobra.Command{
-		Use:   "run [-s NAME] [--rm [--name-prefix PREFIX] [--keep-inputs DIR | --restore-from DIR]]",
+		Use:   "run [-s NAME] [--rm [--name-prefix PREFIX] [--keep-inputs DIR | --keep-inputs-under DIR | --restore-from DIR]]",
 		Short: "Create or start a sandbox",
 		Long: "Create or start a sandbox. -s is required unless --rm is set.\n\n" +
 			"/sandbox is a tmpfs of --disk bytes: writes past it fail, its pages count toward --memory, and it is emptied when the sandbox stops.\n\n" +
@@ -142,7 +142,8 @@ func newSandboxRunCommand() *cobra.Command {
 			"including when safeclaw is interrupted before the checks end; one that already existed is left as it was.\n\n" + keepInputsHelp,
 		Example: `  safeclaw sandbox run -s triage -v ~/inbox:/in
   name=$(safeclaw sandbox run --rm -v ~/inbox:/in)
-  name=$(safeclaw sandbox run --rm --name-prefix triage)   # triage-20261128-110940`,
+  name=$(safeclaw sandbox run --rm --name-prefix triage)   # triage-20261128-110940
+  name=$(safeclaw sandbox run --rm --name-prefix triage --keep-inputs-under ~/triage)   # records in ~/triage/$name`,
 		Args: cobra.MatchAll(cobra.NoArgs, sandboxRunArgs, sandboxInputArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts := f.options(flagSources(cmd))

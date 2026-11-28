@@ -55,7 +55,8 @@ func useProfile(cmd *cobra.Command, section string) {
 // applyProfile loads the profile --profile names, checks all of it against
 // the commands' flags, and sets the flags of section that the command line
 // didn't. Some keys apply only when they make sense with the rest:
-// run.name-prefix with --rm and without -s, open's safeclaw-totext policy
+// run.name-prefix with --rm and without -s, run.keep-inputs-under with
+// --rm and without --keep-inputs or --restore-from, open's safeclaw-totext policy
 // with --text, and, for `sandbox exec --ephemeral`, the run section's
 // limits, variant, and verify, since that creates a sandbox too.
 func applyProfile(cmd *cobra.Command, section string) error {
@@ -89,8 +90,11 @@ func applyProfile(cmd *cobra.Command, section string) error {
 	switch section {
 	case profile.Run:
 		add(section, func(s profile.Setting) func() bool {
-			if s.Key == "name-prefix" {
+			switch s.Key {
+			case "name-prefix":
 				return func() bool { return flagOn("rm")() && !fs.Changed("session") }
+			case "keep-inputs-under":
+				return func() bool { return flagOn("rm")() && !fs.Changed("keep-inputs") && !fs.Changed("restore-from") }
 			}
 			return nil
 		})

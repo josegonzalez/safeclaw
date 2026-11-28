@@ -93,6 +93,24 @@ func TestProfileRun(t *testing.T) {
 	if v, _ := cmd.Flags().GetString("name-prefix"); err != nil || v != "job" {
 		t.Errorf("with --rm: err = %v, name-prefix = %q", err, v)
 	}
+	// keep-inputs-under applies only with --rm, and gives way to a
+	// --keep-inputs or --restore-from on the command line, which it can't
+	// be used with.
+	p = testProfile(t, "run:\n  keep-inputs-under: jobs\n")
+	for _, args := range [][]string{{"-s", "box"}, {"--rm", "--keep-inputs", "d"}, {"--rm", "--restore-from", "d"}} {
+		cmd, err = withProfile(t, newSandboxRunCommand(), append([]string{"--profile", p}, args...)...)
+		if err != nil || cmd.Flags().Changed("keep-inputs-under") {
+			t.Errorf("%v: err = %v, keep-inputs-under set = %v", args, err, cmd.Flags().Changed("keep-inputs-under"))
+		}
+	}
+	cmd, err = withProfile(t, newSandboxRunCommand(), "--profile", p, "--rm", "--name-prefix", "job")
+	if v, _ := cmd.Flags().GetString("keep-inputs-under"); err != nil || v != "jobs" {
+		t.Errorf("with --rm: err = %v, keep-inputs-under = %q", err, v)
+	}
+	cmd, err = withProfile(t, newSandboxRunCommand(), "--profile", p, "--rm", "--keep-inputs-under", "mine")
+	if v, _ := cmd.Flags().GetString("keep-inputs-under"); err != nil || v != "mine" {
+		t.Errorf("typed: err = %v, keep-inputs-under = %q", err, v)
+	}
 	// Without --profile, nothing is applied.
 	cmd, err = withProfile(t, newSandboxRunCommand(), "-s", "box")
 	if ref, _ := appliedProfile(cmd); err != nil || ref != "" {

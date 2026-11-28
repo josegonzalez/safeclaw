@@ -46,6 +46,7 @@ func TestSandboxInspectField(t *testing.T) {
 		"limits":       `{"memory_bytes":1048576,"cpus":0,"pids":0,"disk_bytes":0}` + "\n",
 		"labels":       `{"safeclaw.type":"sandbox"}` + "\n",
 		"network_mode": "none\n",
+		"keep_inputs":  "\n",
 	} {
 		out, _, err := runStderr("sandbox", "inspect", "up", "--field", field)
 		if err != nil || out != want {
@@ -74,6 +75,17 @@ func TestSandboxInspectField(t *testing.T) {
 	}
 	if _, _, err := runStderr("sandbox", "inspect", "gone", "--field", "running"); !errors.Is(err, session.ErrNotFound) {
 		t.Errorf("missing: err = %v", err)
+	}
+}
+
+// keep_inputs is the record directory from the sandbox's label, as plain
+// text with --field, so a caller of --keep-inputs-under can find it.
+func TestSandboxInspectKeepInputs(t *testing.T) {
+	dir := "/home/me/triage/triage-20261128-110940"
+	fakeContainers(t, map[string]string{"safeclaw-kept": keptContainer("safeclaw-kept", dir)}, nil)
+	out, _, err := runStderr("sandbox", "inspect", "kept", "--field", "keep_inputs")
+	if err != nil || out != dir+"\n" {
+		t.Errorf("--field keep_inputs: %q, %v", out, err)
 	}
 }
 

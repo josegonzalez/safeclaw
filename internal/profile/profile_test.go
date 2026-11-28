@@ -106,7 +106,7 @@ func TestParseErrors(t *testing.T) {
 	for _, tc := range []struct{ yaml, want string }{
 		// Unknown keys and malformed profiles.
 		{"runs: {}\n", "unknown key runs: want require, or one of the sections cp-out, exec, open, run"},
-		{"run:\n  memroy: 2g\n", "unknown key run.memroy: want one of cpus, disk, memory, name-prefix, pids-limit, rm, variant, verify"},
+		{"run:\n  memroy: 2g\n", "unknown key run.memroy: want one of cpus, disk, keep-inputs-under, memory, name-prefix, pids-limit, rm, variant, verify"},
 		{"exec:\n  tty: true\n", "unknown key exec.tty"},
 		{"cp-out:\n  force: true\n", "unknown key cp-out.force"},
 		{"open:\n  text: true\n", "unknown key open.text"},
