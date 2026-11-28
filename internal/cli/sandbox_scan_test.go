@@ -167,6 +167,19 @@ func TestCopyOutScanCLI(t *testing.T) {
 		t.Errorf("no-scan output = %q, stderr = %q", out, errOut)
 	}
 
+	// A missing HOST_DIR is refused, pointing at --mkdir, which creates it.
+	newDir := filepath.Join(host, "x", "new")
+	if _, _, err := runStderr("sandbox", "cp-out", "box", "out", newDir, "--only", "a.txt", "--no-scan"); err == nil || !strings.Contains(err.Error(), "--mkdir") {
+		t.Errorf("missing HOST_DIR: %v", err)
+	}
+	out, _, err = runStderr("sandbox", "cp-out", "box", "out", newDir, "--only", "a.txt", "--no-scan", "--mkdir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != filepath.Join(newDir, "a.txt")+"\n" {
+		t.Errorf("--mkdir output = %q", out)
+	}
+
 	if _, _, err := runStderr("sandbox", "cp-out", "box", "out", host, "--only", "*", "--no-scan", "--allow-flagged"); err == nil {
 		t.Error("--no-scan with --allow-flagged accepted")
 	}

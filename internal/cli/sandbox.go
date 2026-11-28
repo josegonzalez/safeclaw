@@ -472,16 +472,21 @@ func newSandboxCopyInCommand() *cobra.Command {
 
 func newSandboxCopyOutCommand() *cobra.Command {
 	var only []string
-	var force, replace, noScan, allowFlagged bool
+	var force, replace, noScan, allowFlagged, mkdir bool
 	var maxSize string
 	var maxFiles int
 	cmd := &cobra.Command{
 		Use:   "cp-out NAME CONTAINER_DIR HOST_DIR --only GLOB...",
 		Short: "Copy matching files out of a running sandbox",
-		Long: "Copy the regular files directly in CONTAINER_DIR whose names match an --only glob into the existing HOST_DIR.\n\n" +
+		Long: "Copy the regular files directly in CONTAINER_DIR whose names match an --only glob into HOST_DIR.\n\n" +
 			"Symbolic links, hard links, directories, sparse files, other file types, and anything in subdirectories are dropped. " +
 			"A kept file whose name is not printable UTF-8 or starts with - refuses the whole copy, and as in a shell, " +
 			"names starting with . only match a glob that starts with . too. " +
+			"HOST_DIR must exist unless --mkdir is set, which creates it and its missing parents with mode 0755, less the umask, " +
+			"only once every file has arrived and passed every check, so a refused or failed copy creates nothing. " +
+			"An existing HOST_DIR, or a symbolic link to a directory, is used as it is, with or without --mkdir, and anything else that exists is refused. " +
+			"--mkdir refuses a dangling symbolic link, or one to a non-directory, as HOST_DIR or its nearest existing parent, so it never creates anything through one; " +
+			"other links among the existing parents are followed, as mkdir -p does. " +
 			"Files are read as the sandbox user and written with mode 0644, less the umask. Nothing is written unless every file arrives, " +
 			"and existing files are refused unless --force is set. " +
 			"--replace implies --force and, once every file has arrived and passed every check, also removes the regular files in HOST_DIR that match an --only glob but were not copied, " +
@@ -512,6 +517,7 @@ func newSandboxCopyOutCommand() *cobra.Command {
 				MaxFiles:     maxFiles,
 				NoScan:       noScan,
 				AllowFlagged: allowFlagged,
+				Mkdir:        mkdir,
 			})
 			if flagged, ok := errors.AsType[*session.FlaggedError](err); ok {
 				writeCopyScan(cmd.ErrOrStderr(), flagged.Report, "refused")
@@ -536,6 +542,7 @@ func newSandboxCopyOutCommand() *cobra.Command {
 	cmd.Flags().IntVar(&maxFiles, "max-files", session.DefaultCopyMaxFiles, "limit on the number of files kept (0 for none)")
 	cmd.Flags().BoolVar(&noScan, "no-scan", false, "copy without scanning the files for malware")
 	cmd.Flags().BoolVar(&allowFlagged, "allow-flagged", false, "copy files the malware scan flags as infected or could not scan")
+	cmd.Flags().BoolVar(&mkdir, "mkdir", false, "create HOST_DIR and its missing parents once the copy has passed every check")
 	return cmd
 }
 

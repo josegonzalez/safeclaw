@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -1089,6 +1090,29 @@ func TestIntegrationSandboxCopy(t *testing.T) {
 	// The sandbox user can't read /home/sclaw, so neither can cp-out.
 	if _, err := m.CopyOut(ctx, name, "/home/sclaw", t.TempDir(), CopyOutOptions{NoScan: true, Only: []string{"*"}}); err == nil {
 		t.Error("cp-out of /home/sclaw should fail")
+	}
+
+	// --mkdir creates a missing HOST_DIR and its parents only once the copy
+	// passed every check, so a failed copy leaves nothing behind.
+	base := t.TempDir()
+	newDir := filepath.Join(base, "x", "new")
+	opts = CopyOutOptions{NoScan: true, Only: []string{"*.txt"}, MaxSize: 1, Mkdir: true}
+	if _, err := m.CopyOut(ctx, name, "/sandbox/out", newDir, opts); !errors.Is(err, ErrTooLarge) {
+		t.Errorf("--mkdir --max-size: err = %v, want ErrTooLarge", err)
+	}
+	if entries, _ := os.ReadDir(base); len(entries) != 0 {
+		t.Errorf("a failed --mkdir left %v", entries)
+	}
+	opts.MaxSize = 0
+	if got, err := m.CopyOut(ctx, name, "/sandbox/out", newDir, opts); err != nil || !slices.Equal(got, []string{filepath.Join(newDir, "a.txt")}) {
+		t.Errorf("--mkdir = %v, %v", got, err)
+	}
+	if entries, _ := os.ReadDir(base); len(entries) != 1 || entries[0].Name() != "x" {
+		t.Errorf("--mkdir left %v next to the new directory", entries)
+	}
+	opts.Mkdir = false
+	if _, err := m.CopyOut(ctx, name, "/sandbox/out", filepath.Join(base, "other"), opts); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("missing HOST_DIR without --mkdir: err = %v", err)
 	}
 
 	// A stopped sandbox is refused.

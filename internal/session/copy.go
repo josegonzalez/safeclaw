@@ -353,6 +353,10 @@ type CopyOutOptions struct {
 	// AllowFlagged places files the scan flags as infected or could not
 	// scan, rather than refusing the copy.
 	AllowFlagged bool
+	// Mkdir creates the host directory, with its missing parents, when it
+	// does not exist. It is created only once every file has arrived and
+	// passed every check, so a refused or failed copy creates nothing.
+	Mkdir bool
 }
 
 // CopyOutResult is what CopyOutReport copied.
@@ -396,7 +400,8 @@ func (m *Manager) CopyOut(ctx context.Context, name, src, hostDir string, opts C
 }
 
 // CopyOutReport copies the regular files directly in a running sandbox's src
-// whose names match opts.Only into the existing hostDir. Links,
+// whose names match opts.Only into hostDir, which must exist unless
+// opts.Mkdir is set (see copyOutDest and placeNewDir). Links,
 // directories, other file types, and anything nested are dropped. The
 // files are read by the sandbox user and land with mode 0644, less the
 // umask. Nothing is written to hostDir unless every file arrives, and
@@ -429,12 +434,9 @@ func (m *Manager) CopyOutReport(ctx context.Context, name, src, hostDir string, 
 	if src == "" {
 		return nil, errors.New("a sandbox directory is required")
 	}
-	fi, err := os.Stat(hostDir)
+	plan, err := copyOutDest(hostDir, opts.Mkdir)
 	if err != nil {
 		return nil, err
-	}
-	if !fi.IsDir() {
-		return nil, fmt.Errorf("%s is not a directory", hostDir)
 	}
 	var prepared *scanPrepared
 	if !opts.NoScan {
@@ -448,7 +450,7 @@ func (m *Manager) CopyOutReport(ctx context.Context, name, src, hostDir string, 
 	}
 	name = config.SessionName(name)
 
-	tmp, err := os.MkdirTemp(hostDir, ".safeclaw-cp-*")
+	tmp, err := os.MkdirTemp(plan.stageIn, ".safeclaw-cp-*")
 	if err != nil {
 		return nil, err
 	}
@@ -483,9 +485,12 @@ func (m *Manager) CopyOutReport(ctx context.Context, name, src, hostDir string, 
 			return nil, &FlaggedError{Report: res.Scan}
 		}
 	}
-	if opts.Replace {
+	switch {
+	case len(plan.missing) > 0:
+		res.Paths, err = placeNewDir(tmp, hostDir, plan, names)
+	case opts.Replace:
 		res.Paths, err = replaceFiles(tmp, hostDir, names, opts.Only)
-	} else {
+	default:
 		res.Paths, err = placeFiles(tmp, hostDir, names, opts.Force)
 	}
 	if err != nil {
@@ -493,6 +498,110 @@ func (m *Manager) CopyOutReport(ctx context.Context, name, src, hostDir string, 
 	}
 	return res, nil
 }
+
+// copyOutPlan is where cp-out stages and places its files.
+type copyOutPlan struct {
+	// stageIn is the existing directory the temporary directory is made
+	// in: the host directory itself, or when directories are missing, the
+	// nearest existing ancestor, which is on the filesystem they will be
+	// created on, so every move is a rename.
+	stageIn string
+	// missing are the directories to create, from the one directly in
+	// stageIn down to the host directory. Empty when it exists.
+	missing []string
+}
+
+// copyOutDest checks cp-out's host directory. An existing directory, or a
+// symbolic link to one, is used as it is. Anything else that exists, a
+// dangling link included, is refused. A missing one is refused unless
+// mkdir is set, in which case its nearest existing ancestor must be a
+// directory, following links as mkdir -p does. Nothing is created here.
+func copyOutDest(hostDir string, mkdir bool) (*copyOutPlan, error) {
+	fi, err := os.Stat(hostDir)
+	if err == nil {
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("%s is not a directory", hostDir)
+		}
+		return &copyOutPlan{stageIn: hostDir}, nil
+	}
+	if !errors.Is(err, fs.ErrNotExist) {
+		return nil, err
+	}
+	if _, err := os.Lstat(hostDir); err == nil {
+		return nil, fmt.Errorf("%s %w that does not lead to a directory", hostDir, ErrSymlink)
+	}
+	if !mkdir {
+		return nil, fmt.Errorf("%w (--mkdir creates it)", err)
+	}
+	clean := filepath.Clean(hostDir)
+	missing := []string{filepath.Base(clean)}
+	for p := filepath.Dir(clean); ; p = filepath.Dir(p) {
+		fi, err := os.Lstat(p)
+		if errors.Is(err, fs.ErrNotExist) && filepath.Dir(p) != p {
+			missing = append(missing, filepath.Base(p))
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if fi.Mode()&fs.ModeSymlink != 0 {
+			if fi, err = os.Stat(p); err != nil {
+				return nil, fmt.Errorf("%s %w that does not lead to a directory", p, ErrSymlink)
+			}
+		}
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("%s is not a directory", p)
+		}
+		slices.Reverse(missing)
+		return &copyOutPlan{stageIn: p, missing: missing}, nil
+	}
+}
+
+// mkdirMode is the mode of the directories cp-out --mkdir creates, less
+// the umask.
+const mkdirMode = 0o755
+
+// placeNewDir builds the missing directories inside tmp, moves names into
+// the deepest, and moves the whole tree into place with one rename that
+// refuses to replace, so the host directory appears complete or not at
+// all, and nothing is left behind when it fails.
+func placeNewDir(tmp, hostDir string, plan *copyOutPlan, names []string) ([]string, error) {
+	slices.Sort(names)
+	root, err := os.MkdirTemp(tmp, "new-")
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(append([]string{root}, plan.missing...)...)
+	if err := os.MkdirAll(dir, mkdirMode); err != nil {
+		return nil, err
+	}
+	paths := make([]string, len(names))
+	for i, n := range names {
+		if err := os.Rename(filepath.Join(tmp, n), filepath.Join(dir, n)); err != nil {
+			return nil, err
+		}
+		paths[i] = filepath.Join(hostDir, n)
+	}
+	from := filepath.Join(root, plan.missing[0])
+	to := filepath.Join(plan.stageIn, plan.missing[0])
+	err = renameDir(from, to)
+	if errors.Is(err, errors.ErrUnsupported) || errors.Is(err, syscall.EINVAL) {
+		// Where the filesystem can't refuse to replace, a plain rename can
+		// still only replace an empty directory, which loses nothing.
+		err = os.Rename(from, to)
+	}
+	if errors.Is(err, fs.ErrExist) || errors.Is(err, syscall.ENOTEMPTY) {
+		return nil, fmt.Errorf("%q was created during the copy, so nothing was placed: copy again to use it", to)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return paths, nil
+}
+
+// renameDir is renameNoReplace, replaced in tests to fail the move of a
+// new host directory into place.
+var renameDir = renameNoReplace
 
 // topLevel returns the name of a tar entry directly in the archive's root
 // (as written by `tar -C DIR .`), or false for the root itself, nested
