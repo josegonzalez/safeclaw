@@ -175,6 +175,11 @@ func TestInspectSandboxErrors(t *testing.T) {
 	if _, err := m.VerifySandbox(context.Background(), "box"); !errors.Is(err, ErrNotSandbox) {
 		t.Errorf("verify session: err = %v", err)
 	}
+	c["Config"].(map[string]any)["Labels"] = map[string]string{"safeclaw.type": "other"}
+	m, _ = newInspectManager(t, &inspectWorld{c: c})
+	if _, err := m.InspectSandbox(context.Background(), "box"); !errors.Is(err, ErrNotManaged) {
+		t.Errorf("unmanaged: err = %v", err)
+	}
 }
 
 func TestVerifySandboxPasses(t *testing.T) {
