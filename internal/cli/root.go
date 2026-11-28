@@ -28,6 +28,9 @@ func Execute() int {
 	if isTotextProgram(os.Args[0]) {
 		return executeTotext(ctx, os.Args[1:])
 	}
+	if isMailProgram(os.Args[0]) {
+		return executeMail(ctx, os.Args[1:])
+	}
 	// Every command may read or write the config directory, which holds
 	// session history and credentials, so it is checked before any runs.
 	if err := config.SecureDir(os.Stderr); err != nil {
@@ -82,6 +85,7 @@ func NewRootCommand() *cobra.Command {
 		newTTYDWrapperCommand(),
 		newUnpackCommand("unpack"),
 		newTotextCommand("totext"),
+		newMailCommand("mail"),
 		newVersionCommand(),
 	)
 	return root

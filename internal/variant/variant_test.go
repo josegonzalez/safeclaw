@@ -26,11 +26,14 @@ func TestDefault(t *testing.T) {
 			t.Errorf("sandbox variant lacks %s", p)
 		}
 	}
-	if !slices.Equal(v.Run, []string{UnpackLinkCommand, TotextLinkCommand}) || !strings.Contains(Dockerfile(v), `RUN ["/bin/sh","-c","ln -s safeclaw /usr/local/bin/safeclaw-unpack"]`) {
+	if !slices.Equal(v.Run, []string{UnpackLinkCommand, TotextLinkCommand, MailLinkCommand}) || !strings.Contains(Dockerfile(v), `RUN ["/bin/sh","-c","ln -s safeclaw /usr/local/bin/safeclaw-unpack"]`) {
 		t.Errorf("sandbox variant does not link safeclaw-unpack: %v", v.Run)
 	}
 	if !strings.Contains(Dockerfile(v), `RUN ["/bin/sh","-c","ln -s safeclaw /usr/local/bin/safeclaw-totext"]`) {
 		t.Errorf("sandbox variant does not link safeclaw-totext: %v", v.Run)
+	}
+	if !strings.Contains(Dockerfile(v), `RUN ["/bin/sh","-c","ln -s safeclaw /usr/local/bin/safeclaw-mail"]`) {
+		t.Errorf("sandbox variant does not link safeclaw-mail: %v", v.Run)
 	}
 	if s.DefaultFor("session") != "" || s.DefaultFor("sandbox") != "sandbox" {
 		t.Errorf("defaults = %q, %q", s.DefaultFor("session"), s.DefaultFor("sandbox"))

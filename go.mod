@@ -10,6 +10,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/zalando/go-keyring v0.2.8
 	go.yaml.in/yaml/v3 v3.0.6
+	golang.org/x/net v0.63.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
 )
@@ -61,7 +62,7 @@ require (
 	github.com/tdewolff/parse/v2 v2.8.12 // indirect
 	github.com/xo/terminfo v1.3.1 // indirect
 	golang.org/x/sync v0.25.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
