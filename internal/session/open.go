@@ -173,13 +173,25 @@ func probeDashboard(ctx context.Context, port int, token string) probeResult {
 // is running it opens the dashboard's terminal page, so the session's
 // credential stays out of the opener's command line, where other local
 // users can see it, and out of the browser's history. Otherwise it opens
-// credURL, the URL carrying the credential, and warns about that.
+// credURL, the URL carrying the credential, without the credential, so
+// ttyd asks the browser to log in, and says to log in with the password in
+// the printed URL. The credential never goes to the opener.
 func (m *Manager) OpenTerminal(ctx context.Context, name, credURL string) error {
 	if u, ok := m.DashboardTerminalURL(ctx, name); ok {
 		m.printf("Opening the dashboard's terminal page: %s\n", u)
 		m.printf("If it says unauthorized, log the browser in with the URL `safeclaw dashboard` printed\n")
 		return m.openBrowser(u)
 	}
-	m.printf("Warning: opening the terminal URL with the session's credential in it, so other local users can see it in the process list and it stays in your browser history. With `safeclaw dashboard` running, the dashboard's terminal page is opened instead\n")
-	return m.openBrowser(credURL)
+	u, err := url.Parse(credURL)
+	if err != nil {
+		// url.Parse's error quotes the URL, credential and all.
+		return errors.New("open terminal: its URL can't be parsed")
+	}
+	user := u.User
+	u.User = nil
+	m.printf("Opening the terminal without its credential, which would be in the opener's command line, where other local users can see it, and in your browser history: %s\n", u)
+	if user != nil {
+		m.printf("Log in as %s with the password in the printed URL, after the colon. With `safeclaw dashboard` running, its terminal page is opened instead, which needs no password\n", user.Username())
+	}
+	return m.openBrowser(u.String())
 }

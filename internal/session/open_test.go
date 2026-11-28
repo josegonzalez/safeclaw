@@ -245,8 +245,15 @@ func TestOpenTerminal(t *testing.T) {
 	if err := m.OpenTerminal(ctx, "work", cred); err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(opened, []string{cred}) || !strings.Contains(out.String(), "Warning: opening the terminal URL with the session's credential") {
+	// Without a dashboard, the URL is opened without the credential, which
+	// the opener's command line would show other local users, and the
+	// output says how to log in.
+	if !slices.Equal(opened, []string{"http://[::1]:7681"}) || !strings.Contains(out.String(), "without its credential") || !strings.Contains(out.String(), "Log in as safeclaw with the password in the printed URL") || strings.Contains(out.String(), "pw") {
 		t.Errorf("without a dashboard: opened %q, out %q", opened, out.String())
+	}
+	opened = nil
+	if err := m.OpenTerminal(ctx, "work", "http://safeclaw:pw@[::1"); err == nil || strings.Contains(err.Error(), "pw") || len(opened) != 0 {
+		t.Errorf("bad URL: err = %v, opened %q", err, opened)
 	}
 
 	opened, out = nil, bytes.Buffer{}
@@ -278,8 +285,8 @@ func TestEnsureOpensDashboardTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(opened, []string{res.URL}) {
-		t.Errorf("without a dashboard: opened %q, want the credential URL", opened)
+	if want := "http://[::1]:" + strconv.Itoa(res.Port); !slices.Equal(opened, []string{want}) || !strings.Contains(res.URL, "@") {
+		t.Errorf("without a dashboard: opened %q, want %q without the credential in %q", opened, want, res.URL)
 	}
 
 	opened = nil

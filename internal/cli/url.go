@@ -12,7 +12,8 @@ func newURLCommand() *cobra.Command {
 		Use:   "url NAME",
 		Short: "Print a session's web terminal URL, with its credential",
 		Long: "Print the URL of a running session's web terminal, with the session's credential in it, like `safeclaw run` does, without restarting anything. " +
-			"With --open, also open the terminal in the browser: the dashboard's terminal page when `safeclaw dashboard` is running, which keeps the credential out of the process list and browser history, and otherwise the printed URL.",
+			"With --open, also open the terminal in the browser: the dashboard's terminal page when `safeclaw dashboard` is running, which keeps the credential out of the process list and browser history, and otherwise the printed URL without its credential, which the browser asks for. " +
+			"A session an earlier version created, published on 127.0.0.1 or with a ttyd that takes its credential on its command line, gets the warnings `safeclaw run` gives, on stderr.",
 		Example: `  safeclaw url work
   safeclaw url work --open`,
 		Args:              cobra.ExactArgs(1),
@@ -32,6 +33,7 @@ func newURLCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			m.WarnTerminal(ctx, t)
 			fmt.Fprintln(cmd.OutOrStdout(), u)
 			if open {
 				return m.OpenTerminal(ctx, args[0], u)
