@@ -1,0 +1,21 @@
+# Groups the generated release notes by pull request label. The
+# pr-labels workflow labels each pull request from its title's semantic
+# prefix, and dependabot labels its own pull requests `dependencies`.
+changelog:
+  exclude:
+    labels:
+      - documentation
+      - internal
+  categories:
+    - title: Features
+      labels:
+        - enhancement
+    - title: Fixes
+      labels:
+        - bug
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: Other changes
+      labels:
+        - "*"
