@@ -192,9 +192,17 @@ func TestDockerfileBuildsPatchedTTYD(t *testing.T) {
 		}
 	}
 	// Every response ttyd builds headers for gets them: the index (built in
-	// and -I), /token, the base-path redirect, and the 401.
-	if n := strings.Count(string(framing), "add_frame_headers(wsi, &p, end)"); n != 5 {
-		t.Errorf("refuse-framing patch adds the headers to %d responses, want 5", n)
+	// and -I), /token, the base-path redirect, the 401 and the 404.
+	if n := strings.Count(string(framing), "add_frame_headers(wsi, &p, end)"); n != 6 {
+		t.Errorf("refuse-framing patch adds the headers to %d responses, want 6", n)
+	}
+	// The 404 is sent by send_not_found, since lws_return_http_status can't
+	// carry the headers.
+	if !strings.Contains(string(framing), "-        lws_return_http_status(wsi, HTTP_STATUS_NOT_FOUND, NULL);\n+        if (send_not_found(wsi)) return 1;\n") {
+		t.Errorf("refuse-framing patch does not send the 404 with send_not_found:\n%s", framing)
+	}
+	if regexp.MustCompile(`(?m)^\+.*lws_return_http_status\(`).Match(framing) {
+		t.Errorf("refuse-framing patch answers with lws_return_http_status, which has no framing headers:\n%s", framing)
 	}
 	credFile, err := fs.ReadFile(BuildContext, "setup/ttyd/credential-file.patch")
 	if err != nil {
@@ -206,6 +214,17 @@ func TestDockerfileBuildsPatchedTTYD(t *testing.T) {
 		"read_credential_file(optarg)",
 		// ttyd no longer logs the encoded credential at startup.
 		`-  if (server->credential != NULL) lwsl_notice("  credential: %s\n", server->credential);`,
+		// The encoded credential is capped at what /token's 256 byte buffer
+		// holds around its JSON, so its sprintf can't overflow.
+		"+#define CREDENTIAL_B64_MAX 240\n",
+		"+  if (len > CREDENTIAL_MAX) {\n",
+		// Copies of the credential are cleared in a way the compiler can't
+		// drop, and the file is read without a stdio buffer holding it.
+		"+  setvbuf(fp, NULL, _IONBF, 0);\n",
+		"+  explicit_bzero(buf, sizeof(buf));\n",
+		"+  explicit_bzero(b64_text, sizeof(b64_text));\n",
+		"+    explicit_bzero(server->credential, strlen(server->credential));\n",
+		"+    explicit_bzero(ts->credential, strlen(ts->credential));\n",
 	} {
 		if !strings.Contains(string(credFile), want) {
 			t.Errorf("credential-file patch is missing %q:\n%s", want, credFile)
@@ -213,6 +232,9 @@ func TestDockerfileBuildsPatchedTTYD(t *testing.T) {
 	}
 	if regexp.MustCompile(`(?m)^\+.*lwsl_\w+\([^\n]*server->credential`).Match(credFile) {
 		t.Errorf("credential-file patch logs the credential:\n%s", credFile)
+	}
+	if regexp.MustCompile(`(?m)^\+.*\bmemset\(`).Match(credFile) {
+		t.Errorf("credential-file patch clears with memset, which the compiler may drop:\n%s", credFile)
 	}
 }
 

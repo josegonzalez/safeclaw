@@ -73,9 +73,9 @@ func TestIntegrationLifecycle(t *testing.T) {
 		t.Errorf("history dir: %v, %v", info, err)
 	}
 	// Without the credential, ttyd refuses the request, and nothing
-	// answers on the dashboard cookie's host. Every response, the refusal
-	// and the logged-in page alike, refuses to be framed.
-	for url, code := range map[string]int{URLFor(res.Port): http.StatusUnauthorized, res.URL: http.StatusOK, res.URL + "/token": http.StatusOK} {
+	// answers on the dashboard cookie's host. Every response, the refusal,
+	// the logged-in page and a missing one alike, refuses to be framed.
+	for url, code := range map[string]int{URLFor(res.Port): http.StatusUnauthorized, res.URL: http.StatusOK, res.URL + "/token": http.StatusOK, res.URL + "/missing": http.StatusNotFound} {
 		resp, err := http.Get(url)
 		if err != nil {
 			t.Errorf("GET ttyd: %v", err)

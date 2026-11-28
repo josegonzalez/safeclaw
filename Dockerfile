@@ -38,7 +38,8 @@ COPY setup/ttyd/credential-file.patch /tmp/credential-file.patch
 # frame-ancestors 'none', so no other page can frame a logged-in terminal
 # and pass the user's keystrokes through. --credential-file reads the
 # credential from a file, so it is not in ttyd's command line, which every
-# local user can read, and ttyd no longer logs it at startup
+# local user can read, and ttyd no longer logs it at startup or takes one
+# too long for its /token response
 RUN git init -q /src && cd /src && \
     git fetch -q --depth 1 https://github.com/tsl0922/ttyd.git "${TTYD_COMMIT}" && \
     git checkout -q FETCH_HEAD && \
