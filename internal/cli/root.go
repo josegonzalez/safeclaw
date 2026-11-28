@@ -22,6 +22,9 @@ import (
 func Execute() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	if isUnpackProgram(os.Args[0]) {
+		return executeUnpack(ctx, os.Args[1:])
+	}
 	// Every command may read or write the config directory, which holds
 	// session history and credentials, so it is checked before any runs.
 	if err := config.SecureDir(os.Stderr); err != nil {
@@ -74,6 +77,7 @@ func NewRootCommand() *cobra.Command {
 		newSandboxCommand(),
 		newVariantCommand(),
 		newTTYDWrapperCommand(),
+		newUnpackCommand("unpack"),
 		newVersionCommand(),
 	)
 	return root

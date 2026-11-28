@@ -1,0 +1,151 @@
+
+7-Zip 26.00 (arm64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-02-12
+ 64-bit arm_v:8-A locale=C.UTF-8 Threads:10 OPEN_MAX:20480, ASM
+
+Scanning the drive for archives:
+1 file, 10240 bytes (10 KiB)
+
+Listing archive: evil.tar
+
+--
+Path = evil.tar
+Type = tar
+Physical Size = 10240
+Headers Size = 8192
+Code Page = UTF-8
+Characteristics = POSIX ASCII
+
+----------
+Path = ok.txt
+Folder = -
+Size = 5
+Packed Size = 512
+Modified = 1970-01-01 00:00:00
+Created = 
+Accessed = 
+Mode = -rw-r--r--
+User = 
+Group = 
+User ID = 0
+Group ID = 0
+Symbolic Link = 
+Hard Link = 
+Characteristics = 0 POSIX ASCII
+Comment = 
+Device Major = 
+Device Minor = 
+
+Path = ../up.txt
+Folder = -
+Size = 5
+Packed Size = 512
+Modified = 1970-01-01 00:00:00
+Created = 
+Accessed = 
+Mode = -rw-r--r--
+User = 
+Group = 
+User ID = 0
+Group ID = 0
+Symbolic Link = 
+Hard Link = 
+Characteristics = 0 POSIX ASCII
+Comment = 
+Device Major = 
+Device Minor = 
+
+Path = /abs.txt
+Folder = -
+Size = 5
+Packed Size = 512
+Modified = 1970-01-01 00:00:00
+Created = 
+Accessed = 
+Mode = -rw-r--r--
+User = 
+Group = 
+User ID = 0
+Group ID = 0
+Symbolic Link = 
+Hard Link = 
+Characteristics = 0 POSIX ASCII
+Comment = 
+Device Major = 
+Device Minor = 
+
+Path = sym
+Folder = -
+Size = 11
+Packed Size = 0
+Modified = 1970-01-01 00:00:00
+Created = 
+Accessed = 
+Mode = lrw-r--r--
+User = 
+Group = 
+User ID = 0
+Group ID = 0
+Symbolic Link = /etc/passwd
+Hard Link = 
+Characteristics = 2 POSIX ASCII
+Comment = 
+Device Major = 
+Device Minor = 
+
+Path = hard
+Folder = -
+Size = 0
+Packed Size = 0
+Modified = 1970-01-01 00:00:00
+Created = 
+Accessed = 
+Mode = -rw-r--r--
+User = 
+Group = 
+User ID = 0
+Group ID = 0
+Symbolic Link = 
+Hard Link = ok.txt
+Characteristics = 1 POSIX ASCII
+Comment = 
+Device Major = 
+Device Minor = 
+
+Path = fifo
+Folder = -
+Size = 0
+Packed Size = 0
+Modified = 1970-01-01 00:00:00
+Created = 
+Accessed = 
+Mode = prw-r--r--
+User = 
+Group = 
+User ID = 0
+Group ID = 0
+Symbolic Link = 
+Hard Link = 
+Characteristics = 6 POSIX ASCII
+Comment = 
+Device Major = 
+Device Minor = 
+
+Path = ctlname
+Folder = -
+Size = 5
+Packed Size = 512
+Modified = 1970-01-01 00:00:00
+Created = 
+Accessed = 
+Mode = -rw-r--r--
+User = 
+Group = 
+User ID = 0
+Group ID = 0
+Symbolic Link = 
+Hard Link = 
+Characteristics = 0 POSIX ASCII
+Comment = 
+Device Major = 
+Device Minor = 
+

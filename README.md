@@ -76,6 +76,21 @@ A sandbox is a headless container for opening untrusted files, such as PDFs, arc
 
 Sandboxes run the `sandbox` [image variant](#image-variants) by default, which adds document extraction tools: `pdftotext`, `pdfinfo`, and `pdftoppm` from poppler-utils, `tesseract` with English language data, `7z`, and `file`. Fetch it once with `safeclaw pull --variant sandbox` (or `safeclaw build --variant sandbox`), or pass `--variant base` to use the base image.
 
+The `sandbox` variant also has `safeclaw-unpack`, which lists and extracts untrusted archives with `7z` more safely than running `7z x` or `unzip` yourself: it refuses archives with links, special files, or unsafe paths (absolute, a drive letter, a `..` segment, or control characters), checks a size limit before, during, and after extracting, deletes any link 7z made and checks every extracted path stays inside the destination, and unpacks nested archives up to a depth limit. See [unpacking archives](docs/architecture.md#unpacking-archives).
+
+```bash
+# One entry per line: type, size, escaped path, and flags such as ENCRYPTED, LINK, and UNSAFE-PATH
+safeclaw sandbox exec --ephemeral -v ~/inbox:/in -- safeclaw-unpack list /in/report.zip
+
+# Extract into a new or empty directory; --json prints one JSON object instead
+safeclaw sandbox exec triage -- safeclaw-unpack extract /in/report.zip /sandbox/out/report
+
+# Leave out the bad entries instead of rejecting the archive, with a password from the environment
+SAFECLAW_UNPACK_PASSWORD=... safeclaw sandbox exec -e SAFECLAW_UNPACK_PASSWORD triage -- safeclaw-unpack extract --drop-bad /in/sample.7z /sandbox/out/sample
+```
+
+`safeclaw-unpack` exits 0 on success, 1 when it failed (7z failed, or the archive is corrupt or not an archive), 2 when the archive was rejected for links or unsafe paths, 3 when it needs a password (none or the wrong one was given), and 4 when it is over `--max-size` (default `512m`). The password comes from `SAFECLAW_UNPACK_PASSWORD`, or the variable `--password-env` names, and reaches 7z on its stdin rather than its arguments. `--depth` (default `3`) limits how many levels of nested archives are unpacked, each into `NAME.unpacked` next to it.
+
 ```bash
 # Create a sandbox, mounting host directories read-only (-v repeats)
 safeclaw sandbox run -s triage -v ~/inbox:/in -v ~/triage-tools:/opt/tools
@@ -188,7 +203,7 @@ safeclaw sandbox exec --ephemeral --variant base -- ls
 - yt-dlp 2026.11.23
 - [DX plugin](https://github.com/ykdojo/claude-code-tips#tip-44-install-the-dx-plugin), [custom status line](https://github.com/ykdojo/claude-code-tips#tip-0-customize-your-status-line), [shell aliases](#aliases)
 - ttyd web terminal + tmux
-- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, and file
+- In the `sandbox` variant: poppler-utils, tesseract-ocr with English, 7zip, file, and `safeclaw-unpack`
 
 ## Sensible defaults
 

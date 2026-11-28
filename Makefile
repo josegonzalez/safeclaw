@@ -16,7 +16,7 @@ test:
 	go test ./...
 
 test-integration:
-	go test -tags integration -run Integration -v ./internal/session/
+	SAFECLAW_REQUIRE_7Z=1 go test -tags integration -run Integration -v ./internal/session/ ./internal/unpack/
 
 lint:
 	golangci-lint run ./...

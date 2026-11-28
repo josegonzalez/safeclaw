@@ -1,0 +1,300 @@
+package cli
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/josegonzalez/safeclaw/internal/session"
+	"github.com/josegonzalez/safeclaw/internal/termtext"
+	"github.com/josegonzalez/safeclaw/internal/unpack"
+)
+
+const (
+	// unpackProgram is the name the sandbox image variant links to the
+	// safeclaw binary; run under it, safeclaw is `safeclaw unpack`.
+	unpackProgram = "safeclaw-unpack"
+	// unpackPasswordEnv is the default variable the password is read from.
+	unpackPasswordEnv = "SAFECLAW_UNPACK_PASSWORD"
+)
+
+const unpackHelp = `Exit codes:
+  0  success
+  1  failed: 7z failed, the archive is corrupt or not an archive, or a usage or I/O error
+  2  rejected: the archive has links, special files, or unsafe paths (or 7z made some)
+  3  needs password: the archive is encrypted and no password, or the wrong one, was given
+  4  too large: the contents are over --max-size
+
+The password is read from the SAFECLAW_UNPACK_PASSWORD environment variable, or the one --password-env names, never from the arguments, and is passed to 7z on its stdin.
+
+Each entry is printed as a tab-separated line: TYPE, SIZE, PATH, and FLAGS. TYPE is file, dir, symlink, hardlink, or special (a device, fifo, or socket). SIZE is in bytes, - when unknown. PATH is escaped as in a Go string, with backslashes doubled and tabs, newlines, and other unprintable characters written as \t, \n, \xNN, or \uNNNN. FLAGS is a comma-separated list, - for none: ENCRYPTED, LINK, SPECIAL, UNSAFE-PATH (empty, absolute, a drive letter, a .. segment, or control characters), DROPPED (left out by --drop-bad), UNPACKED (a nested archive unpacked into PATH.unpacked), and DEPTH-LIMIT (a nested archive left packed). --json prints one JSON object instead, with the paths unescaped.`
+
+// newUnpackCommand builds `safeclaw unpack`, named use: "unpack" under
+// safeclaw, or safeclaw-unpack when run through that link.
+func newUnpackCommand(use string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   use,
+		Short: "List or extract an untrusted archive with 7z, refusing links and unsafe paths",
+		Long: "List or extract an untrusted archive with 7z, refusing links and unsafe paths. Run it inside a sandbox: the sandbox image variant has 7z and links this command as " + unpackProgram + ".\n\n" +
+			unpackHelp,
+		Example: `  safeclaw sandbox exec --ephemeral -v ~/Downloads:/in -- safeclaw-unpack list /in/report.zip
+  safeclaw-unpack extract --json /sandbox/in/1-report.zip /sandbox/out/report
+  SAFECLAW_UNPACK_PASSWORD=infected safeclaw-unpack extract --drop-bad sample.7z out`,
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	cmd.AddCommand(newUnpackListCommand(), newUnpackExtractCommand())
+	return cmd
+}
+
+type unpackFlags struct {
+	json        bool
+	passwordEnv string
+}
+
+func (f *unpackFlags) register(cmd *cobra.Command) {
+	cmd.Flags().BoolVar(&f.json, "json", false, "print one JSON object instead of tab-separated lines")
+	cmd.Flags().StringVar(&f.passwordEnv, "password-env", unpackPasswordEnv, "environment variable to read the password from")
+}
+
+// password reads the password from its variable and removes the variable
+// from the environment, so 7z doesn't inherit it. An empty or unset
+// variable means no password.
+func (f *unpackFlags) password() (*string, error) {
+	pw, ok := os.LookupEnv(f.passwordEnv)
+	if !ok || pw == "" {
+		return nil, nil
+	}
+	_ = os.Unsetenv(f.passwordEnv)
+	if strings.ContainsAny(pw, "\r\n") {
+		return nil, fmt.Errorf("the password in %s has a line break, which 7z can't read", f.passwordEnv)
+	}
+	return &pw, nil
+}
+
+func newUnpackListCommand() *cobra.Command {
+	var f unpackFlags
+	cmd := &cobra.Command{
+		Use:   "list ARCHIVE",
+		Short: "List an archive's entries with their type, size, path, and flags",
+		Long:  "List an archive's entries with their type, size, path, and flags, from 7z's listing. Nothing is extracted, so nested archives are not listed.\n\n" + unpackHelp,
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			pw, err := f.password()
+			if err != nil {
+				return unpackFailure(cmd, f.json, &unpack.Error{Kind: unpack.Failed, Msg: err.Error()}, nil)
+			}
+			z, err := unpack.Find()
+			if err != nil {
+				return unpackFailure(cmd, f.json, &unpack.Error{Kind: unpack.Failed, Msg: err.Error()}, nil)
+			}
+			l, err := unpack.List(cmd.Context(), z, args[0], pw)
+			if err != nil {
+				return unpackFailure(cmd, f.json, err, nil)
+			}
+			if f.json {
+				return writeUnpackJSON(out, unpackJSON{Status: "ok", Type: l.Type, Entries: jsonEntries(l.Entries)})
+			}
+			return writeEntries(out, l.Entries)
+		},
+	}
+	f.register(cmd)
+	return cmd
+}
+
+func newUnpackExtractCommand() *cobra.Command {
+	var f unpackFlags
+	var maxSize string
+	var o unpack.Options
+	cmd := &cobra.Command{
+		Use:   "extract ARCHIVE DEST",
+		Short: "Extract an archive into DEST, a new or empty directory, refusing links and unsafe paths",
+		Long: "Extract an archive into DEST, which must be missing or an empty directory, and not a symbolic link.\n\n" +
+			"The archive is listed first. One with links, special files, or unsafe paths is rejected, or with --drop-bad those entries are left out. One whose listed size is over --max-size is refused before anything is extracted, and the size is checked again while 7z extracts and afterwards, for formats that don't record sizes. " +
+			"After extracting, any link or special file 7z made is deleted (which rejects the archive unless --drop-bad is given, since the listing didn't show it), setuid and setgid bits are cleared, and every path must resolve inside DEST. " +
+			"Each extracted file that starts like a zip, 7z, rar, tar, gzip, bzip2, xz, or zstd archive is then unpacked the same way into PATH.unpacked next to it (PATH.unpacked-2 and so on when that name is taken), up to --depth levels; the archive itself is kept. A file 7z can't open as an archive is left as it is. " +
+			"On any failure DEST is emptied, without following links. Each path in DEST is printed when it succeeds, and the entries that got it rejected when it is rejected.\n\n" + unpackHelp,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			out := cmd.OutOrStdout()
+			n, err := session.ParseSize(maxSize)
+			if err != nil || n <= 0 {
+				return unpackFailure(cmd, f.json, &unpack.Error{Kind: unpack.Failed, Msg: fmt.Sprintf("--max-size: invalid size %q: want a positive number of bytes with an optional k, m, g, or t suffix", maxSize)}, nil)
+			}
+			o.MaxSize = n
+			if o.Depth < 0 {
+				return unpackFailure(cmd, f.json, &unpack.Error{Kind: unpack.Failed, Msg: "--depth can't be negative"}, nil)
+			}
+			if o.Password, err = f.password(); err != nil {
+				return unpackFailure(cmd, f.json, &unpack.Error{Kind: unpack.Failed, Msg: err.Error()}, nil)
+			}
+			z, err := unpack.Find()
+			if err != nil {
+				return unpackFailure(cmd, f.json, &unpack.Error{Kind: unpack.Failed, Msg: err.Error()}, nil)
+			}
+			o.Runner = z
+			res, err := unpack.Extract(cmd.Context(), args[0], args[1], o)
+			if err != nil {
+				var dropped []unpack.Entry
+				if res != nil {
+					dropped = res.Dropped
+				}
+				return unpackFailure(cmd, f.json, err, dropped)
+			}
+			if f.json {
+				return writeUnpackJSON(out, unpackJSON{Status: "ok", Entries: jsonEntries(res.Entries), Dropped: jsonEntries(res.Dropped)})
+			}
+			return writeEntries(out, append(res.Entries, res.Dropped...))
+		},
+	}
+	f.register(cmd)
+	cmd.Flags().StringVar(&maxSize, "max-size", "512m", "limit on the total size of what is extracted, nested archives and the archives they came from included (k, m, g, or t suffix)")
+	cmd.Flags().IntVar(&o.Depth, "depth", unpack.DefaultDepth, "levels of nested archives to unpack, 0 for none")
+	cmd.Flags().BoolVar(&o.DropBad, "drop-bad", false, "leave out links, special files, and entries with unsafe paths instead of rejecting the archive")
+	return cmd
+}
+
+// unpackJSON is the --json output.
+type unpackJSON struct {
+	// Status is "ok" or the failure kind, such as "rejected".
+	Status string `json:"status"`
+	// Code is the exit code.
+	Code int `json:"code"`
+	// Error says what went wrong.
+	Error string `json:"error,omitempty"`
+	// Archive is the nested archive the failure happened in, relative to
+	// DEST.
+	Archive string `json:"archive,omitempty"`
+	// Type is the archive's format, for list.
+	Type string `json:"type,omitempty"`
+	// Entries are the archive's entries for list, and the paths in DEST
+	// for extract.
+	Entries []entryJSON `json:"entries,omitempty"`
+	// Rejected are the entries that got the archive rejected.
+	Rejected []entryJSON `json:"rejected,omitempty"`
+	// Dropped are the entries left out by --drop-bad.
+	Dropped []entryJSON `json:"dropped,omitempty"`
+}
+
+type entryJSON struct {
+	Type string `json:"type"`
+	// Size is null when unknown.
+	Size     *int64   `json:"size"`
+	Path     string   `json:"path"`
+	Flags    []string `json:"flags"`
+	Link     string   `json:"link,omitempty"`
+	Unpacked string   `json:"unpacked,omitempty"`
+}
+
+func jsonEntries(entries []unpack.Entry) []entryJSON {
+	out := make([]entryJSON, 0, len(entries))
+	for _, e := range entries {
+		j := entryJSON{Type: e.Type, Path: e.Path, Flags: e.Flags(), Link: e.Link, Unpacked: e.Unpacked}
+		if j.Flags == nil {
+			j.Flags = []string{}
+		}
+		if e.Size >= 0 {
+			size := e.Size
+			j.Size = &size
+		}
+		out = append(out, j)
+	}
+	return out
+}
+
+func writeUnpackJSON(w io.Writer, v unpackJSON) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	return enc.Encode(v)
+}
+
+// writeEntries writes entries as TYPE, SIZE, PATH, FLAGS lines.
+func writeEntries(w io.Writer, entries []unpack.Entry) error {
+	var b strings.Builder
+	for _, e := range entries {
+		size := "-"
+		if e.Size >= 0 {
+			size = strconv.FormatInt(e.Size, 10)
+		}
+		flags := "-"
+		if f := e.Flags(); len(f) > 0 {
+			flags = strings.Join(f, ",")
+		}
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", e.Type, size, escapeField(e.Path), flags)
+	}
+	_, err := io.WriteString(w, b.String())
+	return err
+}
+
+// escapeField escapes a path for one tab-separated field: backslashes are
+// doubled, then everything termtext.Escape escapes, then tabs and newlines,
+// so the result is unambiguous and has no control characters.
+func escapeField(s string) string {
+	s = termtext.Escape(strings.ReplaceAll(s, `\`, `\\`))
+	return strings.NewReplacer("\t", `\t`, "\n", `\n`).Replace(s)
+}
+
+// unpackFailure prints err, and the entries that got the archive rejected,
+// and returns the exit code for its kind.
+func unpackFailure(cmd *cobra.Command, asJSON bool, err error, dropped []unpack.Entry) error {
+	kind := unpack.KindOf(err)
+	var ue *unpack.Error
+	var bad []unpack.Entry
+	archive := ""
+	msg := err.Error()
+	if errors.As(err, &ue) {
+		bad, archive = ue.Bad, ue.Archive
+	}
+	if asJSON {
+		v := unpackJSON{Status: kind.String(), Code: int(kind), Error: msg, Archive: archive, Rejected: jsonEntries(bad), Dropped: jsonEntries(dropped)}
+		if len(bad) == 0 {
+			v.Rejected = nil
+		}
+		if len(dropped) == 0 {
+			v.Dropped = nil
+		}
+		if werr := writeUnpackJSON(cmd.OutOrStdout(), v); werr != nil {
+			return werr
+		}
+	} else {
+		if werr := writeEntries(cmd.OutOrStdout(), bad); werr != nil {
+			return werr
+		}
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "%s: %s\n", cmd.Root().Name(), termtext.Escape(msg))
+	}
+	return exitCodeError{int(kind)}
+}
+
+// isUnpackProgram reports whether safeclaw was run as safeclaw-unpack,
+// argv[0] being its name or path.
+func isUnpackProgram(arg0 string) bool {
+	return filepath.Base(arg0) == unpackProgram
+}
+
+// executeUnpack runs safeclaw-unpack: `safeclaw unpack` as its own root
+// command. It needs no config directory, so unlike Execute it doesn't
+// check one.
+func executeUnpack(ctx context.Context, args []string) int {
+	cmd := newUnpackCommand(unpackProgram)
+	cmd.CompletionOptions.DisableDefaultCmd = true
+	cmd.SetArgs(args)
+	if err := cmd.ExecuteContext(ctx); err != nil {
+		var exit exitCodeError
+		if errors.As(err, &exit) {
+			return exit.code
+		}
+		printError(os.Stderr, err)
+		return int(unpack.Failed)
+	}
+	return 0
+}
