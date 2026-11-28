@@ -636,6 +636,15 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 		return nil, err
 	}
 	container := config.ContainerName(name)
+	// A volume that would expose the config directory is refused before
+	// anything is locked, checked, or changed.
+	if opts.Volume != "" {
+		_, warnings, err := CheckVolume(opts.Volume)
+		if err != nil {
+			return nil, err
+		}
+		m.warnVolume(warnings)
+	}
 
 	release, err := m.ensureLock(ctx, name)
 	if err != nil {
@@ -803,13 +812,21 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 			return nil, fmt.Errorf("session %q %w: run `safeclaw net on %s` before changing its volume, variant, secrets, IPC namespace, auto memory, or history", name, ErrOffline, name)
 		}
 		oldVolumes := existing.BindSpecs(config.ProjectsMount)
+		// Check every volume before anything is removed. A new one was
+		// checked above; a kept one exposing the config directory, mounted
+		// before such mounts were refused, is refused too, so the new
+		// container doesn't get it.
 		if opts.Volume == "" {
 			volumes = oldVolumes
-		}
-		// Check every volume before anything is removed.
-		for _, v := range volumes {
-			if _, err := ExpandVolume(v); err != nil {
-				return nil, err
+			for _, v := range volumes {
+				_, warnings, err := CheckVolume(v)
+				if errors.Is(err, ErrUnsafeVolume) {
+					return nil, fmt.Errorf("session %q can't be recreated with its mount: %w. Run it with -v and another host path to replace the mount, or remove it with `safeclaw rm %s`", name, err, name)
+				}
+				if err != nil {
+					return nil, err
+				}
+				m.warnVolume(warnings)
 			}
 		}
 		switch {
@@ -890,6 +907,13 @@ func (m *Manager) Ensure(ctx context.Context, opts Options) (*Result, error) {
 	}
 	if existing != nil && !hardened(*existing) {
 		m.printf("Warning: session %s keeps docker's default capabilities and can gain privileges, because it was created before sessions dropped them. Recreate it, for example with -v or `safeclaw rm`, to drop them\n", name)
+	}
+	if existing != nil {
+		for _, v := range existing.BindSpecs(config.ProjectsMount) {
+			if _, _, err := CheckVolume(v); errors.Is(err, ErrUnsafeVolume) {
+				m.printf("Warning: session %s keeps a mount that was created before such mounts were refused: %v. Run it with -v and another host path to replace the mount, or remove it with `safeclaw rm %s`\n", name, err, name)
+			}
+		}
 	}
 
 	if port == 0 {

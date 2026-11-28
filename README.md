@@ -47,6 +47,15 @@ safeclaw run -s research    # safeclaw-research on the next available port
 
 On first run, `safeclaw run` prompts you to set up authentication tokens, offering to sign in to Claude Code for you. It then starts a web terminal at http://[::1]:7681 and opens it in your browser. The terminal needs a credential, made anew each time the session starts or is run again, so the printed URL carries it, like `http://safeclaw:PASSWORD@[::1]:7681`; the dashboard adds it for you. `safeclaw url NAME` prints that URL again without restarting anything. When a dashboard is running, `run` and `safeclaw url NAME --open` open its terminal page instead, which keeps the credential out of the process list and your browser history; otherwise they open the URL without the credential, so the browser asks you to log in as `safeclaw` with the password in the printed URL. Sessions need an image whose ttyd accepts `[::1]` URLs and reads its credential from a file rather than its command line, which other local users can read on a Linux host: `run` refuses to create one from an older image, including every published image up to v0.2.0, and asks you to update it with `safeclaw pull` or `safeclaw build`. A session made from such an image by an earlier version is recreated from the updated image the next time you run it, keeping its port, mounts, and history.
 
+`-v` takes docker's `host_path:container_path[:options]`, with a leading `~` or `./` expanded. Keep these in mind when mounting:
+
+- A host path that is the safeclaw config directory (`~/.config/safeclaw`, honoring `XDG_CONFIG_HOME`), contains it, like `~` or `~/.config`, or is inside it is refused, after resolving symlinks. It holds every session's terminal credential, the dashboard's API token, and secrets kept in files. Mount the project directory instead.
+- A host path that is or contains the docker socket, or another container runtime's socket, is mounted with a warning, since it gives the session control of docker and so of the host.
+- A read-write mount lets the agent change anything in the project, including `.git/config` and `.git/hooks`. Git on the host reads that config and runs those hooks the next time you run git in the directory there, for example through `core.fsmonitor`, `core.hooksPath`, or a `pre-commit` hook. Check them before running git on the host in a directory a session could write, or mount it `:ro`.
+- The `z` and `Z` options make docker relabel the host directory for SELinux, on hosts that enforce it, and the label stays after the session is gone. `Z` gives it a label only this container can use, so other containers and host services can lose access to it. Don't use them on a directory such as your home or a system path.
+
+See [volume mounts](docs/architecture.md#volume-mounts).
+
 ## Dashboard
 
 ```bash

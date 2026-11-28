@@ -433,7 +433,7 @@ func TestCookieAloneOpensOnlyPages(t *testing.T) {
 	h = newAuthServer(t, f)
 	browser = browserLogin(t, h)
 	cookieOnly := map[string]string{"Cookie": browser["Cookie"]}
-	create := `{"name":"v2","volume":"/:/host"}`
+	create := `{"name":"v2","volume":"/srv/p:/host"}`
 	if rec := send(h, "POST", "http://127.0.0.1:7680/api/create", create, cookieOnly); rec.Code != http.StatusUnauthorized || len(f.ensured) != 0 {
 		t.Fatalf("cookie-only create = %d, ensured %v", rec.Code, f.ensured)
 	}
@@ -443,7 +443,7 @@ func TestCookieAloneOpensOnlyPages(t *testing.T) {
 	if rec := send(h, "GET", "http://127.0.0.1:7680/api/sessions", "", browser); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"name":"safeclaw-work"`) {
 		t.Errorf("sessions with the secret = %d %s", rec.Code, rec.Body)
 	}
-	if rec := send(h, "POST", "http://127.0.0.1:7680/api/create", create, browser); rec.Code != http.StatusOK || len(f.ensured) != 1 || f.ensured[0].Volume != "/:/host" {
+	if rec := send(h, "POST", "http://127.0.0.1:7680/api/create", create, browser); rec.Code != http.StatusOK || len(f.ensured) != 1 || f.ensured[0].Volume != "/srv/p:/host" {
 		t.Errorf("create with the secret = %d %s, ensured %v", rec.Code, rec.Body, f.ensured)
 	}
 }

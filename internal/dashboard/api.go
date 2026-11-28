@@ -61,6 +61,9 @@ type apiResult struct {
 	Success bool   `json:"success"`
 	URL     string `json:"url,omitempty"`
 	Error   string `json:"error,omitempty"`
+	// Warnings are set by create for a volume that exposes a container
+	// runtime socket.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 type apiRequest struct {
@@ -228,6 +231,11 @@ func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusConflict, apiResult{Error: fmt.Sprintf("session %q already exists: set recreate to start or replace it", name)})
 		return
 	}
+	warnings, err := checkVolume(req.Volume)
+	if err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, apiResult{Error: err.Error()})
+		return
+	}
 	res, err := s.sessions.Ensure(r.Context(), session.Options{
 		Name:    name,
 		Volume:  req.Volume,
@@ -240,7 +248,7 @@ func (s *Server) apiCreate(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, errStatus(err, http.StatusOK), apiResult{Error: err.Error()})
 		return
 	}
-	writeJSON(w, apiResult{Success: true, URL: res.URL})
+	writeJSON(w, apiResult{Success: true, URL: res.URL, Warnings: warnings})
 }
 
 func (s *Server) apiNetOff(w http.ResponseWriter, r *http.Request) {

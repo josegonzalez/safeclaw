@@ -437,6 +437,14 @@ dialog.modal::backdrop {
 .modal-hint.error {
     color: #a07070;
 }
+.modal-hint.warning {
+    color: #a09060;
+}
+.modal-error a {
+    color: #d4a55a;
+    text-decoration: none;
+}
+.modal-error a:hover { text-decoration: underline; }
 .modal-field:has(.modal-hint.error) input[type="text"] {
     border-color: #4a3030;
 }

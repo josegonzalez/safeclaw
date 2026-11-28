@@ -570,6 +570,8 @@ func (m *Manager) createSandbox(ctx context.Context, container string, opts Sand
 	}
 	for _, volume := range opts.volumes() {
 		b, _ := ReadOnlyVolume(volume)
+		_, warnings, _ := CheckVolume(volume)
+		m.warnVolume(warnings)
 		m.printf("Mounting volume recursively read-only: %s:%s\n", b.Source, b.Target)
 	}
 	_, err = m.Docker.Run(ctx, args...)
@@ -585,8 +587,8 @@ type ReadOnlyBind struct {
 	Consistency string
 }
 
-// ReadOnlyVolume expands a host:container[:options] volume spec like
-// ExpandVolume and returns the read-only bind a sandbox gets for it.
+// ReadOnlyVolume expands and checks a host:container[:options] volume spec
+// like CheckVolume and returns the read-only bind a sandbox gets for it.
 //
 // ro, readonly, rw, and rprivate are accepted and change nothing, and
 // consistent, cached, delegated, and default are kept. Options that a
@@ -596,7 +598,7 @@ type ReadOnlyBind struct {
 // volumes. The host path must be absolute after expansion, since a bare
 // name would be a named volume.
 func ReadOnlyVolume(v string) (ReadOnlyBind, error) {
-	expanded, err := ExpandVolume(v)
+	expanded, _, err := CheckVolume(v)
 	if err != nil {
 		return ReadOnlyBind{}, err
 	}

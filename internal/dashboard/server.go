@@ -702,9 +702,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusUnprocessableEntity, "create-error", err.Error())
 		return
 	}
+	volume := strings.TrimSpace(r.PostForm.Get("volume"))
+	warnings, err := checkVolume(volume)
+	if err != nil {
+		s.render(w, http.StatusUnprocessableEntity, "create-error", err.Error())
+		return
+	}
 	res, err := s.sessions.Ensure(r.Context(), session.Options{
 		Name:    name,
-		Volume:  strings.TrimSpace(r.PostForm.Get("volume")),
+		Volume:  volume,
 		Variant: strings.TrimSpace(r.PostForm.Get("variant")),
 		Secrets: &set,
 		Query:   strings.TrimSpace(r.PostForm.Get("query")),
@@ -714,12 +720,36 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusUnprocessableEntity, "create-error", err.Error())
 		return
 	}
+	// The dialog stays open on the warnings, with a link to the terminal,
+	// rather than closing on its own and opening a tab before they are
+	// read.
+	if len(warnings) > 0 {
+		w.Header().Set("HX-Trigger", `{"sessions":true}`)
+		s.render(w, http.StatusOK, "create-warning", map[string]any{
+			"Name":     res.Name,
+			"URL":      terminalPath(res.Name),
+			"Warnings": warnings,
+		})
+		return
+	}
 	trigger, _ := json.Marshal(map[string]any{
 		"session-created": createResult{URL: terminalPath(res.Name), OpenTab: r.PostForm.Get("open_tab") != ""},
 		"sessions":        true,
 	})
 	w.Header().Set("HX-Trigger", string(trigger))
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// checkVolume checks a create request's volume before the session is
+// created, refusing one that would expose safeclaw's config directory and
+// returning the warnings for one that exposes a container runtime socket.
+// Ensure refuses the same volumes, but its warnings only reach its output.
+func checkVolume(volume string) ([]string, error) {
+	if volume == "" {
+		return nil, nil
+	}
+	_, warnings, err := session.CheckVolume(volume)
+	return warnings, err
 }
 
 // formSecrets returns the secret set the new session form picks: "all" (or
