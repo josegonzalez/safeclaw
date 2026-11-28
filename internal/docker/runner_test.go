@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -23,6 +24,23 @@ func TestErrorEscapesControlCharacters(t *testing.T) {
 	e = &Error{Args: []string{"exec"}, Err: errors.New("exit\x1b[2J")}
 	if got := e.Error(); got != `docker exec: exit\x1b[2J` {
 		t.Errorf("Error() without stderr = %q", got)
+	}
+}
+
+func TestIsNameConflict(t *testing.T) {
+	conflict := &Error{Args: []string{"run"}, Stderr: `docker: Error response from daemon: Conflict. The container name "/safeclaw-x" is already in use by container "0123abcd". You have to remove (or rename) that container to be able to reuse that name.`, Err: errors.New("exit status 125")}
+	if !IsNameConflict(conflict) || !IsNameConflict(fmt.Errorf("create: %w", conflict)) {
+		t.Error("a name conflict was not recognized")
+	}
+	for _, err := range []error{
+		nil,
+		errors.New("is already in use by container"),
+		&Error{Args: []string{"run"}, Stderr: "Error: No such object", Err: errors.New("exit status 1")},
+		&Error{Args: []string{"run"}, Stderr: "Bind for 127.0.0.1:7681 failed: port is already allocated", Err: errors.New("exit status 125")},
+	} {
+		if IsNameConflict(err) {
+			t.Errorf("IsNameConflict(%v) = true", err)
+		}
 	}
 }
 

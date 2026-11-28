@@ -104,21 +104,45 @@ func (f sandboxFlags) options(changed func(name string) bool) session.SandboxOpt
 	return opts
 }
 
+// sandboxRunArgs refuses --name-prefix with -s or without --rm.
+func sandboxRunArgs(cmd *cobra.Command, _ []string) error {
+	if !cmd.Flags().Changed("name-prefix") {
+		return nil
+	}
+	if cmd.Flags().Changed("session") {
+		return errors.New("-s and --name-prefix can't be used together: -s names the sandbox, --name-prefix has a name picked")
+	}
+	if rm, _ := cmd.Flags().GetBool("rm"); !rm {
+		return errors.New("--name-prefix can only be used with --rm")
+	}
+	if p, _ := cmd.Flags().GetString("name-prefix"); p == "" {
+		return errors.New("--name-prefix can't be empty")
+	}
+	return nil
+}
+
 func newSandboxRunCommand() *cobra.Command {
 	var f sandboxFlags
+	var namePrefix string
 	cmd := &cobra.Command{
-		Use:   "run [-s NAME] [--rm]",
+		Use:   "run [-s NAME] [--rm [--name-prefix PREFIX]]",
 		Short: "Create or start a sandbox",
 		Long: "Create or start a sandbox. -s is required unless --rm is set.\n\n" +
 			"/sandbox is a tmpfs of --disk bytes: writes past it fail, its pages count toward --memory, and it is emptied when the sandbox stops.\n\n" +
 			"With --rm, a new one-off sandbox is created and removed when it stops. " +
 			"Without -s it gets a random name. Its name is the only thing printed to stdout, and an existing name is refused.\n\n" +
+			"With --rm --name-prefix PREFIX, it is named PREFIX-YYYYMMDD-HHMMSS in UTC, so names sort by creation time, " +
+			"with -2 to -9 added when that name is taken. The prefix follows the session name rules, and can't be used with -s.\n\n" +
 			"With --verify, the sandbox gets the checks of `safeclaw sandbox verify` once it has started. If any fails, the report is printed " +
 			"to stderr and it exits non-zero naming the failed checks. A sandbox this run created or recreated is then removed, " +
 			"including when safeclaw is interrupted before the checks end; one that already existed is left as it was.",
-		Args: cobra.NoArgs,
+		Example: `  safeclaw sandbox run -s triage -v ~/inbox:/in
+  name=$(safeclaw sandbox run --rm -v ~/inbox:/in)
+  name=$(safeclaw sandbox run --rm --name-prefix triage)   # triage-20261128-110940`,
+		Args: cobra.MatchAll(cobra.NoArgs, sandboxRunArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			opts := f.options(func(name string) bool { return cmd.Flags().Changed(name) })
+			opts.NamePrefix = namePrefix
 			var err error
 			if opts.Name, err = resolveName(cmd, opts.Name); err != nil {
 				return err
@@ -141,6 +165,7 @@ func newSandboxRunCommand() *cobra.Command {
 	}
 	f.register(cmd, "sandbox name (required without --rm)", " (recreates an existing sandbox)")
 	cmd.Flags().BoolVar(&f.remove, "rm", false, "create a one-off sandbox that is removed when it stops")
+	cmd.Flags().StringVar(&namePrefix, "name-prefix", "", "with --rm, name the sandbox PREFIX-YYYYMMDD-HHMMSS in UTC, adding -2 to -9 when that name is taken")
 	cmd.Flags().BoolVar(&f.verify, "verify", false, "run the sandbox verify checks once it has started, and remove it if a check fails and this run created it")
 	return cmd
 }

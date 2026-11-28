@@ -276,3 +276,13 @@ func IsNotFound(err error) bool {
 	s := strings.ToLower(de.Stderr)
 	return strings.Contains(s, "no such") || strings.Contains(s, "not found")
 }
+
+// IsNameConflict reports whether err came from docker refusing to create a
+// container because another container already has its name.
+func IsNameConflict(err error) bool {
+	var de *Error
+	if !errors.As(err, &de) {
+		return false
+	}
+	return strings.Contains(strings.ToLower(de.Stderr), "is already in use by container")
+}

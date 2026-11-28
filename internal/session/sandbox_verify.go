@@ -70,10 +70,12 @@ func (e *SandboxVerifyError) Unwrap() error { return e.Err }
 
 // createSandboxVerified creates a sandbox to be verified. docker run is not
 // stopped partway when ctx is done, so the sandbox exists or not by the
-// time it returns, and when ctx was done meanwhile it is removed.
+// time it returns, and when ctx was done meanwhile it is removed. A name
+// docker refused because another container has it is returned as is, since
+// that container isn't this run's to remove.
 func (m *Manager) createSandboxVerified(ctx context.Context, name, container string, opts SandboxOptions) error {
 	err := m.createSandbox(context.WithoutCancel(ctx), container, opts)
-	if ctx.Err() == nil {
+	if ctx.Err() == nil || docker.IsNameConflict(err) {
 		return err
 	}
 	return m.verifyFailed(ctx, name, nil, ctx.Err(), false)

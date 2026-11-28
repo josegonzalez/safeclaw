@@ -204,6 +204,10 @@ type SandboxOptions struct {
 	// is optional, a random one is picked without it, and an existing
 	// container with the name is refused.
 	Remove bool
+	// NamePrefix names a one-off sandbox from EnsureSandbox with the prefix,
+	// the UTC time and, when that name is taken, a suffix (see
+	// ResolveNamePrefix and prefixedName). It needs Remove and no Name.
+	NamePrefix string
 	// Verify runs the `sandbox verify` checks once the sandbox has
 	// started. When any fails, or the checks can't finish, a sandbox
 	// EnsureSandbox created or recreated is removed, one that existed
@@ -335,6 +339,9 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if err := opts.resolveNamePrefix(); err != nil {
+		return nil, err
+	}
 	if opts.Name == "" && !opts.Remove {
 		return nil, ErrSandboxName
 	}
@@ -354,15 +361,11 @@ func (m *Manager) EnsureSandbox(ctx context.Context, opts SandboxOptions) (*Resu
 		if opts.signatures, err = m.signaturesMount(); err != nil {
 			return nil, err
 		}
-		name, err := m.pickName(ctx, opts.Name)
+		name, err := m.createOneOff(ctx, opts)
 		if err != nil {
 			return nil, err
 		}
 		container := config.ContainerName(name)
-		m.printf("Creating one-off sandbox: %s\n", container)
-		if err := m.newSandbox(ctx, name, container, opts); err != nil {
-			return nil, err
-		}
 		if opts.Verify {
 			if err := m.verifyStarted(ctx, name, true); err != nil {
 				return nil, err
@@ -488,6 +491,9 @@ func (m *Manager) PrepareEphemeral(ctx context.Context, opts SandboxOptions, exe
 
 	if len(cmd) == 0 {
 		return nil, "", ErrNoCommand
+	}
+	if opts.NamePrefix != "" {
+		return nil, "", errors.New("a name prefix can't be used for an ephemeral command")
 	}
 	if err := opts.validate(); err != nil {
 		return nil, "", err

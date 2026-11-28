@@ -232,7 +232,7 @@ Each `-v` is mounted recursively read-only: any filesystem mounted below the hos
 
 `/sandbox` is a tmpfs of `--disk` bytes (default `1g`), so an extractor writing past it fails instead of filling the host's disk. Its files count toward `--memory` (default `2g`), so raise both together, and they are lost when the sandbox stops. See [sandbox disk](docs/architecture.md#sandbox-disk).
 
-A one-off sandbox lives for exactly one job, so jobs never share files, locks, or cleanup. Without `-s` it gets a random name, and a name that already exists is refused.
+A one-off sandbox lives for exactly one job, so jobs never share files, locks, or cleanup. Without `-s` it gets a random name, and a name that already exists is refused. `sandbox run --rm --name-prefix PREFIX` names it `PREFIX-YYYYMMDD-HHMMSS` in UTC instead, so names sort by creation time and can double as the id of a job's files, adding `-2` to `-9` when that name is taken rather than failing.
 
 ```bash
 # Run one command in a new sandbox that is removed when the command exits
@@ -246,6 +246,9 @@ name=$(safeclaw sandbox run --rm -v ~/inbox:/in)
 safeclaw sandbox exec "$name" -- unzip -d /sandbox/out /in/report.zip
 safeclaw sandbox cp-out "$name" /sandbox/out ./results --only '*.pdf'
 safeclaw sandbox stop "$name"
+
+# Or name it by when it was made, for example triage-20261128-110940
+name=$(safeclaw sandbox run --rm --name-prefix triage -v ~/inbox:/in)
 
 # Clean up whether or not it is still there; prints on stderr when there was nothing to do
 safeclaw sandbox stop --missing-ok "$name"
@@ -453,7 +456,7 @@ The choice is remembered with the container, and changing it recreates the conta
 | `safeclaw net off NAME` | Save a session's networks and disconnect it from them. `--owner` names the hold and `--reason` says why. |
 | `safeclaw net on NAME` | Release the hold for `--owner` (or the unnamed hold) and reconnect the session once none remain. `--force` releases every hold. |
 | `safeclaw sandbox run -s NAME` | Create or start a headless sandbox for untrusted files. `-v` mounts a host directory recursively read-only and can be repeated, `--variant` picks the image variant, `--memory`, `--pids-limit`, `--cpus`, and `--disk` (the size of `/sandbox`) set limits. `--verify` runs the `sandbox verify` checks once it has started, exiting non-zero and removing it if this run created it and a check fails. |
-| `safeclaw sandbox run --rm [-s NAME]` | Create a one-off sandbox that is removed when it stops, and print its name |
+| `safeclaw sandbox run --rm [-s NAME \| --name-prefix PREFIX]` | Create a one-off sandbox that is removed when it stops, and print its name. `--name-prefix` names it `PREFIX-YYYYMMDD-HHMMSS` in UTC, adding `-2` to `-9` when that name is taken. |
 | `safeclaw sandbox exec NAME -- CMD` | Run a command in a sandbox as the sandbox user (`-i` for stdin, `-t` for a TTY, `--escape-controls` to escape control characters in its output, `--timeout DUR` to stop it after DUR and exit 124, `-e NAME=VALUE` or `-e NAME` to set an environment variable for the command without putting the value in docker's arguments, `--env-if-set NAME` to pass NAME only when it is set) |
 | `safeclaw sandbox exec --ephemeral [-s NAME] -- CMD` | Run a command in a new one-off sandbox that is removed when it exits, returning its exit code. Takes the same `-v`, `--variant`, and limit flags as `sandbox run`, and the same `--timeout` and `-e` as `sandbox exec`. With `--verify`, the command only starts once the sandbox has passed the `sandbox verify` checks, and a sandbox that fails one is removed without running it. |
 | `safeclaw sandbox cp-in NAME FILE...` | Copy regular host files into a running sandbox as `N-name`, owned by the sandbox user, refusing links and other file types. `--to` picks a directory under `/sandbox` (default `/sandbox/in`). |

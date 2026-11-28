@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -418,6 +419,77 @@ func TestIntegrationSandboxRemove(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitGone(t, d, res.Container)
+}
+
+// TestIntegrationSandboxNamePrefix starts one-off sandboxes with the same
+// name prefix in the same second, two of them at once, and checks that
+// each gets its own name: the timestamped one, then suffixes.
+func TestIntegrationSandboxNamePrefix(t *testing.T) {
+	d := docker.New()
+	ctx := context.Background()
+	if id, err := d.ImageID(ctx, config.ImageName); err != nil || id == "" {
+		t.Skip("safeclaw image not built; run `safeclaw build` first")
+	}
+	now := time.Now()
+	prefix := fmt.Sprintf("itest-%d", os.Getpid())
+	newManager := func() *Manager {
+		dir := t.TempDir()
+		return &Manager{
+			Docker:      d,
+			Secrets:     secrets.FileStore{Dir: filepath.Join(dir, ".secrets")},
+			SessionsDir: filepath.Join(dir, "sessions"),
+			TTYDDir:     filepath.Join(dir, "ttyd"),
+			NetworkDir:  filepath.Join(dir, "network"),
+			Out:         os.Stdout,
+			Now:         func() time.Time { return now },
+		}
+	}
+	opts := SandboxOptions{Remove: true, NamePrefix: prefix, Variant: config.BaseVariant}
+	base := prefixedName(prefix, now, 0)
+
+	// Separate managers, so only docker keeps the two apart.
+	results := make([]*Result, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Go(func() { results[i], errs[i] = newManager().EnsureSandbox(ctx, opts) })
+	}
+	wg.Wait()
+	var names []string
+	for i, res := range results {
+		if errs[i] != nil {
+			t.Error(errs[i])
+			continue
+		}
+		t.Cleanup(func() { _ = d.Remove(ctx, res.Container, true) })
+		names = append(names, res.Name)
+	}
+	if t.Failed() {
+		return
+	}
+	slices.Sort(names)
+	if want := []string{base, base + "-2"}; !slices.Equal(names, want) {
+		t.Errorf("names = %q, want %q", names, want)
+	}
+
+	res, err := newManager().EnsureSandbox(ctx, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Remove(ctx, res.Container, true) })
+	if res.Name != base+"-3" {
+		t.Errorf("third name = %q, want %q", res.Name, base+"-3")
+	}
+	s, err := newManager().Get(ctx, res.Name)
+	if err != nil || !s.IsOneOff() {
+		t.Fatalf("get = %+v, %v", s, err)
+	}
+	for _, name := range append(names, res.Name) {
+		if err := newManager().Stop(ctx, name); err != nil {
+			t.Error(err)
+		}
+		waitGone(t, d, config.ContainerName(name))
+	}
 }
 
 // TestIntegrationSandboxEphemeral runs `sandbox exec --ephemeral`'s argv
